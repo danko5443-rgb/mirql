@@ -1,0 +1,26 @@
+{
+  "name": "@ahmed-3m/mirql",
+  "version": "0.1.0",
+  "private": true,
+  "description": "mirql (mergeproof · inbox · run · queue · log) — 24/7 autonomous proof-driven AI software factory.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "author": "ahmed-3m",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahmed-3m/mirql.git"
+  },
+  "bin": {
+    "mirql": "bin/mirql.mjs",
+    "mirql-run": "bin/mirql-run.mjs",
+    "mirql-queue": "bin/mirql-queue.mjs",
+    "mirql-log": "bin/mirql-log.mjs",
+    "mirql-inbox": "bin/mirql-inbox.mjs"
+  },
+  "scripts": {
+    "test": "node scripts/run-tests.mjs"
+  },
+  "engines": {
+    "node": ">=18.17"
+  }
+}
