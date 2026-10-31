@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mirql.local/schemas/event/v1.json",
+  "title": "mirql Event Envelope v1",
+  "description": "Canonical, append-only, hash-chained and Ed25519-signed event envelope. Every number in the document (including nested payload fields) must be a safe integer (Law 17); the `type`/`writer.ns` pair is gated by the single-writer ACL (Law 3).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "id", "tenant_id", "seq", "epoch", "hlc", "ts", "type", "writer", "idempotency_key", "prev_hash", "payload", "hash", "sig"],
+  "properties": {
+    "v": {
+      "type": "integer",
+      "const": 1,
+      "description": "Envelope schema version."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNPQRSTVWXYZ]{26}$",
+      "description": "ULID (Crockford Base32) event identifier; monotonic per writer."
+    },
+    "tenant_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{1,62}$",
+      "description": "Tenant scope of the event."
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Per-tenant, per-epoch log sequence number."
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Configuration epoch the event was produced under."
+    },
+    "hlc": {
+      "type": "object",
+      "description": "Hybrid logical clock timestamp taken at emission.",
+      "additionalProperties": false,
+      "required": ["wall_ms", "logical", "node"],
+      "properties": {
+        "wall_ms": { "type": "integer", "minimum": 0 },
+        "logical": { "type": "integer", "minimum": 0 },
+        "node": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$" }
+      }
+    },
+    "ts": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$",
+      "description": "ISO-8601 UTC wall-clock emission timestamp."
+    },
+    "type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*\\.[a-z_]+$",
+      "description": "Dotted domain event type, e.g. `job.enqueued`; gated by the single-writer ACL (Law 3)."
+    },
+    "writer": {
+      "type": "object",
+      "description": "Identity of the writer that emitted and signed the event.",
+      "additionalProperties": false,
+      "required": ["ns"],
+      "properties": {
+        "ns": { "type": "string", "pattern": "^(tool|human|notary|daemon):[a-z_]+$" },
+        "key_id": { "type": "string", "pattern": "^ed25519:[A-Za-z0-9_-]{43}$" }
+      }
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Writer-scoped key making retries of the same intent dedupable."
+    },
+    "prev_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Hash of the previous event in this tenant's log (hash chaining)."
+    },
+    "payload": {
+      "type": "object",
+      "description": "Free-form domain payload; every nested number must be a safe integer (Law 17)."
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 over the canonical JSON (RFC 8785) of the envelope without `hash` and `sig`."
+    },
+    "sig": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{86}$",
+      "description": "Ed25519 signature (base64url, 64 raw bytes) over the UTF-8 bytes of `hash`."
+    }
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mirql.local/schemas/outcome/v1.json",
+  "title": "mirql Outcome v1",
+  "description": "Canonical attempt outcome: the signed result of executing a job under a warrant — evidence, anti-cheat results, change surface, thrift and cost reconciliation. Every number in the document must be a safe integer (Law 17); money is integer micro-USD.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "id", "job_id", "warrant_id", "epoch", "status", "base_sha", "head_sha", "tree_hash", "evidence", "anti_cheat", "phi", "surface", "thrift", "reconciliation", "cost"],
+  "properties": {
+    "v": {
+      "type": "integer",
+      "const": 1,
+      "description": "Outcome schema version."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNPQRSTVWXYZ]{26}$",
+      "description": "ULID (Crockford Base32) outcome identifier."
+    },
+    "job_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNPQRSTVWXYZ]{26}$",
+      "description": "ULID of the executed job."
+    },
+    "warrant_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNPQRSTVWXYZ]{26}$",
+      "description": "ULID of the warrant the job executed under."
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Configuration epoch the attempt ran under."
+    },
+    "status": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{1,63}$",
+      "description": "Terminal status of the attempt, e.g. `pass`, `fail`, `blocked`, `needs_human`."
+    },
+    "base_sha": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 of the base commit the attempt started from (must equal job.base_sha)."
+    },
+    "head_sha": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 of the produced head commit."
+    },
+    "tree_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Content hash of the produced working tree (mergeproof witness)."
+    },
+    "evidence": {
+      "type": "object",
+      "description": "Test runs, logs and measurements proving the outcome; integer-only numbers (Law 17)."
+    },
+    "anti_cheat": {
+      "type": "object",
+      "description": "Anti-cheat scan results (diff scoped to warrant, no test weakening, ...); integer-only numbers (Law 17)."
+    },
+    "phi": {
+      "type": "object",
+      "description": "Sensitive-data (PHI) handling record: scanned, leaked, redactions applied; integer-only numbers (Law 17)."
+    },
+    "surface": {
+      "type": "object",
+      "description": "Change surface touched by the attempt (files_changed, lines_added, lines_removed); integer-only numbers (Law 17)."
+    },
+    "thrift": {
+      "type": "object",
+      "description": "Resource thrift metrics (model_calls, tokens_in, tokens_out, cache hits); integer-only numbers (Law 17)."
+    },
+    "reconciliation": {
+      "type": "object",
+      "description": "Ledger reconciliation for the attempt (entries counted, balanced); integer-only numbers (Law 17)."
+    },
+    "cost": {
+      "type": "object",
+      "description": "Final cost of the attempt, `micro_usd` in integer micro-USD against warrant.budget_micro_usd."
+    }
+  }
+}
