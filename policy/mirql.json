@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "daily_budget_micro_usd": 25000000,
+  "per_job_budget_micro_usd": 1500000,
+  "ladder": [
+    "flash",
+    "mid",
+    "max",
+    "human"
+  ],
+  "critic": "claude-opus-5-5-medium",
+  "retries_per_tier": 2,
+  "max_awaiting_human": 3,
+  "lease_ttl_ms": 900000,
+  "refactor_cooldown_ms": 172800000,
+  "macro_states": [
+    "BUILD",
+    "HARDEN",
+    "PATROL",
+    "QUIESCENT"
+  ],
+  "quiescent_max_budget_bp": 500
+}

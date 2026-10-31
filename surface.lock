@@ -1,0 +1,41 @@
+{
+  "v": 1,
+  "bins": [
+    "mirql",
+    "mirql-run",
+    "mirql-queue",
+    "mirql-log",
+    "mirql-inbox"
+  ],
+  "commands": [
+    "mirql m check",
+    "mirql i genesis",
+    "mirql i send",
+    "mirql i digest",
+    "mirql i act",
+    "mirql i propose",
+    "mirql r supervisor",
+    "mirql r agent",
+    "mirql r verify",
+    "mirql r probe",
+    "mirql r bing-bong",
+    "mirql q tick",
+    "mirql q submit",
+    "mirql q status",
+    "mirql q promote",
+    "mirql q halt",
+    "mirql q resume",
+    "mirql l append",
+    "mirql l view",
+    "mirql l replay",
+    "mirql l verify",
+    "mirql l snapshot"
+  ],
+  "schemas": [
+    "event/v1",
+    "warrant/v1",
+    "job/v1",
+    "outcome/v1"
+  ],
+  "dependencies": []
+}

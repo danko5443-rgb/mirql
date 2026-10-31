@@ -1,0 +1,41 @@
+{
+  "schema": "outcome/v1",
+  "job_id": "job_bad_005",
+  "warrant_id": "warrant_bad_005",
+  "expected_verdict": "needs_human",
+  "expected_rule": "MP-005",
+  "pr": {
+    "number": 105,
+    "head_sha": "f666666666666666666666666666666666666666",
+    "base_sha": "b222222222222222222222222222222222222222",
+    "author": "agent/builder",
+    "kind": "feature"
+  },
+  "diff_stat": {
+    "files_changed": [
+      "bin/mirql.mjs",
+      "packages/run/src/debug.mjs"
+    ],
+    "lines_added": 34,
+    "lines_deleted": 0
+  },
+  "evidence": {
+    "violation_type": "UNCITED_SURFACE",
+    "detail": "PR added new command 'mirql debug inject' which is absent from surface.lock and lacks human approval."
+  },
+  "anti_cheat": {
+    "violations_count": 0,
+    "flags": []
+  },
+  "phi": {
+    "phi_base": 85,
+    "phi_head": 92,
+    "delta_phi": 7
+  },
+  "surface": {
+    "uncited_commands": [
+      "mirql debug inject"
+    ],
+    "delta_count": 1
+  }
+}

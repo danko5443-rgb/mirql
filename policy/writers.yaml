@@ -1,0 +1,11 @@
+# Writer Namespace Authorization Matrix
+# Maps each authorized writer namespace to the regex pattern of event types it is permitted to append to the ledger.
+
+writers:
+  "tool:queue": "^job\\.(enqueued|leased|heartbeat|timeout|canceled)$"
+  "tool:run_supervisor": "^(job\\.(started|progress|completed|failed)|attempt\\.(started|outcome))$"
+  "tool:log": "^log\\.(snapshot|checkpoint|compacted)$"
+  "tool:inbox": "^(human\\.(intent|message|approval|rejection)|inbox\\..*)$"
+  "human:owner": "^(human\\..*|warrant\\.(created|revoked)|mirql\\.(genesis|halt|resume))$"
+  "notary:mergeproof": "^(verdict\\.(issued|signed|rejected)|merge\\.(executed|refused))$"
+  "daemon:lifeguard": "^lifeguard\\.(heartbeat|circuit_trip|reap|alert)$"

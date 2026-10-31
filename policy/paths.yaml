@@ -1,0 +1,18 @@
+# Path Access Matrix for mirql
+# humanOnly: Files that autonomous agents are strictly forbidden from touching. Any PR modifying these is rejected (MP-001).
+# humanApprove: Core files that require explicit affirmative human authorization before merging.
+
+humanOnly:
+  - "CONSTITUTION.md"
+  - "NOT-ROADMAP.md"
+  - "policy/**"
+  - "conformance/**"
+  - ".github/**"
+
+humanApprove:
+  - "schemas/**"
+  - "packages/core/**"
+  - "packages/log/**"
+  - "packages/queue/**"
+  - "packages/run/verify*"
+  - "package.json"

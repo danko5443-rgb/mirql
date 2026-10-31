@@ -1,0 +1,49 @@
+{
+  "schema": "outcome/v1",
+  "job_id": "job_good_002",
+  "warrant_id": "warrant_good_002",
+  "expected_verdict": "auto_merge",
+  "expected_rule": "MP-000",
+  "pr": {
+    "number": 202,
+    "head_sha": "2222333344445555666677778888999900001111",
+    "base_sha": "b222222222222222222222222222222222222222",
+    "author": "agent/consolidator",
+    "kind": "refactor"
+  },
+  "diff_stat": {
+    "files_changed": [
+      "packages/queue/src/scheduler.mjs",
+      "packages/queue/src/utils.mjs"
+    ],
+    "lines_added": 20,
+    "lines_deleted": 95
+  },
+  "proof": {
+    "suite_pass_base": true,
+    "suite_pass_head": true,
+    "test_count_base": 51,
+    "test_count_head": 51,
+    "cases_dropped": 0
+  },
+  "evidence": {
+    "status": "suite_green_thrift_proven",
+    "forbidden_paths_touched": [],
+    "tests_deleted": [],
+    "net_lines_delta": -75
+  },
+  "anti_cheat": {
+    "violations_count": 0,
+    "flags": []
+  },
+  "phi": {
+    "phi_base": 480,
+    "phi_head": 395,
+    "delta_phi": -85,
+    "thrift_test_passed": true
+  },
+  "surface": {
+    "uncited_commands": [],
+    "delta_count": 0
+  }
+}

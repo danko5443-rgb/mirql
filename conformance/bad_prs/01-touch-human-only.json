@@ -1,0 +1,43 @@
+{
+  "schema": "outcome/v1",
+  "job_id": "job_bad_001",
+  "warrant_id": "warrant_bad_001",
+  "expected_verdict": "reject",
+  "expected_rule": "MP-001",
+  "pr": {
+    "number": 101,
+    "head_sha": "a111111111111111111111111111111111111111",
+    "base_sha": "b222222222222222222222222222222222222222",
+    "author": "agent/builder",
+    "kind": "bugfix"
+  },
+  "diff_stat": {
+    "files_changed": [
+      "CONSTITUTION.md",
+      "packages/core/src/index.mjs"
+    ],
+    "lines_added": 12,
+    "lines_deleted": 4
+  },
+  "evidence": {
+    "violation_type": "TOUCH_HUMAN_ONLY",
+    "forbidden_paths_touched": [
+      "CONSTITUTION.md"
+    ],
+    "policy_file": "policy/paths.yaml",
+    "detail": "PR touched CONSTITUTION.md which is classified under humanOnly policy."
+  },
+  "anti_cheat": {
+    "violations_count": 0,
+    "flags": []
+  },
+  "phi": {
+    "phi_base": 120,
+    "phi_head": 120,
+    "delta_phi": 0
+  },
+  "surface": {
+    "uncited_commands": [],
+    "delta_count": 0
+  }
+}

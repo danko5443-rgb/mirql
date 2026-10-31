@@ -1,0 +1,47 @@
+# Declarative Probes Configuration for mirql
+# All thresholds, intervals, and timeouts are safe integers (Law 17).
+
+[probes.tests]
+name = "unit_conformance_suite"
+type = "tests"
+command = "npm test"
+threshold_failures = 0
+timeout_ms = 60000
+severity = "fatal"
+description = "Ensures zero failing tests across core and conformance suites"
+
+[probes.drift]
+name = "ast_claim_check_drift"
+type = "drift"
+command = "node bin/mirql-run.mjs probe --type drift"
+max_drift_score_bp = 0
+timeout_ms = 30000
+severity = "error"
+description = "Checks that PR diffs strictly conform to claimed issue intent and architectural boundaries"
+
+[probes.mutants]
+name = "incremental_mutation_density"
+type = "mutants"
+command = "node bin/mirql-run.mjs probe --type mutants"
+min_kill_rate_bp = 8000
+timeout_ms = 120000
+severity = "error"
+description = "Requires at least 80.00% (8000 bp) mutant kill rate on modified AST nodes"
+
+[probes.complexity]
+name = "ast_cyclomatic_complexity"
+type = "complexity"
+command = "node bin/mirql-run.mjs probe --type complexity"
+max_cyclomatic = 15
+max_function_lines = 80
+severity = "warning"
+description = "Enforces complexity ceilings on individual functions and modules"
+
+[probes.surface]
+name = "public_surface_drift"
+type = "surface"
+command = "node bin/mirql.mjs m check --surface"
+allowed_delta = 0
+timeout_ms = 15000
+severity = "fatal"
+description = "Prevents uncited or unauthorized modifications to surface.lock"
