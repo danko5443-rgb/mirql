@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mirql.local/schemas/job/v1.json",
+  "title": "mirql Job v1",
+  "description": "Canonical queued job: a warrant-scoped unit of work with a role, a model tier, hard limits and a lease. Every number in the document must be a safe integer (Law 17); money is integer micro-USD.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "id", "tenant_id", "role", "tier", "base_sha", "attempt", "limits", "lease", "idempotency_key"],
+  "properties": {
+    "v": {
+      "type": "integer",
+      "const": 1,
+      "description": "Job schema version."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNPQRSTVWXYZ]{26}$",
+      "description": "ULID (Crockford Base32) job identifier."
+    },
+    "tenant_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{1,62}$",
+      "description": "Tenant scope of the job."
+    },
+    "role": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{1,63}$",
+      "description": "Agent role that executes the job, e.g. `implementer`, `reviewer`, `architect`."
+    },
+    "tier": {
+      "type": "string",
+      "pattern": "^T[0-9]$",
+      "description": "Model tier budgeted for the attempt, e.g. `T1` (fast/cheap) .. `T3` (frontier)."
+    },
+    "base_sha": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 of the base commit the attempt must start from."
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Retry counter; 0 on first execution."
+    },
+    "limits": {
+      "type": "object",
+      "description": "Hard ceilings for the attempt (wall_ms, tool_calls, micro_usd, ...); integer-only numbers (Law 17)."
+    },
+    "lease": {
+      "type": "object",
+      "description": "Single-writer lease granting exactly one supervisor the right to execute this job (owner, epoch, expires_at_ms, ...); integer-only numbers (Law 17)."
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Key making enqueuer retries of the same job dedupable."
+    }
+  }
+}
