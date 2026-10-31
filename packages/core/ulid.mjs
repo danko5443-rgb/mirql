@@ -18,7 +18,7 @@ const TIME_MAX = 0xffffffffffff; // 48 bits of milliseconds
 const RANDOM_MAX = (1n << 80n) - 1n; // 80 bits of monotonic payload
 
 // Monotonic state for this process.
-let lastTime = 0;
+let lastTime = -1;
 let lastRandom = 0n;
 
 /**
@@ -38,21 +38,23 @@ export function ulid(nowMs = Date.now()) {
   }
   const time = nowMs;
 
-  if (time === lastTime) {
-    // Same millisecond: bump the 80-bit payload so ids stay monotonic.
+  let effectiveTime;
+
+  if (time <= lastTime) {
+    effectiveTime = lastTime;
     lastRandom += 1n;
     if (lastRandom > RANDOM_MAX) {
-      // 80-bit space exhausted within one millisecond (~31k years of calls):
-      // borrow a millisecond rather than break monotonicity.
-      lastTime = time + 1;
+      lastTime += 1;
+      effectiveTime = lastTime;
       lastRandom = 0n;
     }
   } else {
     lastTime = time;
     lastRandom = bytesToBigInt(randomBytes(10));
+    effectiveTime = lastTime;
   }
 
-  return encodeTime(lastTime) + encodeRandom(lastRandom);
+  return encodeTime(effectiveTime) + encodeRandom(lastRandom);
 }
 
 /**

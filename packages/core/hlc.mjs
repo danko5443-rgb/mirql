@@ -22,15 +22,14 @@ export function hlcTick(prevHlc, wallMs = Date.now(), node = "local") {
   if (typeof node !== "string" || node.length === 0) {
     throw new TypeError("hlcTick: node must be a non-empty string");
   }
-  const wall = Math.floor(Number(wallMs));
-  if (!Number.isSafeInteger(wall) || wall < 0) {
+  if (!Number.isSafeInteger(wallMs) || wallMs < 0) {
     throw new RangeError(
       `hlcTick: wallMs ${wallMs} is not a non-negative safe integer`,
     );
   }
 
   const prevWall = prevHlc ? prevHlc.wall_ms : 0;
-  const wallMsOut = Math.max(prevWall, wall);
+  const wallMsOut = Math.max(prevWall, wallMs);
   // Same millisecond as the previous tick? Then count logical ticks; a new
   // millisecond resets the counter.
   const logical =

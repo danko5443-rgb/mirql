@@ -166,8 +166,12 @@ test("ulid sorts lexicographically across increasing milliseconds", () => {
   assert.ok(a < b && b < c, `expected ${a} < ${b} < ${c}`);
 });
 
+test("ulid remains strictly monotonic under clock regression", () => {
+  assert.ok(ulid(2000) < ulid(1999));
+});
+
 test("ulid's first 10 chars decode back to the input timestamp", () => {
-  const t = 1_709_435_530_123;
+  const t = 2_000_000_000_000;
   let decoded = 0;
   for (let i = 0; i < 10; i++) {
     decoded = decoded * 32 + ULID_ALPHABET.indexOf(ulid(t)[i]);
@@ -218,8 +222,9 @@ test("hlcTick counts logical ticks within a millisecond and resets on advance", 
   const t4 = hlcTick(t3, 1500); // wall behind local clock: never goes back
   assert.deepEqual(t4, { wall_ms: 2000, logical: 1, node: "local" });
 
-  assert.equal(hlcTick(null, 1000.9).wall_ms, 1000); // floored to an integer
+  assert.throws(() => hlcTick(null, 1000.9), RangeError);
   assert.throws(() => hlcTick(null, -1), RangeError);
+  assert.throws(() => hlcTick(null, null), RangeError);
 });
 
 test("compareHlc orders by wall_ms, then logical, then node", () => {
@@ -400,6 +405,9 @@ test("canWriteEvent denies unknown namespaces and malformed input", () => {
   assert.equal(canWriteEvent(undefined, "job.enqueued"), false);
   assert.equal(canWriteEvent("tool:queue", undefined), false);
   assert.equal(canWriteEvent(null, null), false);
+  assert.equal(canWriteEvent("constructor", "job.leased"), false);
+  assert.equal(canWriteEvent("__proto__", "job.leased"), false);
+  assert.equal(canWriteEvent("toString", "job.leased"), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -512,6 +520,15 @@ test("validateDocument enforces the Law 3 single-writer ACL on events", () => {
   const noWriter = makeValidEvent();
   delete noWriter.writer;
   assert.equal(validateDocument("event", noWriter).valid, false);
+
+  const validEvent = makeValidEvent();
+  assert.equal(
+    validateDocument("event", {
+      ...validEvent,
+      writer: { ns: "constructor", id: "x", key_id: "..." },
+    }).valid,
+    false,
+  );
 });
 
 test("validateDocument reports missing required fields", () => {

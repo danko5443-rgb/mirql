@@ -192,6 +192,32 @@ function extractSpecifiers(source) {
 
 test("tool packages import only from node:* , ../core/, or inside themselves", () => {
   const violations = [];
+  const coreDir = join(ROOT, "packages", "core");
+
+  // Core package must never import from sibling tool packages or escape itself.
+  const coreFiles = listMjsFiles(coreDir);
+  assert.ok(coreFiles.length > 0, "packages/core contains no .mjs files");
+  for (const file of coreFiles) {
+    const source = readFileSync(file, "utf8");
+    for (const spec of extractSpecifiers(source)) {
+      if (spec.startsWith("node:")) continue;
+
+      if (spec.startsWith("./") || spec.startsWith("../")) {
+        const resolved = resolve(file, "..", spec);
+        if (resolved === coreDir || resolved.startsWith(coreDir + sep)) {
+          continue;
+        }
+        violations.push(
+          `packages/core/${file.slice(coreDir.length + 1)} imports "${spec}" — escapes packages/core`,
+        );
+        continue;
+      }
+
+      violations.push(
+        `packages/core/${file.slice(coreDir.length + 1)} imports bare specifier "${spec}"`,
+      );
+    }
+  }
 
   for (const tool of TOOL_PACKAGES) {
     const packageDir = join(ROOT, "packages", tool);
@@ -206,13 +232,17 @@ test("tool packages import only from node:* , ../core/, or inside themselves", (
       const source = readFileSync(file, "utf8");
       for (const spec of extractSpecifiers(source)) {
         if (spec.startsWith("node:")) continue;
-        if (spec.startsWith("../core/")) continue;
 
-        // Relative imports must resolve *inside this package* — that can
-        // never reach a sibling tool package such as ../queue or ../run.
+        // Relative imports must resolve inside this package or inside packages/core —
+        // resolving with path.resolve first prevents bypasses like "../core/../queue/...".
         if (spec.startsWith("./") || spec.startsWith("../")) {
           const resolved = resolve(file, "..", spec);
-          if (resolved === packageDir || resolved.startsWith(packageDir + sep)) {
+          if (
+            resolved === packageDir ||
+            resolved.startsWith(packageDir + sep) ||
+            resolved === coreDir ||
+            resolved.startsWith(coreDir + sep)
+          ) {
             continue;
           }
           violations.push(

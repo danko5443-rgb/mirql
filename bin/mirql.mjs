@@ -6,7 +6,8 @@
 //
 // Tools: mergeproof (m) · inbox (i) · run (r) · queue (q) · log (l)
 // All output is JSON on stdout; errors are JSON on stderr.
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { EXIT_CODES } from "../packages/core/index.mjs";
 import { main as runMain } from "../packages/run/index.mjs";
@@ -91,7 +92,15 @@ function emit(payload) {
   process.stdout.write(JSON.stringify(payload) + "\n");
 }
 
+function resolveArgv1(entry) {
+  try {
+    return realpathSync(entry);
+  } catch {
+    return resolve(entry);
+  }
+}
+
 // Run only when invoked directly (not when imported by tests or other tools).
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolveArgv1(process.argv[1])).href) {
   process.exitCode = main(process.argv.slice(2));
 }
