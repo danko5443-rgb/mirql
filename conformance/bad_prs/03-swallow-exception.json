@@ -1,0 +1,49 @@
+{
+  "schema": "outcome/v1",
+  "job_id": "job_bad_003",
+  "warrant_id": "warrant_bad_003",
+  "expected_verdict": "reject",
+  "expected_rule": "MP-003",
+  "pr": {
+    "number": 103,
+    "head_sha": "d444444444444444444444444444444444444444",
+    "base_sha": "b222222222222222222222222222222222222222",
+    "author": "agent/builder",
+    "kind": "bugfix"
+  },
+  "diff_stat": {
+    "files_changed": [
+      "packages/queue/src/lease.mjs",
+      "tests/queue-lease.test.mjs"
+    ],
+    "lines_added": 15,
+    "lines_deleted": 2
+  },
+  "evidence": {
+    "violation_type": "ANTI_CHEAT_VIOLATION",
+    "detail": "PR swallowed error exceptions using empty catch blocks to manufacture passing test status."
+  },
+  "anti_cheat": {
+    "violations_count": 1,
+    "flags": [
+      "SWALLOWED_EXCEPTION",
+      "EMPTY_CATCH_BLOCK"
+    ],
+    "details": [
+      {
+        "file": "packages/queue/src/lease.mjs",
+        "line": 48,
+        "pattern": "catch (err) { /* ignore */ }"
+      }
+    ]
+  },
+  "phi": {
+    "phi_base": 110,
+    "phi_head": 115,
+    "delta_phi": 5
+  },
+  "surface": {
+    "uncited_commands": [],
+    "delta_count": 0
+  }
+}

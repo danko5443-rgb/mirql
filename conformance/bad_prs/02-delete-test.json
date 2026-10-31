@@ -1,0 +1,45 @@
+{
+  "schema": "outcome/v1",
+  "job_id": "job_bad_002",
+  "warrant_id": "warrant_bad_002",
+  "expected_verdict": "reject",
+  "expected_rule": "MP-002",
+  "pr": {
+    "number": 102,
+    "head_sha": "c333333333333333333333333333333333333333",
+    "base_sha": "b222222222222222222222222222222222222222",
+    "author": "agent/builder",
+    "kind": "refactor"
+  },
+  "diff_stat": {
+    "files_changed": [
+      "packages/core/src/runner.mjs",
+      "tests/legacy-edge-case.test.mjs"
+    ],
+    "lines_added": 8,
+    "lines_deleted": 45
+  },
+  "evidence": {
+    "violation_type": "TEST_DELETED",
+    "tests_deleted": [
+      "tests/legacy-edge-case.test.mjs"
+    ],
+    "test_count_base": 42,
+    "test_count_head": 39,
+    "test_count_drop": 3,
+    "detail": "PR deleted existing test file and dropped total suite count from 42 to 39."
+  },
+  "anti_cheat": {
+    "violations_count": 0,
+    "flags": []
+  },
+  "phi": {
+    "phi_base": 140,
+    "phi_head": 138,
+    "delta_phi": -2
+  },
+  "surface": {
+    "uncited_commands": [],
+    "delta_count": 0
+  }
+}

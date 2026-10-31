@@ -1,0 +1,32 @@
+{
+  "epoch": 1,
+  "macro_state": "BUILD",
+  "events_processed": 5,
+  "warrants": {
+    "warrant_001": {
+      "id": "warrant_001",
+      "intent_id": "intent_001",
+      "role": "builder",
+      "tier": "mid",
+      "status": "completed",
+      "budget_micro_usd": 1500000
+    }
+  },
+  "jobs": {
+    "job_001": {
+      "id": "job_001",
+      "warrant_id": "warrant_001",
+      "worker_id": "worker_node_1",
+      "status": "completed",
+      "outcome_verdict": "auto_merge"
+    }
+  },
+  "metrics": {
+    "total_cost_micro_usd": 450000,
+    "total_tokens_consumed": 1420,
+    "warrants_total": 1,
+    "warrants_completed": 1,
+    "jobs_total": 1,
+    "jobs_completed": 1
+  }
+}

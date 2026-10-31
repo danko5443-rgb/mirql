@@ -1,0 +1,49 @@
+{
+  "schema": "outcome/v1",
+  "job_id": "job_good_001",
+  "warrant_id": "warrant_good_001",
+  "expected_verdict": "auto_merge",
+  "expected_rule": "MP-000",
+  "pr": {
+    "number": 201,
+    "head_sha": "1111222233334444555566667777888899990000",
+    "base_sha": "b222222222222222222222222222222222222222",
+    "author": "agent/builder",
+    "kind": "bugfix"
+  },
+  "diff_stat": {
+    "files_changed": [
+      "packages/core/src/math.mjs",
+      "tests/math-safe.test.mjs"
+    ],
+    "lines_added": 24,
+    "lines_deleted": 6
+  },
+  "proof": {
+    "causal_cycle_completed": true,
+    "base_fail_runs": 2,
+    "head_pass_runs": 3,
+    "re_red_runs": 2,
+    "reproducer_file": "tests/math-safe.test.mjs"
+  },
+  "evidence": {
+    "status": "causal_green_proven",
+    "forbidden_paths_touched": [],
+    "tests_deleted": [],
+    "test_count_base": 50,
+    "test_count_head": 51
+  },
+  "anti_cheat": {
+    "violations_count": 0,
+    "flags": []
+  },
+  "phi": {
+    "phi_base": 150,
+    "phi_head": 145,
+    "delta_phi": -5
+  },
+  "surface": {
+    "uncited_commands": [],
+    "delta_count": 0
+  }
+}

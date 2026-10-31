@@ -1,0 +1,42 @@
+{
+  "schema": "outcome/v1",
+  "job_id": "job_bad_004",
+  "warrant_id": "warrant_bad_004",
+  "expected_verdict": "reject",
+  "expected_rule": "MP-004",
+  "pr": {
+    "number": 104,
+    "head_sha": "e555555555555555555555555555555555555555",
+    "base_sha": "f000000000000000000000000000000000000000",
+    "author": "agent/builder",
+    "kind": "bugfix"
+  },
+  "diff_stat": {
+    "files_changed": [
+      "packages/log/src/ledger.mjs"
+    ],
+    "lines_added": 10,
+    "lines_deleted": 3
+  },
+  "evidence": {
+    "violation_type": "STALE_BASE",
+    "claimed_base_sha": "f000000000000000000000000000000000000000",
+    "current_tip_sha": "b222222222222222222222222222222222222222",
+    "lease_ttl_ms": 900000,
+    "elapsed_since_lease_ms": 1240000,
+    "detail": "Claimed base SHA f000... does not match current tip b222... and lease TTL expired."
+  },
+  "anti_cheat": {
+    "violations_count": 0,
+    "flags": []
+  },
+  "phi": {
+    "phi_base": 90,
+    "phi_head": 88,
+    "delta_phi": -2
+  },
+  "surface": {
+    "uncited_commands": [],
+    "delta_count": 0
+  }
+}
