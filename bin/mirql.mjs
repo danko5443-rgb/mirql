@@ -101,6 +101,21 @@ function resolveArgv1(entry) {
 }
 
 // Run only when invoked directly (not when imported by tests or other tools).
+// Handles both synchronous number results and asynchronous Promises from
+// main() — assigning a Promise to process.exitCode crashes Node v24 with
+// ERR_INVALID_ARG_TYPE, so thenables are settled explicitly.
 if (process.argv[1] && import.meta.url === pathToFileURL(resolveArgv1(process.argv[1])).href) {
-  process.exitCode = main(process.argv.slice(2));
+  const result = main(process.argv.slice(2));
+  if (result && typeof result.then === "function") {
+    result
+      .then((code) => {
+        if (typeof code === "number") process.exitCode = code;
+      })
+      .catch((err) => {
+        process.stderr.write(JSON.stringify({ error: err?.message || String(err) }) + "\n");
+        process.exitCode = 1;
+      });
+  } else if (typeof result === "number") {
+    process.exitCode = result;
+  }
 }
