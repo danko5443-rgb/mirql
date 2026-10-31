@@ -1,0 +1,1002 @@
+import { test, describe, it, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+} from "node:fs";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+import {
+  EXIT_CODES,
+  validateDocument,
+  verifyEvent,
+  jcs,
+  generateEd25519Keypair,
+} from "../packages/core/index.mjs";
+
+import {
+  computePhi,
+  checkPhiReduction,
+  verifyAttempt,
+  runSupervisor,
+  runAgent,
+  sanitizeAgentEnv,
+  SAFE_ENV_ALLOWLIST,
+  runProbe,
+  runBingBong,
+  checkAntiCheat,
+  checkHumanOnlyPaths,
+  checkHumanApprovePaths,
+  checkSwallowedExceptions,
+  checkTestWeakenings,
+  isHumanOnlyPath,
+  normalizePath,
+} from "../packages/run/index.mjs";
+
+const ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
+
+/** Spawns a bin script relative to repo root */
+function runBin(binRelPath, args, options = {}) {
+  return spawnSync(process.execPath, [join(ROOT, binRelPath), ...args], {
+    cwd: ROOT,
+    encoding: "utf8",
+    timeout: 30000,
+    ...options,
+  });
+}
+
+describe("Work Package W5a: `mirql-run` and `bing-bong` Consensus Loop", () => {
+  let tempDir;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "mirql-w5a-test-"));
+  });
+
+  afterEach(() => {
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {}
+  });
+
+  // -------------------------------------------------------------------------
+  // 1. Triple-Execution Red-Green-ReRed Verifier (verifyAttempt, B1 & B2)
+  // -------------------------------------------------------------------------
+  describe("1. Triple-Execution Red-Green-ReRed Verifier", () => {
+    it("passes when a real bug/feature fails on base, passes on head, and fails on revert", async () => {
+      let srcReverted = false;
+
+      const runCheck = async ({ stage }) => {
+        if (stage === "red_on_base") {
+          return { exitCode: 1, stderr: "AssertionError: expected 42 got undefined" };
+        }
+        if (stage === "green_on_head") {
+          return { exitCode: 0, stdout: "pass" };
+        }
+        if (stage === "re_red_on_revert") {
+          srcReverted = true;
+          return { exitCode: 1, stderr: "AssertionError: expected 42 got undefined" };
+        }
+        return { exitCode: 0 };
+      };
+
+      const result = await verifyAttempt({
+        runCheck,
+        modifiedFiles: ["packages/core/math.mjs", "tests/math.test.mjs"],
+      });
+
+      assert.equal(result.verified, true);
+      assert.equal(result.verdict, "auto_merge");
+      assert.equal(result.rule, "MP-000");
+      assert.equal(result.proof?.causal_cycle_completed, true);
+      assert.equal(srcReverted, true);
+      assert.equal(result.checks?.red_on_base?.passed, true);
+      assert.equal(result.checks?.green_on_head?.passed, true);
+      assert.equal(result.checks?.re_red_on_revert?.passed, true);
+    });
+
+    it("fails with RE_RED_FAILED when builder submits a tautological test", async () => {
+      const runCheck = async ({ stage }) => {
+        if (stage === "red_on_base") {
+          return { exitCode: 1, stderr: "assertion error on base" };
+        }
+        if (stage === "green_on_head") {
+          return { exitCode: 0, stdout: "ok" };
+        }
+        if (stage === "re_red_on_revert") {
+          // Tautology: assert.equal(1, 1) still passes with src reverted!
+          return { exitCode: 0, stdout: "ok" };
+        }
+        return { exitCode: 0 };
+      };
+
+      const result = await verifyAttempt({
+        runCheck,
+        modifiedFiles: ["packages/core/calc.mjs", "tests/calc.test.mjs"],
+      });
+
+      assert.equal(result.verified, false);
+      assert.equal(result.verdict, "reject");
+      assert.equal(result.rule, "RE_RED_FAILED");
+      assert.equal(result.violation, "RE_RED_FAILED");
+      assert.match(result.detail, /re-red.*tautological/i);
+    });
+
+    it("fails with RED_ON_BASE_FAILED when reproducer already passes on base", async () => {
+      const runCheck = async ({ stage }) => {
+        if (stage === "red_on_base") {
+          return { exitCode: 0, stdout: "already passes" };
+        }
+        return { exitCode: 0 };
+      };
+
+      const result = await verifyAttempt({ runCheck });
+      assert.equal(result.verified, false);
+      assert.equal(result.rule, "RED_ON_BASE_FAILED");
+      assert.equal(result.violation, "RED_ON_BASE_FAILED");
+    });
+
+    it("fails with RED_ON_BASE_CRASH when reproducer crashes on base (exit 2)", async () => {
+      // B1: A crash on base is NOT a valid red
+      const runCheck = async ({ stage }) => {
+        if (stage === "red_on_base") {
+          return { exitCode: 2, stderr: "Segmentation fault or unhandled crash" };
+        }
+        return { exitCode: 0 };
+      };
+
+      const result = await verifyAttempt({ runCheck });
+      assert.equal(result.verified, false);
+      assert.equal(result.verdict, "reject");
+      assert.equal(result.rule, "RED_ON_BASE_CRASH");
+      assert.equal(result.violation, "RED_ON_BASE_CRASH");
+      assert.match(result.detail, /crash on base is not a valid red/i);
+    });
+
+    it("fails with GREEN_ON_HEAD_FAILED when full suite fails on head", async () => {
+      const runCheck = async ({ stage }) => {
+        if (stage === "red_on_base") {
+          return { exitCode: 1 };
+        }
+        if (stage === "green_on_head") {
+          return { exitCode: 1, stderr: "broken test on head" };
+        }
+        return { exitCode: 0 };
+      };
+
+      const result = await verifyAttempt({ runCheck });
+      assert.equal(result.verified, false);
+      assert.equal(result.rule, "GREEN_ON_HEAD_FAILED");
+      assert.equal(result.violation, "GREEN_ON_HEAD_FAILED");
+    });
+
+    it("B1: fails closed when no callback or runner is provided", () => {
+      const result = verifyAttempt({});
+      assert.equal(result.verified, false);
+      assert.equal(result.verdict, "reject");
+      assert.equal(result.rule, "MISSING_RUNNER");
+    });
+
+    it("B1: fails closed when exit code is null or non-integer", () => {
+      const runCheck = () => ({ exitCode: null });
+      const result = verifyAttempt({ runCheck });
+      assert.equal(result.verified, false);
+      assert.equal(result.verdict, "reject");
+      assert.equal(result.rule, "NON_INTEGER_EXIT_CODE");
+    });
+
+    it("B1: CLI `mirql r verify` with no inputs fails with exit 2 (USAGE_ERROR)", () => {
+      const res = runBin("bin/mirql.mjs", ["r", "verify"]);
+      assert.equal(res.status, EXIT_CODES.USAGE_ERROR); // 2
+      const doc = JSON.parse(res.stderr);
+      assert.equal(doc.error, "USAGE_ERROR");
+    });
+
+    it("B1 & B2: end-to-end test against a temporary git repo verifying full cycle and tautological test rejection", () => {
+      const repoDir = join(tempDir, "git-test-repo");
+      spawnSync("git", ["init", "-b", "main", repoDir], { encoding: "utf8" });
+      spawnSync("git", ["config", "user.name", "Mirql Test"], { cwd: repoDir });
+      spawnSync("git", ["config", "user.email", "test@mirql.local"], { cwd: repoDir });
+
+      // Base commit: broken implementation
+      writeFileSync(
+        join(repoDir, "package.json"),
+        JSON.stringify({ type: "module" }),
+        "utf8",
+      );
+      const srcDir = join(repoDir, "src");
+      mkdirSync(srcDir, { recursive: true });
+      writeFileSync(
+        join(srcDir, "math.mjs"),
+        "export function add(a, b) { return a - b; } // BUG!\n",
+        "utf8",
+      );
+      spawnSync("git", ["add", "."], { cwd: repoDir });
+      spawnSync("git", ["commit", "-m", "base: bug in math"], { cwd: repoDir });
+      const baseSha = spawnSync("git", ["rev-parse", "HEAD"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).stdout.trim();
+
+      // Head commit: fix bug + add real reproducer
+      writeFileSync(
+        join(srcDir, "math.mjs"),
+        "export function add(a, b) { return a + b; }\n",
+        "utf8",
+      );
+      const testsDir = join(repoDir, "tests");
+      mkdirSync(testsDir, { recursive: true });
+      writeFileSync(
+        join(testsDir, "math.test.mjs"),
+        `import assert from "node:assert/strict";
+import test from "node:test";
+import { add } from "../src/math.mjs";
+
+test("add correctly computes sum", () => {
+  assert.equal(add(2, 3), 5);
+});
+`,
+        "utf8",
+      );
+      spawnSync("git", ["add", "."], { cwd: repoDir });
+      spawnSync("git", ["commit", "-m", "head: fix math bug and add test"], { cwd: repoDir });
+      const headSha = spawnSync("git", ["rev-parse", "HEAD"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).stdout.trim();
+
+      // Run real git verification on valid repro fix
+      const validGitResult = verifyAttempt({
+        git: true,
+        workspaceDir: repoDir,
+        baseSha,
+        headSha,
+        reproducerCommand: "node --test tests/math.test.mjs",
+        testCommand: "node --test tests/math.test.mjs",
+      });
+
+      assert.equal(
+        validGitResult.verified,
+        true,
+        `validGitResult failed: ${JSON.stringify(validGitResult)}`,
+      );
+      assert.equal(validGitResult.verdict, "auto_merge");
+      assert.equal(validGitResult.rule, "MP-000");
+      assert.equal(validGitResult.proof?.causal_cycle_completed, true);
+
+      // Now create a tautological test on top of base
+      spawnSync("git", ["checkout", "-b", "tautology-branch", baseSha], { cwd: repoDir });
+      mkdirSync(testsDir, { recursive: true });
+      writeFileSync(
+        join(testsDir, "tautology.test.mjs"),
+        `import assert from "node:assert/strict";
+import test from "node:test";
+import { add } from "../src/math.mjs";
+
+test("tautological test", () => {
+  // Always passes regardless of implementation!
+  assert.equal(1, 1);
+});
+`,
+        "utf8",
+      );
+      // Fix math so head passes
+      writeFileSync(
+        join(srcDir, "math.mjs"),
+        "export function add(a, b) { return a + b; }\n",
+        "utf8",
+      );
+      spawnSync("git", ["add", "."], { cwd: repoDir });
+      spawnSync("git", ["commit", "-m", "tautological test commit"], { cwd: repoDir });
+      const tautologyHeadSha = spawnSync("git", ["rev-parse", "HEAD"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).stdout.trim();
+
+      // On base, tautology still passes -> RED_ON_BASE_FAILED
+      const tautologyGitResult = verifyAttempt({
+        git: true,
+        workspaceDir: repoDir,
+        baseSha,
+        headSha: tautologyHeadSha,
+        reproducerCommand: "node --test tests/tautology.test.mjs",
+      });
+
+      assert.equal(tautologyGitResult.verified, false);
+      assert.equal(tautologyGitResult.verdict, "reject");
+      assert.equal(tautologyGitResult.rule, "RED_ON_BASE_FAILED");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 2. AST / Conformance Anti-Cheat Gate (MP-001..MP-005, B11)
+  // -------------------------------------------------------------------------
+  describe("2. AST / Conformance Anti-Cheat Gate", () => {
+    it("bad PR 01: rejects TOUCH_HUMAN_ONLY under rule MP-001 (CLI & programmatic)", () => {
+      const fixturePath = "conformance/bad_prs/01-touch-human-only.json";
+      const programmatic = verifyAttempt({ fixture: join(ROOT, fixturePath) });
+      assert.equal(programmatic.verified, false);
+      assert.equal(programmatic.rule, "MP-001");
+      assert.equal(programmatic.violation, "TOUCH_HUMAN_ONLY");
+      assert.equal(programmatic.verdict, "reject");
+
+      const cli = runBin("bin/mirql.mjs", ["r", "verify", "--fixture", fixturePath]);
+      assert.equal(cli.status, EXIT_CODES.POLICY_DENIAL); // 4
+      const doc = JSON.parse(cli.stderr);
+      assert.equal(doc.rule, "MP-001");
+      assert.equal(doc.violation, "TOUCH_HUMAN_ONLY");
+    });
+
+    it("bad PR 02: rejects TEST_DELETED under rule MP-002 (CLI & programmatic)", () => {
+      const fixturePath = "conformance/bad_prs/02-delete-test.json";
+      const programmatic = verifyAttempt({ fixture: join(ROOT, fixturePath) });
+      assert.equal(programmatic.verified, false);
+      assert.equal(programmatic.rule, "MP-002");
+      assert.equal(programmatic.violation, "TEST_DELETED");
+      assert.equal(programmatic.verdict, "reject");
+
+      const cli = runBin("bin/mirql.mjs", ["r", "verify", "--fixture", fixturePath]);
+      assert.equal(cli.status, EXIT_CODES.DOMAIN_NEGATIVE); // 1
+      const doc = JSON.parse(cli.stderr);
+      assert.equal(doc.rule, "MP-002");
+      assert.equal(doc.violation, "TEST_DELETED");
+    });
+
+    it("bad PR 03: rejects ANTI_CHEAT_VIOLATION under rule MP-003 (CLI & programmatic)", () => {
+      const fixturePath = "conformance/bad_prs/03-swallow-exception.json";
+      const programmatic = verifyAttempt({ fixture: join(ROOT, fixturePath) });
+      assert.equal(programmatic.verified, false);
+      assert.equal(programmatic.rule, "MP-003");
+      assert.equal(programmatic.violation, "ANTI_CHEAT_VIOLATION");
+      assert.equal(programmatic.verdict, "reject");
+
+      const cli = runBin("bin/mirql.mjs", ["r", "verify", "--fixture", fixturePath]);
+      assert.equal(cli.status, EXIT_CODES.DOMAIN_NEGATIVE); // 1
+      const doc = JSON.parse(cli.stderr);
+      assert.equal(doc.rule, "MP-003");
+      assert.equal(doc.violation, "ANTI_CHEAT_VIOLATION");
+    });
+
+    it("bad PR 04: rejects STALE_BASE under rule MP-004 (CLI & programmatic)", () => {
+      const fixturePath = "conformance/bad_prs/04-stale-base.json";
+      const programmatic = verifyAttempt({ fixture: join(ROOT, fixturePath) });
+      assert.equal(programmatic.verified, false);
+      assert.equal(programmatic.rule, "MP-004");
+      assert.equal(programmatic.violation, "STALE_BASE");
+      assert.equal(programmatic.verdict, "reject");
+
+      const cli = runBin("bin/mirql.mjs", ["r", "verify", "--fixture", fixturePath]);
+      assert.equal(cli.status, EXIT_CODES.DOMAIN_NEGATIVE); // 1
+      const doc = JSON.parse(cli.stderr);
+      assert.equal(doc.rule, "MP-004");
+      assert.equal(doc.violation, "STALE_BASE");
+    });
+
+    it("bad PR 05: rejects UNCITED_SURFACE under rule MP-005 with needs_human", () => {
+      const fixturePath = "conformance/bad_prs/05-uncited-surface.json";
+      const programmatic = verifyAttempt({ fixture: join(ROOT, fixturePath) });
+      assert.equal(programmatic.verified, false);
+      assert.equal(programmatic.rule, "MP-005");
+      assert.equal(programmatic.violation, "UNCITED_SURFACE");
+      assert.equal(programmatic.verdict, "needs_human");
+
+      const cli = runBin("bin/mirql.mjs", ["r", "verify", "--fixture", fixturePath]);
+      assert.equal(cli.status, EXIT_CODES.POLICY_DENIAL); // 4
+      const doc = JSON.parse(cli.stderr);
+      assert.equal(doc.rule, "MP-005");
+      assert.equal(doc.violation, "UNCITED_SURFACE");
+    });
+
+    it("good PR 01: verifies valid repro fix with auto_merge (exit 0)", () => {
+      const fixturePath = "conformance/good_prs/01-valid-repro-fix.json";
+      const programmatic = verifyAttempt({ fixture: join(ROOT, fixturePath) });
+      assert.equal(programmatic.verified, true);
+      assert.equal(programmatic.verdict, "auto_merge");
+
+      const cli = runBin("bin/mirql.mjs", ["r", "verify", "--fixture", fixturePath]);
+      assert.equal(cli.status, 0);
+      const doc = JSON.parse(cli.stdout);
+      assert.equal(doc.verified, true);
+      assert.equal(doc.verdict, "auto_merge");
+    });
+
+    it("good PR 02: verifies valid consolidate phi drop with auto_merge (exit 0)", () => {
+      const fixturePath = "conformance/good_prs/02-valid-consolidate-phi-drop.json";
+      const programmatic = verifyAttempt({ fixture: join(ROOT, fixturePath) });
+      assert.equal(programmatic.verified, true);
+      assert.equal(programmatic.verdict, "auto_merge");
+
+      const cli = runBin("bin/mirql.mjs", ["r", "verify", "--fixture", fixturePath]);
+      assert.equal(cli.status, 0);
+      const doc = JSON.parse(cli.stdout);
+      assert.equal(doc.verified, true);
+      assert.equal(doc.verdict, "auto_merge");
+    });
+
+    it("B11: tokenizer catches empty catches across all evasive forms", () => {
+      // 1. catch(e){;}
+      assert.equal(checkSwallowedExceptions("try { x() } catch(e){;}").ok, false);
+      // 2. catch(e){ void e }
+      assert.equal(checkSwallowedExceptions("try { x() } catch(e){ void e }").ok, false);
+      // 3. .catch(() => {})
+      assert.equal(checkSwallowedExceptions("doAsync().catch(() => {})").ok, false);
+      assert.equal(checkSwallowedExceptions("doAsync().catch(err => { void err })").ok, false);
+      // 4. catch(e){ /* ignore */ }
+      assert.equal(checkSwallowedExceptions("try { x() } catch(e){ /* ignore exception */ }").ok, false);
+      // 5. catch(e){ if(0) throw e }
+      assert.equal(checkSwallowedExceptions("try { x() } catch(e){ if(0) throw e }").ok, false);
+      assert.equal(checkSwallowedExceptions("try { x() } catch(e){ if(false) { throw e; } }").ok, false);
+
+      // Valid non-empty catches
+      assert.equal(checkSwallowedExceptions("try { x() } catch(e){ console.error(e); }").ok, true);
+      assert.equal(checkSwallowedExceptions("try { x() } catch(e){ throw e; }").ok, true);
+      assert.equal(checkSwallowedExceptions("doAsync().catch(err => log(err))").ok, true);
+    });
+
+    it("B11: direct source scanning flags all test weakening patterns", () => {
+      assert.equal(checkTestWeakenings("describe('suite', () => { it.skip('flaky', () => {}); });").ok, false);
+      assert.equal(checkTestWeakenings("test.skip('skipped', () => {});").ok, false);
+      assert.equal(checkTestWeakenings("test.only('single test', () => {});").ok, false);
+      assert.equal(checkTestWeakenings("it.todo('unimplemented', () => {});").ok, false);
+      assert.equal(checkTestWeakenings("test('opts', { skip: true }, () => {});").ok, false);
+      assert.equal(checkTestWeakenings("test('ctx', (t) => { t.skip('reason'); });").ok, false);
+      assert.equal(checkTestWeakenings("describe['skip']('bracket notation', () => {});").ok, false);
+      assert.equal(checkTestWeakenings("describe('suite', () => { it('real test', () => {}); });").ok, true);
+    });
+
+    it("B11: path normalization handles case-folding, trailing dots, and relative traversals", () => {
+      assert.equal(normalizePath("CONSTITUTION.MD."), "constitution.md");
+      assert.equal(normalizePath("./packages/../CONSTITUTION.md"), "constitution.md");
+      assert.equal(normalizePath(".\\policy\\paths.yaml"), "policy/paths.yaml");
+      assert.equal(isHumanOnlyPath("CONSTITUTION.MD."), true);
+      assert.equal(isHumanOnlyPath("policy/../CONSTITUTION.md"), true);
+      assert.equal(isHumanOnlyPath("CONSTITUTION.md"), true);
+      assert.equal(isHumanOnlyPath("policy/paths.yaml"), true);
+      assert.equal(isHumanOnlyPath("packages/core/src/index.mjs"), false);
+      assert.equal(checkHumanOnlyPaths(["CONSTITUTION.md.", "packages/core/math.mjs"]).ok, false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 3. Two-Process Privilege Split (B10, B3)
+  // -------------------------------------------------------------------------
+  describe("3. Two-Process Privilege Split", () => {
+    it("B10: agent strips secrets and retains ONLY safe allowlist variables", () => {
+      const dirtyEnv = {
+        ...process.env,
+        NODE_ENV: "production",
+        MIRQL_PRIVATE_KEY: "super_secret_key",
+        MIRQL_SIGNING_KEY: "secret_signing_key",
+        GITHUB_TOKEN: "ghp_secrettoken123",
+        CUSTOM_SECRET: "should_be_stripped",
+      };
+
+      const res = runAgent({
+        env: dirtyEnv,
+        command: "node -v",
+      });
+
+      assert.equal(res.ok, true);
+      assert.equal(res.exitCode, 0);
+      assert.ok(res.strippedEnv.includes("MIRQL_PRIVATE_KEY"));
+      assert.ok(res.strippedEnv.includes("GITHUB_TOKEN"));
+      assert.ok(res.strippedEnv.includes("CUSTOM_SECRET"));
+    });
+
+    it("B3: supervisor produces a valid schema-checked Outcome with real computed metrics", () => {
+      const kp = generateEd25519Keypair();
+
+      const res = runSupervisor({
+        mirqlDir: tempDir,
+        signingKey: kp.privateKey,
+        keyId: kp.keyId,
+        keypair: kp,
+        jobId: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+        warrantId: "01HWWWWWWWWWWWWWWWWWWWWWWW",
+        builderCommand: "node -v",
+        runCheck: ({ stage }) => ({ exitCode: stage === "green_on_head" ? 0 : 1 }),
+      });
+
+      // 1. Outcome schema validation
+      const validation = validateDocument("outcome", res.outcome);
+      assert.equal(validation.valid, true, `Outcome document invalid: ${JSON.stringify(validation.errors)}`);
+      assert.equal(res.outcome.v, 1);
+      assert.equal(res.outcome.status, "pass");
+      assert.ok(Number.isSafeInteger(res.outcome.cost.micro_usd));
+      assert.ok(Number.isSafeInteger(res.outcome.phi.phi_before));
+      assert.ok(Number.isSafeInteger(res.outcome.phi.phi_after));
+
+      // SHAs must be real 64-char hex sha256 strings (not fake zeros)
+      assert.ok(res.outcome.base_sha.startsWith("sha256:"));
+      assert.notEqual(res.outcome.base_sha, `sha256:${"0".repeat(64)}`);
+      assert.ok(res.outcome.head_sha.startsWith("sha256:"));
+      assert.notEqual(res.outcome.head_sha, `sha256:${"1".repeat(64)}`);
+
+      // 2. Ledger event verification
+      const eventsPath = join(tempDir, "ledger", "events.jsonl");
+      assert.ok(existsSync(eventsPath), "events.jsonl must exist");
+      const content = readFileSync(eventsPath, "utf8").trim();
+      const eventDoc = JSON.parse(content);
+
+      assert.equal(eventDoc.type, "attempt.outcome");
+      assert.equal(eventDoc.writer.ns, "tool:run_supervisor");
+      assert.equal(eventDoc.seq, 1);
+      assert.ok(eventDoc.hash.startsWith("sha256:"));
+      assert.ok(eventDoc.sig.length > 0);
+
+      const verified = verifyEvent(eventDoc, kp.publicKey);
+      assert.equal(verified.ok, true);
+    });
+
+    it("B3: supervisor rejects and signs fail if agent worker command fails", () => {
+      const kp = generateEd25519Keypair();
+
+      const res = runSupervisor({
+        mirqlDir: tempDir,
+        keypair: kp,
+        jobId: "01H00000000000000000000001",
+        warrantId: "01H00000000000000000000002",
+        builderCommand: "node -e \"process.exit(1)\"", // Non-zero agent exit!
+        runCheck: ({ stage }) => ({ exitCode: stage === "green_on_head" ? 0 : 1 }),
+      });
+
+      assert.equal(res.verified, false);
+      assert.equal(res.verdict, "reject");
+      assert.equal(res.outcome.status, "fail");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 4. 0-Token Probes (B4)
+  // -------------------------------------------------------------------------
+  describe("4. 0-Token Probes", () => {
+    it("B4: executes tests probe and records signed probe.completed event", () => {
+      const kp = generateEd25519Keypair();
+      const res = runProbe({
+        mirqlDir: tempDir,
+        probe: "tests",
+        keypair: kp,
+      });
+
+      assert.equal(res.ok, true);
+      assert.equal(res.probe.name, "unit_conformance_suite");
+      assert.equal(res.probe.status, "pass");
+      assert.ok(Number.isSafeInteger(res.probe.failures));
+
+      const eventsPath = join(tempDir, "ledger", "events.jsonl");
+      const eventDoc = JSON.parse(readFileSync(eventsPath, "utf8").trim());
+      assert.equal(eventDoc.type, "probe.completed");
+      assert.equal(eventDoc.writer.ns, "tool:run_supervisor");
+
+      const verified = verifyEvent(eventDoc, kp.publicKey);
+      assert.equal(verified.ok, true);
+    });
+
+    it("B4: complexity probe computes real metrics and checks threshold from policy/probes.toml", () => {
+      const kp = generateEd25519Keypair();
+      const res = runProbe({
+        mirqlDir: tempDir,
+        probe: "complexity",
+        keypair: kp,
+        workspaceDir: ROOT,
+      });
+
+      assert.equal(res.probe.name, "ast_cyclomatic_complexity");
+      assert.ok(Number.isSafeInteger(res.probe.cyclomatic));
+      assert.ok(Number.isSafeInteger(res.probe.max_cyclomatic));
+      assert.equal(res.probe.max_cyclomatic, 15);
+      // Since repo cyclomatic is 1700 > 15, status is "fail"
+      assert.equal(res.probe.status, "fail");
+      assert.equal(res.ok, false);
+    });
+
+    it("B4: unknown probe name fails with exit 2 (USAGE_ERROR)", () => {
+      assert.throws(
+        () => runProbe({ probe: "completely_unknown_probe" }),
+        (err) => err.code === "USAGE_ERROR" && err.exitCode === EXIT_CODES.USAGE_ERROR,
+      );
+
+      const cli = runBin("bin/mirql.mjs", ["r", "probe", "--type", "invalid_probe"]);
+      assert.equal(cli.status, EXIT_CODES.USAGE_ERROR); // 2
+    });
+
+    it("B4: unimplemented probe reports status not_implemented", () => {
+      const kp = generateEd25519Keypair();
+      const res = runProbe({
+        mirqlDir: tempDir,
+        probe: "drift",
+        keypair: kp,
+      });
+
+      assert.equal(res.ok, false);
+      assert.equal(res.probe.status, "not_implemented");
+      assert.equal(res.probe.passed, false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 5. `bing-bong` Consensus Loop (B5, B6, B7, B8, B9)
+  // -------------------------------------------------------------------------
+  describe("5. `bing-bong` Consensus Loop", () => {
+    const validWarrant = {
+      v: 1,
+      id: "01H1234567890ABCDEFGHJKMNP",
+      class: "bugfix",
+      semantic_fingerprint: `sha256:${"a".repeat(64)}`,
+      anchors: ["packages/core/src/calc.mjs"],
+      evidence: { test_suite: 1 },
+      red_check: { command: 1 },
+      scope: { allow: 1 },
+      budget_micro_usd: 1500000,
+      created_by: "human:owner",
+    };
+
+    it("multi-round debate: Round 1 DISAGREE, Round 2 resolves objection and converges", async () => {
+      const panel = [
+        async (currWarrant, round, prior, idx, hash) => {
+          if (round === 1) {
+            return {
+              verdict: "DISAGREE",
+              blocking_objections: [{ id: "OBJ-1", objection: "Law 10 repro needed" }],
+              proposed_amendments: [{ id: "AM-1", text: "Add precision guard", resolves: ["OBJ-1"] }],
+              warrant_patch: { precision_guard: 6 },
+              warrant_hash: hash,
+            };
+          }
+          return {
+            verdict: "CONVERGED",
+            blocking_objections: [],
+            proposed_amendments: [],
+            warrant_patch: {},
+            warrant_hash: hash,
+          };
+        },
+        async (currWarrant, round, prior, idx, hash) => {
+          return {
+            verdict: "CONVERGED",
+            blocking_objections: [],
+            proposed_amendments: [],
+            warrant_patch: {},
+            warrant_hash: hash,
+          };
+        },
+      ];
+      // Assign distinct families
+      panel[0].family = "anthropic";
+      panel[1].family = "zai";
+
+      const res = await runBingBong({
+        mirqlDir: tempDir,
+        warrant: validWarrant,
+        rounds: 3,
+        panel,
+      });
+
+      assert.equal(res.status, "CONVERGED");
+      assert.equal(res.rounds_used, 2);
+      assert.ok(res.consensus_hash.startsWith("sha256:"));
+
+      const consensusFile = join(tempDir, "consensus", `${validWarrant.id}.json`);
+      assert.ok(existsSync(consensusFile));
+      const consensusDoc = JSON.parse(readFileSync(consensusFile, "utf8"));
+      assert.equal(consensusDoc.consensus_hash, res.consensus_hash);
+      assert.equal(consensusDoc.warrant.precision_guard, 6);
+
+      const eventsFile = join(tempDir, "ledger", "events.jsonl");
+      const eventDoc = JSON.parse(readFileSync(eventsFile, "utf8").trim());
+      assert.equal(eventDoc.type, "warrant.converged");
+      assert.equal(eventDoc.writer.ns, "tool:run_supervisor");
+    });
+
+    it("B6: zero-silent-concessions rejects silently dropped objections", async () => {
+      const panel = [
+        async (currWarrant, round, prior, idx, hash) => {
+          if (round === 1) {
+            return {
+              verdict: "DISAGREE",
+              blocking_objections: [{ id: "OBJ-CRITICAL", objection: "Critical security flaw" }],
+              proposed_amendments: [],
+              warrant_patch: {},
+              warrant_hash: hash,
+            };
+          }
+          // Round 2: silently drops OBJ-CRITICAL without reason or amendment citing it!
+          return {
+            verdict: "CONVERGED",
+            blocking_objections: [],
+            proposed_amendments: [],
+            warrant_patch: {},
+            warrant_hash: hash,
+          };
+        },
+        async (currWarrant, round, prior, idx, hash) => ({
+          verdict: "CONVERGED",
+          blocking_objections: [],
+          proposed_amendments: [],
+          warrant_patch: {},
+          warrant_hash: hash,
+        }),
+      ];
+      panel[0].family = "anthropic";
+      panel[1].family = "zai";
+
+      const res = await runBingBong({
+        mirqlDir: tempDir,
+        warrant: validWarrant,
+        rounds: 2,
+        panel,
+      });
+
+      // Must escalate to NEEDS_HUMAN due to silent concession!
+      assert.equal(res.status, "NEEDS_HUMAN");
+      assert.ok(
+        res.unresolved_objections.some((o) => o.violation === "SILENT_CONCESSION"),
+      );
+    });
+
+    it("B7: no convergence in a round that amended the warrant", async () => {
+      const panel = [
+        async (currWarrant, round, prior, idx, hash) => {
+          if (round === 1) {
+            return {
+              verdict: "CONVERGED",
+              blocking_objections: [],
+              proposed_amendments: ["Patching warrant"],
+              warrant_patch: { new_field: "amended" },
+              warrant_hash: hash,
+            };
+          }
+          return {
+            verdict: "CONVERGED",
+            blocking_objections: [],
+            proposed_amendments: [],
+            warrant_patch: {},
+            warrant_hash: hash,
+          };
+        },
+        async (currWarrant, round, prior, idx, hash) => ({
+          verdict: "CONVERGED",
+          blocking_objections: [],
+          proposed_amendments: [],
+          warrant_patch: {},
+          warrant_hash: hash,
+        }),
+      ];
+      panel[0].family = "anthropic";
+      panel[1].family = "zai";
+
+      const res = await runBingBong({
+        mirqlDir: tempDir,
+        warrant: validWarrant,
+        rounds: 2,
+        panel,
+      });
+
+      // Cannot converge in round 1 because warrant was amended; converges in round 2
+      assert.equal(res.status, "CONVERGED");
+      assert.equal(res.rounds_used, 2);
+    });
+
+    it("B8: deadlocked debate records signed warrant.escalated event in ledger", async () => {
+      const panel = [
+        async (currWarrant, round, prior, idx, hash) => ({
+          verdict: "DISAGREE",
+          blocking_objections: ["Deadlock objection"],
+          proposed_amendments: [],
+          warrant_patch: {},
+          warrant_hash: hash,
+        }),
+        async (currWarrant, round, prior, idx, hash) => ({
+          verdict: "CONVERGED",
+          blocking_objections: [],
+          proposed_amendments: [],
+          warrant_patch: {},
+          warrant_hash: hash,
+        }),
+      ];
+      panel[0].family = "anthropic";
+      panel[1].family = "zai";
+
+      const res = await runBingBong({
+        mirqlDir: tempDir,
+        warrant: validWarrant,
+        rounds: 2,
+        panel,
+      });
+
+      assert.equal(res.status, "NEEDS_HUMAN");
+      assert.equal(res.rounds_used, 2);
+
+      const eventsFile = join(tempDir, "ledger", "events.jsonl");
+      const eventDoc = JSON.parse(readFileSync(eventsFile, "utf8").trim());
+      assert.equal(eventDoc.type, "warrant.escalated");
+      assert.equal(eventDoc.writer.ns, "tool:run_supervisor");
+    });
+
+    it("B8: escalates immediately when rounds < 1", () => {
+      const panel = [
+        { model: "claude-opus-5-5-medium", family: "anthropic", verdict: "CONVERGED" },
+        { model: "zai/glm-5.3#max", family: "zai", verdict: "CONVERGED" },
+      ];
+
+      const res = runBingBong({
+        mirqlDir: tempDir,
+        warrant: validWarrant,
+        rounds: 0,
+        panel,
+      });
+
+      assert.equal(res.status, "NEEDS_HUMAN");
+      assert.equal(res.rounds_used, 0);
+
+      const eventsFile = join(tempDir, "ledger", "events.jsonl");
+      const eventDoc = JSON.parse(readFileSync(eventsFile, "utf8").trim());
+      assert.equal(eventDoc.type, "warrant.escalated");
+    });
+
+    it("B5: rejects unconfigured panel or panel with duplicate model family", () => {
+      // Missing panel
+      assert.throws(
+        () => runBingBong({ warrant: validWarrant, panel: [] }),
+        (err) => err.code === "USAGE_ERROR",
+      );
+
+      // Duplicate family: both claude
+      const duplicatePanel = [
+        { model: "claude-opus-5-5-medium", family: "anthropic", verdict: "CONVERGED" },
+        { model: "claude-sonnet-4-5", family: "anthropic", verdict: "CONVERGED" },
+      ];
+      assert.throws(
+        () => runBingBong({ warrant: validWarrant, panel: duplicatePanel }),
+        (err) => err.code === "USAGE_ERROR",
+      );
+    });
+
+    it("B9: validates warrant against schema and Crockford ULID regex before file operations", () => {
+      const invalidIdWarrant = {
+        ...validWarrant,
+        id: "../../../path-traversal-id",
+      };
+      const panel = [
+        { model: "claude-opus-5-5-medium", family: "anthropic", verdict: "CONVERGED" },
+        { model: "zai/glm-5.3#max", family: "zai", verdict: "CONVERGED" },
+      ];
+
+      assert.throws(
+        () => runBingBong({ warrant: invalidIdWarrant, panel }),
+        (err) => err.code === "USAGE_ERROR",
+      );
+    });
+
+    it("CLI invocation via `mirql r bing-bong` with valid warrant and panel converges (exit 0)", () => {
+      const warrantPath = join(tempDir, "warrant.json");
+      writeFileSync(warrantPath, JSON.stringify(validWarrant), "utf8");
+
+      const panelPath = join(tempDir, "panel.json");
+      writeFileSync(
+        panelPath,
+        JSON.stringify([
+          { model: "claude-opus-5-5-medium", family: "anthropic", verdict: "CONVERGED" },
+          { model: "zai/glm-5.3#max", family: "zai", verdict: "CONVERGED" },
+        ]),
+        "utf8",
+      );
+
+      const res = runBin("bin/mirql.mjs", [
+        "r",
+        "bing-bong",
+        "--warrant",
+        warrantPath,
+        "--panel",
+        panelPath,
+        "--dir",
+        tempDir,
+        "--rounds",
+        "2",
+      ]);
+
+      assert.equal(res.status, 0, `CLI failed with ${res.status}: ${res.stderr}`);
+      const doc = JSON.parse(res.stdout);
+      assert.equal(doc.status, "CONVERGED");
+    });
+
+    it("CLI invocation via `mirql r bb` with valid warrant and panel converges (exit 0)", () => {
+      const warrantPath = join(tempDir, "warrant_bb.json");
+      writeFileSync(warrantPath, JSON.stringify(validWarrant), "utf8");
+
+      const panelPath = join(tempDir, "panel_bb.json");
+      writeFileSync(
+        panelPath,
+        JSON.stringify([
+          { model: "claude-opus-5-5-medium", family: "anthropic", verdict: "CONVERGED" },
+          { model: "zai/glm-5.3#max", family: "zai", verdict: "CONVERGED" },
+        ]),
+        "utf8",
+      );
+
+      const res = runBin("bin/mirql.mjs", [
+        "r",
+        "bb",
+        "--warrant",
+        warrantPath,
+        "--panel",
+        panelPath,
+        "--dir",
+        tempDir,
+        "--rounds",
+        "2",
+      ]);
+
+      assert.equal(res.status, 0, `CLI failed with ${res.status}: ${res.stderr}`);
+      const doc = JSON.parse(res.stdout);
+      assert.equal(doc.status, "CONVERGED");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 6. Complexity Potential Phi (computePhi, Law 11 & Law 13, B13)
+  // -------------------------------------------------------------------------
+  describe("6. Law 11 & 13: Complexity Potential Phi", () => {
+    it("computePhi returns integer-only metrics", () => {
+      const phi = computePhi(ROOT);
+      assert.ok(Number.isSafeInteger(phi.loc), "loc must be safe integer");
+      assert.ok(Number.isSafeInteger(phi.export_count), "export_count must be safe integer");
+      assert.ok(Number.isSafeInteger(phi.cyclomatic), "cyclomatic must be safe integer");
+      assert.ok(Number.isSafeInteger(phi.dep_count), "dep_count must be safe integer");
+      assert.ok(Number.isSafeInteger(phi.dup_blocks), "dup_blocks must be safe integer");
+      assert.ok(Number.isSafeInteger(phi.total), "total must be safe integer");
+      assert.ok(phi.loc > 0);
+      assert.ok(phi.total > 0);
+    });
+
+    it("checkPhiReduction verifies non-increasing or strictly decreasing potential", () => {
+      assert.equal(checkPhiReduction(100, 95, true).ok, true);
+      assert.equal(checkPhiReduction(100, 100, false).ok, true);
+      assert.equal(checkPhiReduction(100, 100, true).ok, false); // consolidator needs < 0
+      assert.equal(checkPhiReduction(100, 105, false).ok, false);
+    });
+
+    it("B13: verifyAttempt enforces Law 13 Delta Phi <= 0 (and strictly < 0 for consolidator)", () => {
+      const baseOptions = {
+        runCheck: () => ({ exitCode: 0 }),
+      };
+
+      // 1. Delta Phi > 0 is rejected under Law 13
+      const increaseRes = verifyAttempt({
+        ...baseOptions,
+        phiBefore: 100,
+        phiAfter: 105, // +5 increase
+      });
+      assert.equal(increaseRes.verified, false);
+      assert.equal(increaseRes.verdict, "reject");
+      assert.equal(increaseRes.rule, "LAW_13_PHI_INCREASE");
+
+      // 2. Consolidator with Delta Phi = 0 is rejected under Law 13
+      const consolidatorZeroRes = verifyAttempt({
+        ...baseOptions,
+        role: "consolidator",
+        phiBefore: 100,
+        phiAfter: 100, // 0 delta
+      });
+      assert.equal(consolidatorZeroRes.verified, false);
+      assert.equal(consolidatorZeroRes.verdict, "reject");
+      assert.equal(consolidatorZeroRes.rule, "LAW_13_CONSOLIDATOR_PHI");
+
+      // 3. Consolidator with Delta Phi < 0 passes Law 13
+      const consolidatorDropRes = verifyAttempt({
+        role: "consolidator",
+        phiBefore: 100,
+        phiAfter: 90, // -10 drop
+        runCheck: ({ stage }) => ({ exitCode: stage === "green_on_head" ? 0 : 1 }),
+      });
+      assert.equal(consolidatorDropRes.verified, true);
+      assert.equal(consolidatorDropRes.verdict, "auto_merge");
+    });
+  });
+});
