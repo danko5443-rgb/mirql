@@ -27,3 +27,17 @@ export {
 export { WRITER_ACL, canWriteEvent } from "./acl.mjs";
 export { validateDocument, loadSchema, SCHEMA_KINDS } from "./schema.mjs";
 export { withLedgerLock, acquireLock, releaseLock } from "./lock.mjs";
+export {
+  DEFAULT_HUMAN_ONLY_PATTERNS,
+  DEFAULT_HUMAN_APPROVE_PATTERNS,
+  normalizePath,
+  isPathMatchingPattern,
+  loadPathPolicies,
+  isHumanOnlyPath,
+  isHumanApprovePath,
+  extractBalancedBlock,
+  isEffectivelyEmpty,
+  checkSwallowedExceptions,
+  checkTestWeakenings,
+} from "./anti-cheat.mjs";
+

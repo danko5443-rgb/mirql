@@ -1,0 +1,160 @@
+name: Mergeproof External Notary
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  notary:
+    name: Mergeproof Conscience Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out candidate PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          path: candidate
+
+      - name: Check out base branch (Authoritative Notary, Law 7 & 9)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base-notary
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify zero dependencies on candidate
+        run: |
+          node -e "
+            const pkg = require('./candidate/package.json');
+            const deps = Object.keys(pkg.dependencies || {}).length;
+            const devDeps = Object.keys(pkg.devDependencies || {}).length;
+            if (deps > 0 || devDeps > 0) {
+              console.error('Violated Zero-Dependency Law: found dependencies in package.json');
+              process.exit(1);
+            }
+          "
+
+      - name: Run Candidate Test Suite
+        working-directory: candidate
+        run: node scripts/run-tests.mjs
+
+      - name: Evaluate Mergeproof Notary Gate (Base-Authored Conscience)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const { spawnSync } = require('child_process');
+
+            const baseSha = process.env.BASE_SHA;
+            const headSha = process.env.HEAD_SHA;
+            const prNumber = parseInt(process.env.PR_NUMBER || '0', 10);
+            const prAuthor = process.env.PR_AUTHOR || 'unknown';
+
+            // Authoritative git diff (Law 7): fail closed if diff command fails
+            const diffRes = spawnSync('git', ['diff', '--name-status', baseSha + '...' + headSha], {
+              cwd: './candidate',
+              encoding: 'utf8',
+              timeout: 15000
+            });
+            if (diffRes.status !== 0) {
+              console.error('Git diff check failed against target tip:', diffRes.stderr || diffRes.stdout);
+              process.exit(1);
+            }
+
+            const isTestPath = (p) => {
+              if (typeof p !== 'string') return false;
+              const norm = p.replaceAll('\\\\', '/').toLowerCase();
+              return norm.startsWith('tests/') || norm.startsWith('test/') || norm.includes('.test.') || norm.includes('_test.');
+            };
+
+            const lines = diffRes.stdout ? diffRes.stdout.split(/\r?\n/).filter(Boolean) : [];
+            const filesChanged = [];
+            const testsDeleted = [];
+            for (const line of lines) {
+              const parts = line.split('\t');
+              const status = parts[0];
+              if (status.startsWith('R') && parts.length >= 3) {
+                const oldFile = parts[1];
+                const newFile = parts[2];
+                filesChanged.push(newFile);
+                if (isTestPath(oldFile) && !isTestPath(newFile)) {
+                  testsDeleted.push(oldFile);
+                }
+              } else if (parts.length >= 2) {
+                const file = parts[1];
+                filesChanged.push(file);
+                if (status.startsWith('D') && isTestPath(file)) {
+                  testsDeleted.push(file);
+                }
+              }
+            }
+
+            // Real base-authored phi complexity computation (Law 13 & Law 7)
+            let deltaPhi = 0;
+            try {
+              const { computePhi } = require('./base-notary/packages/run/phi.mjs');
+              const phiBase = computePhi('./base-notary');
+              const phiHead = computePhi('./candidate');
+              if (!Number.isSafeInteger(phiBase?.total) || !Number.isSafeInteger(phiHead?.total)) {
+                console.error('Law 13 Fail-Closed: base or candidate phi total is not a safe integer');
+                process.exit(1);
+              }
+              deltaPhi = phiHead.total - phiBase.total;
+            } catch (err) {
+              console.error('Law 7 Fail-Closed: base-authored computePhi failed:', err.message);
+              process.exit(1);
+            }
+
+            const prDoc = {
+              pr: {
+                number: prNumber,
+                base_sha: baseSha,
+                head_sha: headSha,
+                author: prAuthor,
+                kind: 'pr'
+              },
+              diff_stat: {
+                files_changed: filesChanged
+              },
+              evidence: {
+                tests_deleted: testsDeleted
+              },
+              proof: {
+                causal_cycle_completed: false,
+                suite_pass_head: true
+              },
+              phi: {
+                delta_phi: deltaPhi
+              }
+            };
+            const prDocPath = './candidate/pr-doc.json';
+            fs.writeFileSync(prDocPath, JSON.stringify(prDoc), 'utf8');
+
+            const notaryRes = spawnSync(process.execPath, [
+              '../base-notary/bin/mirql.mjs',
+              'm',
+              'check',
+              '--pr',
+              './pr-doc.json',
+              '--base',
+              baseSha,
+              '--head',
+              headSha
+            ], {
+              cwd: './candidate',
+              stdio: 'inherit'
+            });
+            process.exit(notaryRes.status ?? 1);
+          "
