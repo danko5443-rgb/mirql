@@ -10,14 +10,22 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, mkdirSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { EXIT_CODES, ulid, sha256, getActiveTrippedBreakers } from "../packages/core/index.mjs";
-import { submitWarrant, tickQueue, leaseNextJob } from "../packages/queue/index.mjs";
-import { BreakerStore } from "../packages/run/doctor.mjs";
-import { appendSupervisorEvent } from "../packages/run/ledger.mjs";
-
+// Modules under test: this repository by default, or the checkout at
+// MIRQL_TARGET_ROOT when driven by the verified-reproducer pipeline
+// (reproducer/ runs this suite against BOTH checkouts -- it must fail on the
+// advisory-only base where tripped breakers do not refuse leases).
 const ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
+const TARGET_ROOT = process.env.MIRQL_TARGET_ROOT
+  ? resolve(process.env.MIRQL_TARGET_ROOT)
+  : ROOT;
+const targetImport = (rel) => import(pathToFileURL(join(TARGET_ROOT, rel)).href);
+
+const { EXIT_CODES, ulid, sha256, getActiveTrippedBreakers } = await targetImport("packages/core/index.mjs");
+const { submitWarrant, tickQueue, leaseNextJob } = await targetImport("packages/queue/index.mjs");
+const { BreakerStore } = await targetImport("packages/run/doctor.mjs");
+const { appendSupervisorEvent } = await targetImport("packages/run/ledger.mjs");
 
 function makeValidWarrant(overrides = {}) {
   return {
