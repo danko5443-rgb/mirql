@@ -876,15 +876,19 @@ describe("mergeproof: F1 anti-cheat string-concealment patch", () => {
       const nestedEmpty = "p.catch(e => { if (e) {} });";
       assert.equal(checkSwallowedExceptions(nestedEmpty).ok, false, "Nested empty if inside .catch must be caught");
 
-      // 2. .catch(e => { const x = {}; })
+      // 2. .catch(e => { if (f(e)) {} }) with nested function call in condition
+      const nestedCallEmpty = "p.catch(e => { if (f(e)) {} });";
+      assert.equal(checkSwallowedExceptions(nestedCallEmpty).ok, false, "Nested func call in if condition must be caught");
+
+      // 3. .catch(e => { const x = {}; })
       const emptyObj = "p.catch(e => { const x = {}; });";
       assert.equal(checkSwallowedExceptions(emptyObj).ok, false, "No-op assignment in .catch must be caught");
 
-      // 3. .catch(e => void e)
+      // 4. .catch(e => void e)
       const voidArrow = "p.catch(e => void e);";
       assert.equal(checkSwallowedExceptions(voidArrow).ok, false, "void expr arrow in .catch must be caught");
 
-      // 4. Genuine error handling passes
+      // 5. Genuine error handling passes
       const validCatch = "p.catch(e => { console.error(e); process.exit(1); });";
       assert.equal(checkSwallowedExceptions(validCatch).ok, true, "Valid error handler with exit passes");
     });

@@ -281,11 +281,27 @@ export function isEffectivelyEmpty(bodyText) {
   // Strip void expressions like `void e` or `void 0`
   cleaned = cleaned.replace(/\bvoid\s+[a-zA-Z0-9_$.]+/g, "");
 
-  // Strip empty if/while/for statements: e.g. if (e) {} or if (err) ;
-  cleaned = cleaned.replace(
-    /\b(?:if|while|for)\s*\([^)]*\)\s*(?:\{\s*\}|;)/g,
-    "",
-  );
+  // Strip empty if/while/for statements (supporting arbitrary nested parentheses, e.g. if (f(e)) {})
+  const branchRegex = /\b(?:if|while|for)\s*\(/g;
+  let bm;
+  while ((bm = branchRegex.exec(cleaned)) !== null) {
+    let pCount = 1;
+    let idx = bm.index + bm[0].length;
+    while (idx < cleaned.length && pCount > 0) {
+      if (cleaned[idx] === "(") pCount++;
+      else if (cleaned[idx] === ")") pCount--;
+      idx++;
+    }
+    if (pCount === 0) {
+      const rest = cleaned.slice(idx);
+      const afterParen = rest.match(/^\s*(?:\{\s*\}|;)/);
+      if (afterParen) {
+        const matchLen = (idx - bm.index) + afterParen[0].length;
+        cleaned = cleaned.slice(0, bm.index) + cleaned.slice(bm.index + matchLen);
+        branchRegex.lastIndex = bm.index;
+      }
+    }
+  }
 
   // Strip variable declarations with no-op or dead assignments or empty initializers
   cleaned = cleaned.replace(

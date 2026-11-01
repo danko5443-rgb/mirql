@@ -143,6 +143,22 @@ export function resolveDeltaPhi(doc = {}) {
 }
 
 /**
+ * Canonical test file path recognizer shared across mergeproof checks.
+ *
+ * @param {string} p
+ * @returns {boolean}
+ */
+export function isTestFilePath(p) {
+  const norm = normalizePath(p);
+  return (
+    norm.startsWith("tests/") ||
+    norm.startsWith("test/") ||
+    norm.includes(".test.") ||
+    norm.includes("_test.")
+  );
+}
+
+/**
  * Queries git diff --name-status base...head if git and a repository are available.
  * Returns { ok: true, files: string[], deletedFiles: string[] } on success,
  * or { ok: false, error: string, files: [], deletedFiles: [] } on failure.
@@ -182,10 +198,17 @@ export function getGitDiffInfo(baseSha, headSha, repoDir = process.cwd()) {
     const files = [];
     const deletedFiles = [];
     for (const line of lines) {
-      const parts = line.split(/\s+/);
+      const parts = line.split("\t");
       const status = parts[0];
-      const filePath = parts[parts.length - 1];
-      if (filePath) {
+      if (status.startsWith("R") && parts.length >= 3) {
+        const oldFile = parts[1];
+        const newFile = parts[2];
+        files.push(newFile);
+        if (isTestFilePath(oldFile) && !isTestFilePath(newFile)) {
+          deletedFiles.push(oldFile);
+        }
+      } else if (parts.length >= 2) {
+        const filePath = parts[1];
         files.push(filePath);
         if (status.startsWith("D")) {
           deletedFiles.push(filePath);

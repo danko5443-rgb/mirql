@@ -73,39 +73,48 @@ jobs:
               process.exit(1);
             }
 
+            const isTestPath = (p) => {
+              if (typeof p !== 'string') return false;
+              const norm = p.replaceAll('\\\\', '/').toLowerCase();
+              return norm.startsWith('tests/') || norm.startsWith('test/') || norm.includes('.test.') || norm.includes('_test.');
+            };
+
             const lines = diffRes.stdout ? diffRes.stdout.split(/\r?\n/).filter(Boolean) : [];
             const filesChanged = [];
             const testsDeleted = [];
             for (const line of lines) {
-              const parts = line.split(/\s+/);
+              const parts = line.split('\t');
               const status = parts[0];
-              const file = parts[parts.length - 1];
-              if (file) {
+              if (status.startsWith('R') && parts.length >= 3) {
+                const oldFile = parts[1];
+                const newFile = parts[2];
+                filesChanged.push(newFile);
+                if (isTestPath(oldFile) && !isTestPath(newFile)) {
+                  testsDeleted.push(oldFile);
+                }
+              } else if (parts.length >= 2) {
+                const file = parts[1];
                 filesChanged.push(file);
-                if (status.startsWith('D') && (file.startsWith('tests/') || file.includes('.test.'))) {
+                if (status.startsWith('D') && isTestPath(file)) {
                   testsDeleted.push(file);
                 }
               }
             }
 
-            // Real base-authored phi complexity computation (Law 13)
+            // Real base-authored phi complexity computation (Law 13 & Law 7)
             let deltaPhi = 0;
             try {
               const { computePhi } = require('./base-notary/packages/run/phi.mjs');
               const phiBase = computePhi('./base-notary');
               const phiHead = computePhi('./candidate');
-              if (Number.isSafeInteger(phiBase?.total) && Number.isSafeInteger(phiHead?.total)) {
-                deltaPhi = phiHead.total - phiBase.total;
+              if (!Number.isSafeInteger(phiBase?.total) || !Number.isSafeInteger(phiHead?.total)) {
+                console.error('Law 13 Fail-Closed: base or candidate phi total is not a safe integer');
+                process.exit(1);
               }
-            } catch (_) {
-              try {
-                const { computePhi } = require('./candidate/packages/run/phi.mjs');
-                const phiBase = computePhi('./base-notary');
-                const phiHead = computePhi('./candidate');
-                if (Number.isSafeInteger(phiBase?.total) && Number.isSafeInteger(phiHead?.total)) {
-                  deltaPhi = phiHead.total - phiBase.total;
-                }
-              } catch (_) {}
+              deltaPhi = phiHead.total - phiBase.total;
+            } catch (err) {
+              console.error('Law 7 Fail-Closed: base-authored computePhi failed:', err.message);
+              process.exit(1);
             }
 
             const prDoc = {
@@ -130,10 +139,11 @@ jobs:
                 delta_phi: deltaPhi
               }
             };
-            fs.writeFileSync('./pr-doc.json', JSON.stringify(prDoc), 'utf8');
+            const prDocPath = './candidate/pr-doc.json';
+            fs.writeFileSync(prDocPath, JSON.stringify(prDoc), 'utf8');
 
             const notaryRes = spawnSync(process.execPath, [
-              './base-notary/bin/mirql.mjs',
+              '../base-notary/bin/mirql.mjs',
               'm',
               'check',
               '--pr',
