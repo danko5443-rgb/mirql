@@ -1,0 +1,33 @@
+[Unit]
+Description=mirql Lifeguard 30m Probation Watchdog Daemon (Law 2)
+Documentation=https://github.com/ahmed-3m/mirql
+After=mirql-launcher.service
+Wants=mirql-launcher.service
+
+[Service]
+Type=simple
+User=mirql
+Group=mirql
+WorkingDirectory=/opt/mirql
+ExecStart=/usr/bin/node /opt/mirql/packages/daemons/lifeguard.mjs --watch --timeout 1800 --base-file /opt/mirql/.mirql/state/base_sha --heartbeat-file /opt/mirql/.mirql/state/heartbeat --kill-pid-file /opt/mirql/.mirql/state/launcher.pid --disarm-file /etc/mirql/disarm
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=15s
+
+# Strict security sandbox
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/mirql /tmp
+
+# Resource limits
+LimitNOFILE=65535
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

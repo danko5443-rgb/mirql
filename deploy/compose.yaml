@@ -1,0 +1,106 @@
+# deploy/compose.yaml — mirql Production Topology Specification
+# Enforces two-process privilege split (Law 1) and network isolation
+
+name: mirql
+
+services:
+  control:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.control
+    container_name: mirql-control
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - NODE_ENV=production
+      - MIRQL_DIR=/app/.mirql
+      - LLM_GATEWAY_URL=http://llm-gateway:8080
+      - GATEWAY_ADMIN_TOKEN=${GATEWAY_ADMIN_TOKEN:?GATEWAY_ADMIN_TOKEN is required (min 32 chars)}
+    networks:
+      - control-net
+      - gateway-net
+    volumes:
+      - mirql-data:/app/.mirql
+      - mirql-keys:/app/.mirql/keys:ro
+
+  llm-gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gateway
+    container_name: mirql-llm-gateway
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - NODE_ENV=production
+      - PORT=8080
+      - GATEWAY_ADMIN_TOKEN=${GATEWAY_ADMIN_TOKEN:?GATEWAY_ADMIN_TOKEN is required (min 32 chars)}
+    networks:
+      - gateway-net
+      - agent-net
+      - egress-net
+
+  agent:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.agent
+    container_name: mirql-agent
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /workspace:rw,noexec,nosuid,size=512m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - NODE_ENV=production
+      - LLM_GATEWAY_URL=http://llm-gateway:8080
+    networks:
+      - agent-net
+
+  verify:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.verify
+    container_name: mirql-verify
+    network_mode: "none"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /workspace:rw,nosuid,size=512m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - NODE_ENV=production
+
+networks:
+  control-net:
+    driver: bridge
+    internal: true
+  agent-net:
+    driver: bridge
+    internal: true
+  gateway-net:
+    driver: bridge
+    internal: true
+  egress-net:
+    driver: bridge
+    internal: false
+
+volumes:
+  mirql-data:
+  mirql-keys:

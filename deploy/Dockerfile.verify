@@ -1,0 +1,34 @@
+# deploy/Dockerfile.verify — mirql Verification Container
+# Security: Zero network access (network: none), unprivileged user (1002), keyless Red/Green checks (Law 16)
+
+FROM node:22-alpine
+
+# Install git for patch application and disposable worktree checks
+RUN apk add --no-cache git
+
+# Set non-root verify user and group
+RUN addgroup -g 1002 verify && \
+    adduser -u 1002 -G verify -s /bin/sh -D verify
+
+WORKDIR /app
+
+# Copy application files
+COPY --chown=verify:verify package.json surface.lock ./
+COPY --chown=verify:verify bin/ ./bin/
+COPY --chown=verify:verify packages/ ./packages/
+COPY --chown=verify:verify policy/ ./policy/
+COPY --chown=verify:verify schemas/ ./schemas/
+
+WORKDIR /workspace
+
+ENV NODE_ENV=production
+ENV HOME=/workspace
+ENV TMPDIR=/tmp
+
+RUN mkdir -p /workspace /tmp && \
+    chown -R verify:verify /workspace /tmp
+
+USER 1002:1002
+
+ENTRYPOINT ["node", "/app/bin/mirql-run.mjs", "verify"]
+CMD ["--help"]

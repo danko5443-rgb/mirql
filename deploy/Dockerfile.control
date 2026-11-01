@@ -1,0 +1,33 @@
+# deploy/Dockerfile.control — mirql Control Plane Container
+# Security: Unprivileged user (1000), read-only rootfs, zero npm dependencies (Law 1)
+
+FROM node:22-alpine
+
+# Set non-root user and group
+RUN addgroup -g 1000 mirql && \
+    adduser -u 1000 -G mirql -s /bin/sh -D mirql
+
+WORKDIR /app
+
+# Copy application files (zero external dependencies)
+COPY --chown=mirql:mirql package.json surface.lock ./
+COPY --chown=mirql:mirql bin/ ./bin/
+COPY --chown=mirql:mirql packages/ ./packages/
+COPY --chown=mirql:mirql policy/ ./policy/
+COPY --chown=mirql:mirql roles/ ./roles/
+COPY --chown=mirql:mirql schemas/ ./schemas/
+COPY --chown=mirql:mirql conformance/ ./conformance/
+
+# Set environment
+ENV NODE_ENV=production
+ENV MIRQL_DIR=/app/.mirql
+ENV HOME=/app
+
+# Create mount points with proper ownership
+RUN mkdir -p /app/.mirql /tmp && \
+    chown -R mirql:mirql /app /tmp
+
+USER 1000:1000
+
+ENTRYPOINT ["node", "bin/mirql.mjs"]
+CMD ["--help"]

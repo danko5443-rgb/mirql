@@ -1,0 +1,32 @@
+# deploy/Dockerfile.agent — mirql Sandbox Agent Worker Container
+# Security: gVisor (runsc) target, unprivileged user (1001), no secrets, no egress internet (Law 1)
+
+FROM node:22-alpine
+
+# Set non-root agent user and group
+RUN addgroup -g 1001 agent && \
+    adduser -u 1001 -G agent -s /bin/sh -D agent
+
+WORKDIR /app
+
+# Copy application files and runtime tools
+COPY --chown=agent:agent package.json surface.lock ./
+COPY --chown=agent:agent bin/ ./bin/
+COPY --chown=agent:agent packages/ ./packages/
+COPY --chown=agent:agent schemas/ ./schemas/
+
+WORKDIR /workspace
+
+# Set environment
+ENV NODE_ENV=production
+ENV HOME=/workspace
+ENV TMPDIR=/tmp
+
+# Create ephemeral workspace mount point
+RUN mkdir -p /workspace /tmp && \
+    chown -R agent:agent /workspace /tmp
+
+USER 1001:1001
+
+ENTRYPOINT ["node", "/app/bin/mirql-run.mjs", "agent"]
+CMD ["--help"]
