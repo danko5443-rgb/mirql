@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import {
   ulid,
   sha256,
@@ -26,6 +26,16 @@ export function runSupervisor(options = {}) {
   const mirqlDir =
     options.mirqlDir ?? options.dir ?? join(process.cwd(), ".mirql");
   const workspaceDir = options.workspaceDir ?? process.cwd();
+
+  // Touch heartbeat and write launcher PID for watchdog monitoring
+  try {
+    const stateDir = join(mirqlDir, "state");
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, "heartbeat"), `${Date.now()}\n`, "utf8");
+    if (!options.skipPidFile) {
+      writeFileSync(join(stateDir, "launcher.pid"), `${process.pid}\n`, "utf8");
+    }
+  } catch {}
 
   // 1. Resolve and validate Warrant (Law 11)
   let warrant = null;
@@ -283,4 +293,18 @@ function finalizeSupervisor(
     verifyResult,
     event,
   };
+}
+
+
+/**
+ * Updates the watchdog heartbeat timestamp.
+ *
+ * @param {string} mirqlDir
+ */
+export function touchHeartbeat(mirqlDir) {
+  try {
+    const stateDir = join(mirqlDir, "state");
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, "heartbeat"), `${Date.now()}\n`, "utf8");
+  } catch {}
 }

@@ -26,6 +26,7 @@ import {
   renderLauncherUnit,
   MANDATORY_SANDBOX_DIRECTIVES,
 } from "../packages/daemons/index.mjs";
+import { touchHeartbeat, runSupervisor } from "../packages/run/index.mjs";
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
 
@@ -426,6 +427,56 @@ describe("Production Containerization & Topology Gates", () => {
         assert.equal(c2.ok, false);
         assert.equal(c2.tripped, true);
         assert.equal(c2.reason, "HEARTBEAT_TIMEOUT_EXPIRED");
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("supervisor automatically writes heartbeat and launcher.pid, and lifeguard disarms via disarmFile", () => {
+      const tmp = mkdtempSync(join(tmpdir(), "mirql-supervisor-hb-"));
+      try {
+        const mirqlDir = join(tmp, ".mirql");
+        const hbFile = join(mirqlDir, "state", "heartbeat");
+        const pidFile = join(mirqlDir, "state", "launcher.pid");
+        const disarmFile = join(mirqlDir, "state", "disarm");
+
+        // Touch heartbeat directly
+        touchHeartbeat(mirqlDir);
+        assert.ok(existsSync(hbFile), "Heartbeat file must be created by touchHeartbeat");
+
+        // Run supervisor writes both heartbeat and launcher.pid
+        runSupervisor({
+          mirqlDir,
+          workspaceDir: tmp,
+          warrantId: "01HGWTEST00000000000000000",
+          verifyOptions: { workspaceDir: tmp },
+          agentOptions: { command: "echo ok" },
+        });
+
+        assert.ok(existsSync(hbFile), "Heartbeat file must exist after supervisor run");
+        assert.ok(existsSync(pidFile), "Launcher PID file must exist after supervisor run");
+        const recordedPid = parseInt(readFileSync(pidFile, "utf8").trim(), 10);
+        assert.equal(recordedPid, process.pid);
+
+        // Lifeguard monitoring launcher.pid and disarmFile
+        const watchdog = new LifeguardWatchdog({
+          repoDir: tmp,
+          heartbeatFile: hbFile,
+          killPidFiles: [pidFile],
+          disarmFile,
+          timeoutMs: 60_000,
+          heartbeatTimeoutMs: 60_000,
+        });
+
+        // Initially ok
+        assert.equal(watchdog.check().ok, true);
+
+        // Creating disarm file disarms watchdog
+        writeFileSync(disarmFile, "disarm", "utf8");
+        const disarmCheck = watchdog.check();
+        assert.equal(disarmCheck.ok, true);
+        assert.equal(disarmCheck.disarmed, true);
+        assert.equal(watchdog.disarmed, true);
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }

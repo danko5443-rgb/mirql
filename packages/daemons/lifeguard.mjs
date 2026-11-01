@@ -165,6 +165,7 @@ export class LifeguardWatchdog {
     this.killPids = Array.isArray(options.killPids) ? [...options.killPids] : [];
     this.killServices = Array.isArray(options.killServices) ? [...options.killServices] : [];
     this.killPidFiles = Array.isArray(options.killPidFiles) ? [...options.killPidFiles] : [];
+    this.disarmFile = options.disarmFile ?? null;
     this.disarmed = false;
     this.rolledBack = false;
     this.intervalId = null;
@@ -199,6 +200,11 @@ export class LifeguardWatchdog {
   check(nowMs = Date.now()) {
     if (this.disarmed) {
       return { ok: true, disarmed: true, tripped: false };
+    }
+
+    if (this.disarmFile && existsSync(this.disarmFile)) {
+      this.disarm();
+      return { ok: true, disarmed: true, tripped: false, reason: "DISARM_FILE_PRESENT" };
     }
 
     // Check heartbeat file mtime if configured
@@ -272,6 +278,11 @@ export class LifeguardWatchdog {
     if (this.intervalId) return;
     this.intervalId = setInterval(() => {
       const res = this.check();
+      if (res.disarmed) {
+        process.stdout.write("[mirql-lifeguard] Watchdog disarmed, exiting.\n");
+        this.stop();
+        return;
+      }
       if (!res.ok && res.tripped) {
         process.stderr.write(`[mirql-lifeguard] Watchdog tripped: ${res.reason}\n`);
         this.stop();
@@ -298,6 +309,7 @@ if (process.argv[1] && process.argv[1].endsWith("lifeguard.mjs")) {
   let baseSha = null;
   let baseFile = null;
   let heartbeatFile = null;
+  let disarmFile = null;
   let repoDir = process.cwd();
   let watchMode = false;
   const killPids = [];
@@ -316,6 +328,8 @@ if (process.argv[1] && process.argv[1].endsWith("lifeguard.mjs")) {
       baseFile = process.argv[++i];
     } else if (arg === "--heartbeat-file" && process.argv[i + 1]) {
       heartbeatFile = process.argv[++i];
+    } else if (arg === "--disarm-file" && process.argv[i + 1]) {
+      disarmFile = process.argv[++i];
     } else if (arg === "--repo" && process.argv[i + 1]) {
       repoDir = process.argv[++i];
     } else if (arg === "--kill-pid" && process.argv[i + 1]) {
@@ -334,6 +348,7 @@ if (process.argv[1] && process.argv[1].endsWith("lifeguard.mjs")) {
     targetBaseSha: baseSha,
     baseShaFile: baseFile,
     heartbeatFile,
+    disarmFile,
     killPids,
     killServices,
     killPidFiles,
