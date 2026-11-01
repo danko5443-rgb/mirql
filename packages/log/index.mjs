@@ -47,6 +47,7 @@ import {
   ulid,
   validateDocument,
   verifyEvent,
+  withLedgerLock,
 } from "../core/index.mjs";
 
 /** Tool name reported by this package. */
@@ -692,6 +693,7 @@ function updateCache(mirqlDir) {
  */
 export function appendEvent(mirqlDir, eventInput, options = {}) {
   const dir = resolveMirqlDir(mirqlDir);
+  return withLedgerLock(dir, () => {
   if (
     eventInput === null ||
     typeof eventInput !== "object" ||
@@ -859,6 +861,7 @@ export function appendEvent(mirqlDir, eventInput, options = {}) {
   appendLedgerLine(dir, jcs(event));
   updateCache(dir);
   return { status: "appended", seq: event.seq, hash: event.hash };
+  });
 }
 
 /**
@@ -1046,6 +1049,29 @@ export function verifyLedger(mirqlDir, options = {}) {
   const headHash = events.length
     ? eventHashOf(events.at(-1), rawLines.at(-1), isConformance)
     : GENESIS_PREV_HASH;
+  const expectedHead = options.expectHead ?? options["expect-head"];
+  if (expectedHead !== undefined) {
+    if (
+      typeof expectedHead !== "string" ||
+      expectedHead.trim().length === 0 ||
+      !/^(?:sha256:)?[a-f0-9]{64}$/.test(expectedHead)
+    ) {
+      throw new LedgerError(
+        "USAGE_ERROR",
+        `expectHead must be a valid 64-hex SHA-256 hash, got ${JSON.stringify(expectedHead)}`,
+      );
+    }
+    const normHead = headHash.startsWith("sha256:") ? headHash : `sha256:${headHash}`;
+    const normExpected = expectedHead.startsWith("sha256:") ? expectedHead : `sha256:${expectedHead}`;
+    if (normHead !== normExpected) {
+      return {
+        valid: false,
+        error: "head_hash_mismatch",
+        expected: expectedHead,
+        actual: headHash,
+      };
+    }
+  }
   return { valid: true, event_count: events.length, head_hash: headHash };
 }
 
@@ -1299,7 +1325,26 @@ export function runCli(argv = []) {
       case "append":
         return cliAppend(dir, flags);
       case "verify": {
-        const result = verifyLedger(dir, { conformance: flags.conformance === true });
+        const hasExpectHead = "expect-head" in flags || "expectHead" in flags;
+        let expectHead = undefined;
+        if (hasExpectHead) {
+          const raw = flags["expect-head"] ?? flags.expectHead;
+          if (
+            typeof raw !== "string" ||
+            raw.trim().length === 0 ||
+            !/^(?:sha256:)?[a-f0-9]{64}$/.test(raw)
+          ) {
+            throw new LedgerError(
+              "USAGE_ERROR",
+              `--expect-head requires a valid 64-hex SHA-256 hash, got ${JSON.stringify(raw)}`,
+            );
+          }
+          expectHead = raw;
+        }
+        const result = verifyLedger(dir, {
+          conformance: flags.conformance === true,
+          expectHead,
+        });
         emitLine(jcs(result));
         return result.valid ? EXIT_CODES.OK : EXIT_CODES.INTEGRITY_VIOLATION;
       }

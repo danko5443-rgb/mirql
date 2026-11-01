@@ -1,11 +1,12 @@
-# Writer Namespace Authorization Matrix
+# Law 3 — Single-Writer ACL Policy
 # Maps each authorized writer namespace to the regex pattern of event types it is permitted to append to the ledger.
+# Note: factory.resumed is authorized for human:owner (manual recovery) and tool:queue (routine queue command).
 
 writers:
-  "tool:queue": "^job\\.(enqueued|leased|heartbeat|timeout|canceled)$"
-  "tool:run_supervisor": "^(job\\.(started|progress|completed|failed)|attempt\\.(started|outcome))$"
-  "tool:log": "^log\\.(snapshot|checkpoint|compacted)$"
-  "tool:inbox": "^(human\\.(intent|message|approval|rejection)|inbox\\..*)$"
-  "human:owner": "^(human\\..*|warrant\\.(created|revoked)|mirql\\.(genesis|halt|resume))$"
-  "notary:mergeproof": "^(verdict\\.(issued|signed|rejected)|merge\\.(executed|refused))$"
-  "daemon:lifeguard": "^lifeguard\\.(heartbeat|circuit_trip|reap|alert)$"
+  "tool:queue": "^(job|factory|mirql)\\.[a-z_]+$"
+  "tool:run_supervisor": "^(attempt|probe|warrant)\\.[a-z_]+$"
+  "tool:log": "^(ledger|log)\\.[a-z_]+$"
+  "tool:inbox": "^(human|inbox)\\.[a-z_]+$"
+  "human:owner": "^(human\\.[a-z_]+|warrant\\.(created|revoked)|mirql\\.(genesis|halt|resume)|factory\\.resumed)$"
+  "notary:mergeproof": "^(verdict|promotion|merge)\\.[a-z_]+$"
+  "daemon:lifeguard": "^(lifeguard\\.[a-z_]+|(promotion|factory|mirql)\\.rollback)$"

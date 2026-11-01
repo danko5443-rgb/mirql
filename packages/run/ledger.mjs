@@ -13,6 +13,7 @@ import {
   hlcTick,
   signEvent,
   generateEd25519Keypair,
+  withLedgerLock,
 } from "../core/index.mjs";
 
 const GENESIS_PREV_HASH = `sha256:${"0".repeat(64)}`;
@@ -26,6 +27,7 @@ const GENESIS_PREV_HASH = `sha256:${"0".repeat(64)}`;
  * @returns {object} the appended signed event envelope
  */
 export function appendSupervisorEvent(mirqlDir, eventInput, keypair) {
+  return withLedgerLock(mirqlDir, () => {
   const ledgerDir = join(mirqlDir, "ledger");
   mkdirSync(ledgerDir, { recursive: true });
   const eventsFile = join(ledgerDir, "events.jsonl");
@@ -104,6 +106,7 @@ export function appendSupervisorEvent(mirqlDir, eventInput, keypair) {
   updateKeyring(mirqlDir, kp);
 
   return signed;
+  });
 }
 
 /**

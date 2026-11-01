@@ -10,6 +10,7 @@
  * - `generateEd25519Keypair`, `computeEventHash`, `signEvent`, `verifyEvent`
  * - `WRITER_ACL`, `canWriteEvent`           Law 3 single-writer grants
  * - `validateDocument`, `loadSchema`, `SCHEMA_KINDS`  canonical contracts
+ * - `withLedgerLock`, `acquireLock`, `releaseLock`   multi-process ledger lockfile
  */
 
 export { EXIT_CODES } from "./exit-codes.mjs";
@@ -25,3 +26,4 @@ export {
 } from "./ed25519.mjs";
 export { WRITER_ACL, canWriteEvent } from "./acl.mjs";
 export { validateDocument, loadSchema, SCHEMA_KINDS } from "./schema.mjs";
+export { withLedgerLock, acquireLock, releaseLock } from "./lock.mjs";

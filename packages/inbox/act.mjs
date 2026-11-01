@@ -20,6 +20,7 @@ import {
   signEvent,
   verifyEvent,
   EXIT_CODES,
+  withLedgerLock,
 } from "../core/index.mjs";
 import { authenticateHumanWriter } from "./keys.mjs";
 import { getLastEvent, appendEvent, requireGenesisLedger } from "./ledger.mjs";
@@ -78,6 +79,7 @@ function validateTargetId(targetId) {
  * @returns {{ status: "acted", decision: string, target_id: string, seq: number, event: object }}
  */
 export function actOnItem(mirqlDir, actionInput, options = {}) {
+  return withLedgerLock(mirqlDir, () => {
   if (!actionInput || typeof actionInput !== "object") {
     throw domainError("invalid_input", "actionInput must be an object", EXIT_CODES.USAGE_ERROR);
   }
@@ -188,4 +190,5 @@ export function actOnItem(mirqlDir, actionInput, options = {}) {
     seq,
     event: signedEvent,
   };
+});
 }
