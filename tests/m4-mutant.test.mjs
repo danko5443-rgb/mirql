@@ -88,6 +88,12 @@ export function calc(a, b) {
       const code4 = 'export function f4() { const t = 1; /* a === b */ return t; }\n';
       const m4 = generateMutants(code4);
       assert.equal(m4.length, 0, "Inline block comments must be completely masked");
+
+      // 5. /* note */ if (a === b) -> if (a !== b)
+      const code5 = 'export function f5(a, b) { /* note */ if (a === b) return 1; }\n';
+      const m5 = generateMutants(code5);
+      assert.equal(m5.length, 1);
+      assert.ok(m5[0].mutatedCode.includes('if (a !== b)'));
     });
 
     it("masks multi-line block comments spanning multiple lines and regex literals", () => {

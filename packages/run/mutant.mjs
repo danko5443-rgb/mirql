@@ -23,7 +23,8 @@ export const MUTATION_OPERATORS = Object.freeze([
  * Preserves character offsets so token search occurs only on genuine executable AST code.
  *
  * @param {string} line
- * @returns {string}
+ * @param {boolean} [initialInBlockComment=false]
+ * @returns {{ masked: string, inBlockComment: boolean, length: number, trim(): string, toString(): string }}
  */
 export function maskStringsAndComments(line, initialInBlockComment = false) {
   let masked = "";
@@ -113,6 +114,8 @@ export function maskStringsAndComments(line, initialInBlockComment = false) {
   return {
     masked,
     inBlockComment,
+    get length() { return masked.length; },
+    trim() { return masked.trim(); },
     toString() { return masked; },
     includes(sub) { return masked.includes(sub); },
     indexOf(sub) { return masked.indexOf(sub); },
@@ -213,14 +216,8 @@ export function generateMutants(sourceCode, options = {}) {
 
     const trimmed = line.trim();
 
-    // Skip blank and pure comment lines (including lines within multi-line block comments)
-    if (
-      !trimmed ||
-      trimmed.startsWith("//") ||
-      trimmed.startsWith("/*") ||
-      trimmed.startsWith("*") ||
-      (wasInBlockComment && !masked.trim())
-    ) {
+    // Skip blank lines and lines with zero executable code outside comments
+    if (!trimmed || trimmed.startsWith("//") || !masked.trim()) {
       continue;
     }
 
