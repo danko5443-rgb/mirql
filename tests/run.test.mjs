@@ -8,7 +8,7 @@ import {
   readFileSync,
   existsSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -997,6 +997,503 @@ test("tautological test", () => {
       });
       assert.equal(consolidatorDropRes.verified, true);
       assert.equal(consolidatorDropRes.verdict, "auto_merge");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P0 Remediation package: C1 (proof loophole), H1 (epoch threading),
+// H2 (worktree isolation), H3 (env sanitization), H5 (git-mode anti-cheat).
+// ---------------------------------------------------------------------------
+describe("P0 Remediation: C1, H1, H2, H3, H5", () => {
+  let tempDir;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "mirql-p0-test-"));
+  });
+
+  afterEach(() => {
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {}
+  });
+
+  /** Initialize a tiny git repo with base/head commits around a math bug. */
+  function buildMathRepo(repoDir, { extraBaseFiles = {}, extraHeadFiles = {} } = {}) {
+    spawnSync("git", ["init", "-b", "main", repoDir], { encoding: "utf8" });
+    spawnSync("git", ["config", "user.name", "Mirql Test"], { cwd: repoDir, encoding: "utf8" });
+    spawnSync("git", ["config", "user.email", "test@mirql.local"], { cwd: repoDir, encoding: "utf8" });
+
+    writeFileSync(
+      join(repoDir, "package.json"),
+      JSON.stringify({ type: "module" }),
+      "utf8",
+    );
+    const srcDir = join(repoDir, "src");
+    mkdirSync(srcDir, { recursive: true });
+    writeFileSync(
+      join(srcDir, "math.mjs"),
+      "export function add(a, b) { return a - b; } // BUG!\n",
+      "utf8",
+    );
+    for (const [rel, content] of Object.entries(extraBaseFiles)) {
+      const p = join(repoDir, rel);
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, content, "utf8");
+    }
+    spawnSync("git", ["add", "."], { cwd: repoDir, encoding: "utf8" });
+    spawnSync("git", ["commit", "-m", "base: bug in math"], { cwd: repoDir, encoding: "utf8" });
+    const baseSha = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: repoDir,
+      encoding: "utf8",
+    }).stdout.trim();
+
+    writeFileSync(
+      join(srcDir, "math.mjs"),
+      "export function add(a, b) { return a + b; }\n",
+      "utf8",
+    );
+    const testsDir = join(repoDir, "tests");
+    mkdirSync(testsDir, { recursive: true });
+    writeFileSync(
+      join(testsDir, "math.test.mjs"),
+      `import assert from "node:assert/strict";
+import test from "node:test";
+import { add } from "../src/math.mjs";
+
+test("add correctly computes sum", () => {
+  assert.equal(add(2, 3), 5);
+});
+`,
+      "utf8",
+    );
+    for (const [rel, content] of Object.entries(extraHeadFiles)) {
+      const p = join(repoDir, rel);
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, content, "utf8");
+    }
+    spawnSync("git", ["add", "."], { cwd: repoDir, encoding: "utf8" });
+    spawnSync("git", ["commit", "-m", "head: fix math bug and add test"], { cwd: repoDir, encoding: "utf8" });
+    const headSha = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: repoDir,
+      encoding: "utf8",
+    }).stdout.trim();
+
+    return { baseSha, headSha };
+  }
+
+  // -------------------------------------------------------------------------
+  // C1: suite_pass_head is not causal proof
+  // -------------------------------------------------------------------------
+  describe("C1: suite_pass_head proof loophole eliminated", () => {
+    it("rejects a self-reported suite_pass_head-only proof with MISSING_PROOF (programmatic)", () => {
+      const result = verifyAttempt({
+        diff_stat: { files_changed: ["src/calc.mjs"], lines_added: 10, lines_deleted: 2 },
+        proof: { suite_pass_base: true, suite_pass_head: true, cases_dropped: 0 },
+        evidence: { forbidden_paths_touched: [], tests_deleted: [] },
+        anti_cheat: { violations_count: 0, flags: [] },
+        phi: { phi_base: 100, phi_head: 95, delta_phi: -5 },
+      });
+
+      assert.equal(result.verified, false);
+      assert.equal(result.verdict, "reject");
+      assert.equal(result.rule, "MISSING_PROOF");
+      assert.equal(result.violation, "MISSING_PROOF");
+    });
+
+    it("rejects a suite_pass_head-only fixture via the CLI with exit code 1 and the rule violation on stderr", () => {
+      const fixturePath = join(tempDir, "suite-pass-head-only.json");
+      writeFileSync(
+        fixturePath,
+        JSON.stringify({
+          schema: "outcome/v1",
+          expected_verdict: "auto_merge",
+          diff_stat: { files_changed: ["src/calc.mjs"], lines_added: 10, lines_deleted: 2 },
+          proof: { suite_pass_base: true, suite_pass_head: true, cases_dropped: 0 },
+          evidence: { forbidden_paths_touched: [], tests_deleted: [] },
+          anti_cheat: { violations_count: 0, flags: [] },
+          phi: { phi_base: 100, phi_head: 95, delta_phi: -5 },
+          surface: { uncited_commands: [], delta_count: 0 },
+        }),
+        "utf8",
+      );
+
+      const cli = runBin("bin/mirql.mjs", ["r", "verify", "--fixture", fixturePath]);
+      assert.equal(cli.status, EXIT_CODES.DOMAIN_NEGATIVE); // 1
+      const doc = JSON.parse(cli.stderr);
+      assert.equal(doc.verified, false);
+      assert.equal(doc.rule, "MISSING_PROOF");
+      assert.equal(doc.violation, "MISSING_PROOF");
+    });
+
+    it("checkAntiCheat: suite_pass_head alone no longer unlocks humanApprove paths (MP-005)", () => {
+      const base = { diff_stat: { files_changed: ["packages/core/src/ulid.mjs"] } };
+
+      // Self-reported suite pass does NOT count as causal proof anymore.
+      const withSuitePass = checkAntiCheat({
+        ...base,
+        proof: { suite_pass_head: true },
+      });
+      assert.equal(withSuitePass.ok, false);
+      assert.equal(withSuitePass.rule, "MP-005");
+      assert.equal(withSuitePass.violation, "UNCITED_SURFACE");
+      assert.equal(withSuitePass.verdict, "needs_human");
+
+      // A genuine completed causal cycle still unlocks humanApprove paths.
+      const withCausalProof = checkAntiCheat({
+        ...base,
+        proof: { causal_cycle_completed: true },
+      });
+      assert.equal(withCausalProof.ok, true);
+      assert.equal(withCausalProof.rule, "MP-000");
+
+      // Explicit human authorization still works without causal proof.
+      const withHumanApproval = checkAntiCheat({
+        ...base,
+        proof: { suite_pass_head: true },
+        human_approved: true,
+      });
+      assert.equal(withHumanApproval.ok, true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // H1: --epoch threading through the supervisor CLI
+  // -------------------------------------------------------------------------
+  describe("H1: leased-job epoch threaded through supervisor", () => {
+    it("CLI accepts --epoch <int> and threads it into the Outcome and signed attempt.outcome event", () => {
+      const res = runBin("bin/mirql-run.mjs", [
+        "supervisor",
+        "--dir", tempDir,
+        "--workspace", tempDir,
+        "--warrant-id", "01HWWWWWWWWWWWWWWWWWWWWWWW",
+        "--command", "node -v",
+        "--epoch", "2",
+      ]);
+
+      // Verification itself fails closed here (no runner passed via CLI),
+      // so the exit code is 1 — what matters is the epoch threading.
+      assert.equal(res.status, EXIT_CODES.DOMAIN_NEGATIVE, `stderr: ${res.stderr}`);
+      const doc = JSON.parse(res.stdout);
+      assert.equal(doc.outcome.epoch, 2);
+      assert.equal(doc.event.epoch, 2);
+      assert.equal(doc.event.payload.epoch, 2);
+      assert.equal(doc.event.type, "attempt.outcome");
+
+      // The persisted ledger event carries the same epoch.
+      const eventDoc = JSON.parse(
+        readFileSync(join(tempDir, "ledger", "events.jsonl"), "utf8").trim(),
+      );
+      assert.equal(eventDoc.epoch, 2);
+      assert.equal(eventDoc.payload.epoch, 2);
+    });
+
+    it("CLI rejects a non-integer --epoch with exit code 2 (USAGE_ERROR)", () => {
+      const res = runBin("bin/mirql-run.mjs", [
+        "supervisor",
+        "--dir", tempDir,
+        "--warrant-id", "01HWWWWWWWWWWWWWWWWWWWWWWW",
+        "--epoch", "not-an-integer",
+      ]);
+      assert.equal(res.status, EXIT_CODES.USAGE_ERROR); // 2
+      const doc = JSON.parse(res.stderr);
+      assert.equal(doc.error, "USAGE_ERROR");
+    });
+
+    it("defaults the epoch to 1 when --epoch is omitted (backwards compatible)", () => {
+      const res = runBin("bin/mirql-run.mjs", [
+        "supervisor",
+        "--dir", tempDir,
+        "--workspace", tempDir,
+        "--warrant-id", "01HWWWWWWWWWWWWWWWWWWWWWWW",
+        "--command", "node -v",
+      ]);
+      assert.equal(res.status, EXIT_CODES.DOMAIN_NEGATIVE);
+      const doc = JSON.parse(res.stdout);
+      assert.equal(doc.outcome.epoch, 1);
+      assert.equal(doc.event.epoch, 1);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // H2: git triple-exec isolated in a disposable worktree
+  // -------------------------------------------------------------------------
+  describe("H2: disposable worktree isolation", () => {
+    it("verifies a real fix without touching the live working tree or uncommitted files", () => {
+      const repoDir = join(tempDir, "isolated-repo");
+      const { baseSha, headSha } = buildMathRepo(repoDir);
+
+      // Simulate precious uncommitted work in the live tree.
+      writeFileSync(
+        join(repoDir, "uncommitted-notes.txt"),
+        "precious uncommitted work\n",
+        "utf8",
+      );
+
+      const result = verifyAttempt({
+        git: true,
+        workspaceDir: repoDir,
+        baseSha,
+        headSha,
+        reproducerCommand: "node --test tests/math.test.mjs",
+        testCommand: "node --test tests/math.test.mjs",
+      });
+
+      assert.equal(
+        result.verified,
+        true,
+        `verification failed: ${JSON.stringify(result)}`,
+      );
+      assert.equal(result.proof?.causal_cycle_completed, true);
+
+      // The uncommitted file is byte-for-byte intact.
+      assert.equal(
+        readFileSync(join(repoDir, "uncommitted-notes.txt"), "utf8"),
+        "precious uncommitted work\n",
+      );
+
+      // The live tree is otherwise clean and HEAD never moved.
+      const statusOut = spawnSync("git", ["status", "--porcelain"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).stdout.trim();
+      assert.equal(statusOut, "?? uncommitted-notes.txt");
+
+      const head = spawnSync("git", ["rev-parse", "HEAD"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).stdout.trim();
+      assert.equal(head, headSha);
+
+      // The disposable worktree was cleaned up.
+      const worktrees = spawnSync("git", ["worktree", "list"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).stdout.trim().split(/\r?\n/);
+      assert.equal(worktrees.length, 1, `leftover worktrees: ${worktrees.join(" | ")}`);
+    });
+
+    it("fails closed with WORKTREE_SETUP_FAILED outside a git repository", () => {
+      const notARepo = join(tempDir, "not-a-repo");
+      mkdirSync(notARepo, { recursive: true });
+
+      const result = verifyAttempt({
+        git: true,
+        workspaceDir: notARepo,
+        baseSha: "HEAD~1",
+        headSha: "HEAD",
+        reproducerCommand: "node -v",
+      });
+
+      assert.equal(result.verified, false);
+      assert.equal(result.verdict, "reject");
+      assert.ok(
+        result.rule === "GIT_DIFF_FAILED" || result.rule === "WORKTREE_SETUP_FAILED",
+        `unexpected rule: ${result.rule}`,
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // H3: sanitized runner environment
+  // -------------------------------------------------------------------------
+  describe("H3: candidate runner environment sanitization", () => {
+    it("strips MIRQL_HUMAN_KEY and AI provider keys from child processes while keeping safe vars", () => {
+      const repoDir = join(tempDir, "env-sanitize-repo");
+      const dumpPath = join(tempDir, "child-env.json");
+
+      const { baseSha, headSha } = buildMathRepo(repoDir, {
+        extraBaseFiles: {
+          // Committed at base (a non-test file): dumps the child env to an
+          // absolute path that survives worktree cleanup.
+          "dump-env.mjs":
+            `import { writeFileSync } from "node:fs";\n` +
+            `writeFileSync(${JSON.stringify(dumpPath)}, JSON.stringify(process.env));\n`,
+        },
+      });
+
+      const secrets = {
+        MIRQL_HUMAN_KEY: "human-secret-material",
+        OPENAI_API_KEY: "sk-test-openai-secret",
+        ANTHROPIC_API_KEY: "sk-ant-test-secret",
+        GOOGLE_API_KEY: "google-test-secret",
+      };
+      const saved = {};
+      for (const k of Object.keys(secrets)) {
+        saved[k] = process.env[k];
+        process.env[k] = secrets[k];
+      }
+
+      try {
+        const result = verifyAttempt({
+          git: true,
+          workspaceDir: repoDir,
+          baseSha,
+          headSha,
+          reproducerCommand: "node --test tests/math.test.mjs",
+          testCommand: "node --test tests/math.test.mjs && node dump-env.mjs",
+        });
+
+        assert.equal(
+          result.verified,
+          true,
+          `verification failed: ${JSON.stringify(result)}`,
+        );
+
+        assert.ok(existsSync(dumpPath), "child env dump must exist");
+        const childEnv = JSON.parse(readFileSync(dumpPath, "utf8"));
+
+        // Secrets never reached the candidate child process.
+        assert.equal(childEnv.MIRQL_HUMAN_KEY, undefined);
+        assert.equal(childEnv.OPENAI_API_KEY, undefined);
+        assert.equal(childEnv.ANTHROPIC_API_KEY, undefined);
+        assert.equal(childEnv.GOOGLE_API_KEY, undefined);
+
+        // Safe allowlisted variables survive (case varies by platform).
+        const pathValue = childEnv.PATH ?? childEnv.Path;
+        assert.ok(typeof pathValue === "string" && pathValue.length > 0, "PATH must survive sanitization");
+        assert.ok(childEnv.SystemRoot ?? childEnv.SYSTEMROOT, "SystemRoot must survive sanitization");
+      } finally {
+        for (const [k, v] of Object.entries(saved)) {
+          if (v === undefined) {
+            delete process.env[k];
+          } else {
+            process.env[k] = v;
+          }
+        }
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // H5: anti-cheat wired into git-mode verification
+  // -------------------------------------------------------------------------
+  describe("H5: anti-cheat gate in git-mode verification", () => {
+    it("returns needs_human under MP-001 when the git diff touches CONSTITUTION.md", () => {
+      const repoDir = join(tempDir, "constitution-repo");
+      const { baseSha, headSha } = buildMathRepo(repoDir, {
+        extraBaseFiles: {
+          "CONSTITUTION.md": "# Constitution\n\nOriginal law text.\n",
+        },
+        extraHeadFiles: {
+          "CONSTITUTION.md": "# Constitution\n\nAttacker-edited law text.\n",
+        },
+      });
+
+      const result = verifyAttempt({
+        git: true,
+        workspaceDir: repoDir,
+        baseSha,
+        headSha,
+        reproducerCommand: "node --test tests/math.test.mjs",
+      });
+
+      assert.equal(result.verified, false);
+      assert.equal(result.verdict, "needs_human");
+      assert.equal(result.rule, "MP-001");
+      assert.equal(result.violation, "TOUCH_HUMAN_ONLY");
+
+      // The live tree (and the constitution) was never touched.
+      assert.equal(
+        readFileSync(join(repoDir, "CONSTITUTION.md"), "utf8"),
+        "# Constitution\n\nAttacker-edited law text.\n",
+      );
+    });
+
+    it("rejects under MP-002 when the git diff deletes an existing test file", () => {
+      const repoDir = join(tempDir, "deleted-test-repo");
+      spawnSync("git", ["init", "-b", "main", repoDir], { encoding: "utf8" });
+      spawnSync("git", ["config", "user.name", "Mirql Test"], { cwd: repoDir, encoding: "utf8" });
+      spawnSync("git", ["config", "user.email", "test@mirql.local"], { cwd: repoDir, encoding: "utf8" });
+
+      writeFileSync(
+        join(repoDir, "package.json"),
+        JSON.stringify({ type: "module" }),
+        "utf8",
+      );
+      mkdirSync(join(repoDir, "src"), { recursive: true });
+      writeFileSync(
+        join(repoDir, "src", "math.mjs"),
+        "export function add(a, b) { return a - b; } // BUG!\n",
+        "utf8",
+      );
+      mkdirSync(join(repoDir, "tests"), { recursive: true });
+      writeFileSync(
+        join(repoDir, "tests", "legacy.test.mjs"),
+        `import assert from "node:assert/strict";
+import test from "node:test";
+
+test("legacy coverage", () => {
+  assert.equal(1 + 1, 2);
+});
+`,
+        "utf8",
+      );
+      spawnSync("git", ["add", "."], { cwd: repoDir, encoding: "utf8" });
+      spawnSync("git", ["commit", "-m", "base with legacy test"], { cwd: repoDir, encoding: "utf8" });
+      const baseSha = spawnSync("git", ["rev-parse", "HEAD"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).stdout.trim();
+
+      // Head: fix the bug, add a reproducer, and DELETE the legacy test.
+      writeFileSync(
+        join(repoDir, "src", "math.mjs"),
+        "export function add(a, b) { return a + b; }\n",
+        "utf8",
+      );
+      writeFileSync(
+        join(repoDir, "tests", "math.test.mjs"),
+        `import assert from "node:assert/strict";
+import test from "node:test";
+import { add } from "../src/math.mjs";
+
+test("add correctly computes sum", () => {
+  assert.equal(add(2, 3), 5);
+});
+`,
+        "utf8",
+      );
+      rmSync(join(repoDir, "tests", "legacy.test.mjs"));
+      spawnSync("git", ["add", "."], { cwd: repoDir, encoding: "utf8" });
+      spawnSync("git", ["commit", "-m", "head: fix and delete legacy test"], { cwd: repoDir, encoding: "utf8" });
+      const headSha = spawnSync("git", ["rev-parse", "HEAD"], {
+        cwd: repoDir,
+        encoding: "utf8",
+      }).stdout.trim();
+
+      const result = verifyAttempt({
+        git: true,
+        workspaceDir: repoDir,
+        baseSha,
+        headSha,
+        reproducerCommand: "node --test tests/math.test.mjs",
+      });
+
+      assert.equal(result.verified, false);
+      assert.equal(result.verdict, "reject");
+      assert.equal(result.rule, "MP-002");
+      assert.equal(result.violation, "TEST_DELETED");
+      assert.match(result.detail, /legacy\.test\.mjs/);
+    });
+
+    it("still auto-merges a clean git fix whose diff passes the anti-cheat gate", () => {
+      const repoDir = join(tempDir, "clean-repo");
+      const { baseSha, headSha } = buildMathRepo(repoDir);
+
+      const result = verifyAttempt({
+        git: true,
+        workspaceDir: repoDir,
+        baseSha,
+        headSha,
+        reproducerCommand: "node --test tests/math.test.mjs",
+        testCommand: "node --test tests/math.test.mjs",
+      });
+
+      assert.equal(result.verified, true);
+      assert.equal(result.verdict, "auto_merge");
+      assert.equal(result.rule, "MP-000");
+      assert.equal(result.checks?.anti_cheat?.passed, true);
     });
   });
 });

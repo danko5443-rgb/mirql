@@ -111,7 +111,8 @@ export function runCli(argv = []) {
         tool: TOOL,
         usage: "mirql r <subcommand> [options]",
         subcommands: {
-          supervisor: "privileged parent broker: executes agent, verifyAttempt, records Outcome",
+          supervisor:
+            "privileged parent broker: executes agent, verifyAttempt, records Outcome (--epoch <int> threads the leased epoch)",
           agent: "unprivileged worker: strips secrets, enforces policy/paths.yaml",
           verify: "triple-execution Red-Green-ReRed verifier & anti-cheat gate (--fixture <path>)",
           probe: "declarative 0-token probe runner (--probe <name>)",
@@ -171,6 +172,20 @@ export function runCli(argv = []) {
 
     case "supervisor": {
       try {
+        // H1: `--epoch <int>` threads the leased configuration epoch (Law 5
+        // fencing) into the Outcome and the signed attempt.outcome event.
+        let epoch;
+        if (flags.epoch !== undefined) {
+          epoch = Number.parseInt(String(flags.epoch), 10);
+          if (!Number.isSafeInteger(epoch) || epoch < 0) {
+            emitError({
+              error: "USAGE_ERROR",
+              reason: `invalid --epoch value ${JSON.stringify(flags.epoch)}: expected a non-negative safe integer`,
+            });
+            return EXIT_CODES.USAGE_ERROR;
+          }
+        }
+
         const res = runSupervisor({
           dir: flags.dir,
           workspaceDir: flags.workspace ?? process.cwd(),
@@ -178,6 +193,7 @@ export function runCli(argv = []) {
           warrantId: flags.warrantId ?? flags["warrant-id"],
           fixture: flags.fixture,
           builderCommand: flags.command,
+          epoch,
         });
 
         if (res && typeof res.then === "function") {

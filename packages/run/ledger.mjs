@@ -70,7 +70,15 @@ export function appendSupervisorEvent(mirqlDir, eventInput, keypair) {
         ? eventInput.tenant_id
         : "mirql-core",
     seq,
-    epoch: typeof eventInput.epoch === "number" ? eventInput.epoch : 1,
+    // H1: epoch comes from the caller (leased-job epoch) or the payload —
+    // it is never unconditionally hardcoded to 1.
+    epoch: Number.isSafeInteger(eventInput.epoch)
+      ? eventInput.epoch
+      : eventInput.payload &&
+          typeof eventInput.payload === "object" &&
+          Number.isSafeInteger(eventInput.payload.epoch)
+        ? eventInput.payload.epoch
+        : 1,
     hlc: eventInput.hlc ?? hlcTick(last?.hlc, nowMs, "local"),
     ts:
       typeof eventInput.ts === "string"

@@ -143,6 +143,15 @@ function finalizeSupervisor(
   const jobId = options.jobId ?? ulid(nowMs);
   const warrantId = warrant.id;
 
+  // H1: leased-job configuration epoch (Law 5 fencing). The queue fold
+  // discards any attempt.outcome whose epoch does not match the live lease,
+  // so the supervisor must thread the leased epoch through the Outcome and
+  // the signed ledger event. Defaults to 1 for legacy callers.
+  const epoch =
+    Number.isSafeInteger(options.epoch) && options.epoch >= 0
+      ? options.epoch
+      : 1;
+
   // Real metrics computation (no hardcoded fake placeholders)
   const phiMetrics = computePhi(workspaceDir);
   const realPhi = phiMetrics.total;
@@ -189,7 +198,7 @@ function finalizeSupervisor(
     id: ulid(nowMs),
     job_id: jobId,
     warrant_id: warrantId,
-    epoch: 1,
+    epoch,
     status: outcomeStatus,
     base_sha: baseSha,
     head_sha: headSha,
@@ -239,14 +248,20 @@ function finalizeSupervisor(
   }
 
   // Sign and append attempt.outcome event to ledger
+  // H1: the leased epoch is recorded at both the event envelope level and in
+  // the payload (`payload.epoch` is what the queue fold fences against). The
+  // payload status uses the queue's terminal vocabulary ("completed"/"failed")
+  // while the Outcome document keeps its own "pass"/"fail" status.
   const event = appendSupervisorEvent(
     mirqlDir,
     {
       type: "attempt.outcome",
+      epoch,
       payload: {
         job_id: jobId,
         warrant_id: warrantId,
-        status: outcome.status,
+        epoch,
+        status: isOverallPass ? "completed" : "failed",
         verdict: outcomeVerdict,
         head_commit: headSha,
         tokens_consumed: 750,

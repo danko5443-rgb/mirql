@@ -46,6 +46,8 @@ import {
   loadWriterKey,
   keyringEntry,
   foldState,
+  generateFactoryKeypairs,
+  FACTORY_WRITERS,
 } from "../packages/inbox/index.mjs";
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
@@ -924,5 +926,41 @@ describe("Work Package W5b: mirql-inbox test suite (hardened)", () => {
     const unknown = runBin(BIN_INBOX, ["frobnicate"]);
     assert.equal(unknown.status, EXIT_CODES.USAGE_ERROR);
     assert.equal(JSON.parse(unknown.stderr).error, "unknown_subcommand");
+  });
+
+  // -----------------------------------------------------------------------
+  // P0 Remediation H4: unified private key permissions (0o600 / 0o700)
+  // -----------------------------------------------------------------------
+  it("H4: factory writer private keys are written 0o600 inside a 0o700 keys directory", () => {
+    const tmp = makeTmpDir();
+    const mirqlDir = join(tmp, ".mirql");
+
+    try {
+      generateFactoryKeypairs(mirqlDir);
+
+      for (const w of FACTORY_WRITERS) {
+        const keyPath = join(mirqlDir, "keys", w.file);
+        assert.ok(existsSync(keyPath), `${w.file} must exist`);
+        const doc = JSON.parse(readFileSync(keyPath, "utf8"));
+        assert.ok(typeof doc.privateKey === "string" && doc.privateKey.length > 0);
+        if (process.platform !== "win32") {
+          assert.equal(
+            statSync(keyPath).mode & 0o777,
+            0o600,
+            `${w.file} must be mode 0o600`,
+          );
+        }
+      }
+
+      // The notary alias file carries the same private key and permissions.
+      const aliasPath = join(mirqlDir, "keys", "mergeproof.key.json");
+      assert.ok(existsSync(aliasPath), "notary alias key must exist");
+      if (process.platform !== "win32") {
+        assert.equal(statSync(aliasPath).mode & 0o777, 0o600);
+        assert.equal(statSync(join(mirqlDir, "keys")).mode & 0o777, 0o700);
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
