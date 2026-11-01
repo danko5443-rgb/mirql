@@ -228,7 +228,7 @@ export function detectDrift(workspaceDir = process.cwd(), options = {}) {
               subsystem: pkgRel,
               drift_type: "convention",
               drift_score_bp: 1500,
-              details: `Unresolvable relative import "${spec}" in ${relPath}`,
+              details: `Unresolvable relative specifier "${spec}" in ${relPath}`,
             });
             continue;
           }
@@ -451,10 +451,10 @@ function extractSpecifiers(skeleton, literals) {
   }
 
   // dynamic import()/require() with literal, template, or computed argument
-  const dynamicCall = /\b(?:import|require)\s*\(/g;
+  const dynamicCall = /\b(import|require)\s*\(/g;
   let m;
   while ((m = dynamicCall.exec(skeleton)) !== null) {
-    const callName = m[0].startsWith("import") ? "import" : "require";
+    const callName = m[1];
     let j = m.index + m[0].length;
     while (j < skeleton.length && /\s/.test(skeleton[j])) j++;
     const ch = skeleton[j];
