@@ -191,6 +191,112 @@ export const x = 1;
     });
   });
 
+  describe("4b. Structural Analyzer (masked extraction, coupling DAG, injection vectors)", () => {
+    const setupBaseline = () => {
+      writeFileSync(
+        join(tempDir, "surface.lock"),
+        JSON.stringify({ v: 1, bins: [], schemas: [] }),
+        "utf8",
+      );
+      writeFileSync(
+        join(tempDir, "package.json"),
+        JSON.stringify({ name: "test", dependencies: {} }),
+        "utf8",
+      );
+    };
+
+    it("flags cross-package coupling: tool package importing a sibling tool package", () => {
+      setupBaseline();
+      const runDir = join(tempDir, "packages", "run");
+      const queueDir = join(tempDir, "packages", "queue");
+      mkdirSync(runDir, { recursive: true });
+      mkdirSync(queueDir, { recursive: true });
+      writeFileSync(join(runDir, "phi.mjs"), "export const phi = 1;\n", "utf8");
+      writeFileSync(
+        join(queueDir, "index.mjs"),
+        `import { phi } from "../run/phi.mjs";\n`,
+        "utf8",
+      );
+
+      const res = detectDrift(tempDir);
+      const coupling = res.drifts.find((d) => d.details.includes("Cross-package coupling"));
+      assert.ok(coupling, "Must flag tool→tool cross-package coupling");
+      assert.equal(coupling.drift_type, "architecture");
+      assert.equal(coupling.drift_score_bp, 3000);
+    });
+
+    it("allows self-imports and packages/core imports without drift", () => {
+      setupBaseline();
+      const coreDir = join(tempDir, "packages", "core");
+      const toolDir = join(tempDir, "packages", "run");
+      mkdirSync(coreDir, { recursive: true });
+      mkdirSync(toolDir, { recursive: true });
+      writeFileSync(join(coreDir, "index.mjs"), "export const core = 1;\n", "utf8");
+      writeFileSync(join(toolDir, "sibling.mjs"), "export const sib = 1;\n", "utf8");
+      writeFileSync(
+        join(toolDir, "index.mjs"),
+        `import { core } from "../core/index.mjs";\nimport { sib } from "./sibling.mjs";\nexport const x = core + sib;\n`,
+        "utf8",
+      );
+
+      const res = detectDrift(tempDir);
+      const archOrConvention = res.drifts.filter(
+        (d) => d.drift_type === "architecture" || d.drift_type === "convention",
+      );
+      assert.deepEqual(archOrConvention, [], "Self and core imports must be allowed");
+    });
+
+    it("flags computed and template dynamic imports as injection vectors", () => {
+      setupBaseline();
+      const pkgDir = join(tempDir, "packages", "sample");
+      mkdirSync(pkgDir, { recursive: true });
+      writeFileSync(
+        join(pkgDir, "index.mjs"),
+        `const name = "fs";\nconst a = await import(name);\nconst b = await import(\`./mods/\${name}.mjs\`);\nexport const x = 1;\n`,
+        "utf8",
+      );
+
+      const res = detectDrift(tempDir);
+      const computed = res.drifts.find((d) => d.details.includes("Computed dynamic"));
+      const template = res.drifts.find((d) => d.details.includes("Template-literal dynamic"));
+      assert.ok(computed, "Must flag computed dynamic import argument");
+      assert.ok(template, "Must flag template-literal dynamic import argument");
+    });
+
+    it("is immune to specifier-looking text inside strings, comments, and regex literals", () => {
+      setupBaseline();
+      const pkgDir = join(tempDir, "packages", "sample");
+      mkdirSync(pkgDir, { recursive: true });
+      writeFileSync(
+        join(pkgDir, "index.mjs"),
+        `// comment says: import evil from "evil-pkg";\n/* block: require("sneaky") */\nconst doc = "import x from 'ghost-pkg';";\nconst re = /["']import "phantom-pkg"["']/;\nexport const x = 1;\n`,
+        "utf8",
+      );
+
+      const res = detectDrift(tempDir);
+      const archOrConvention = res.drifts.filter(
+        (d) => d.drift_type === "architecture" || d.drift_type === "convention",
+      );
+      assert.deepEqual(archOrConvention, [], "Strings/comments/regexes must not produce drift");
+    });
+
+    it("detects multiline import statements spanning several lines", () => {
+      setupBaseline();
+      const pkgDir = join(tempDir, "packages", "sample");
+      mkdirSync(pkgDir, { recursive: true });
+      writeFileSync(
+        join(pkgDir, "index.mjs"),
+        `import {\n  first,\n  second as renamed,\n} from "multi-line-pkg";\nexport const x = 1;\n`,
+        "utf8",
+      );
+
+      const res = detectDrift(tempDir);
+      const bare = res.drifts.find((d) => d.details.includes("multi-line-pkg"));
+      assert.ok(bare, "Multiline import must be extracted and flagged as bare specifier");
+      assert.equal(bare.drift_type, "architecture");
+    });
+  });
+
   describe("5. Claim-Check Verification (verifyClaimCheck)", () => {
     it("verifies zero_dependencies claim against active codebase", () => {
       const claim = verifyClaimCheck("zero_dependencies", ROOT);
