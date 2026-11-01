@@ -875,6 +875,53 @@ export function resumeQueue(mirqlDir, reason = "Manual resume", options = {}) {
   });
 }
 
+function runCanaryAction(action, args, flags, mirqlDir, options) {
+  const canaryId = flags.canaryId ?? args[0];
+  const metric = (value) => value === undefined ? undefined : Number(value);
+  let result;
+  try {
+    switch (action) {
+      case "stage":
+        result = stageCanary(mirqlDir, {
+          ...options,
+          jobId: flags.jobId ?? args[0],
+          baseSha: flags.baseSha ?? args[flags.jobId ? 0 : 1],
+          candidateVersion: flags.candidateVersion,
+          supervisorVersion: flags.supervisorVersion,
+        });
+        break;
+      case "sample":
+      case "health":
+        result = sampleCanaryHealth(mirqlDir, canaryId, {
+          totalRequests: metric(flags.totalRequests),
+          errorCount: metric(flags.errorCount),
+          latencyP99Ms: metric(flags.latencyP99),
+        }, options);
+        break;
+      case "evaluate":
+      case "promote":
+        result = evaluateAndPromoteCanary(mirqlDir, canaryId, { ...options, force: Boolean(flags.force) });
+        break;
+      case "rollback": {
+        const reason = flags.reason ?? args.slice(flags.canaryId ? 0 : 1).join(" ");
+        result = rollbackCanary(mirqlDir, canaryId, { ...options, reason });
+        break;
+      }
+      default:
+        process.stderr.write(JSON.stringify({ tool: TOOL, error: "unknown_canary_action", canaryAction: action }) + "\n");
+        return EXIT_CODES.USAGE_ERROR;
+    }
+  } catch (err) {
+    process.stderr.write(JSON.stringify({ ok: false, error: err.errorCode || err.name, message: err.message }) + "\n");
+    return err.exitCode ?? EXIT_CODES.POLICY_DENIAL;
+  }
+  process.stdout.write(JSON.stringify(result) + "\n");
+  if (action === "evaluate" || action === "promote") {
+    return result.ok ? EXIT_CODES.OK : (result.exit_code ?? EXIT_CODES.POLICY_DENIAL);
+  }
+  return EXIT_CODES.OK;
+}
+
 /**
  * Parse CLI argv into options and subcommand.
  * @param {string[]} argv
@@ -1070,99 +1117,16 @@ export function main(argv = []) {
     }
 
     case "canary": {
-      const canaryAction = positionals[0] || flags.action;
-      try {
-        if (canaryAction === "stage") {
-          const jobId = flags.jobId || flags["job-id"] || positionals[1];
-          const baseSha = flags.baseSha || flags["base-sha"] || positionals[2];
-          const candidateVersion = flags.candidateVersion || flags["candidate-version"];
-          const supervisorVersion = flags.supervisorVersion || flags["supervisor-version"];
-          const res = stageCanary(mirqlDir, { ...options, jobId, baseSha, candidateVersion, supervisorVersion });
-          process.stdout.write(JSON.stringify(res) + "\n");
-          return EXIT_CODES.OK;
-        }
-        if (canaryAction === "sample" || canaryAction === "health") {
-          const canaryId = flags.canaryId || flags["canary-id"] || positionals[1];
-          const totalRequests = (flags.totalRequests ?? flags["total-requests"]) !== undefined ? Number(flags.totalRequests ?? flags["total-requests"]) : undefined;
-          const errorCount = (flags.errorCount ?? flags["error-count"]) !== undefined ? Number(flags.errorCount ?? flags["error-count"]) : undefined;
-          const latencyP99Ms = (flags.latencyP99 ?? flags["latency-p99"]) !== undefined ? Number(flags.latencyP99 ?? flags["latency-p99"]) : undefined;
-          const res = sampleCanaryHealth(mirqlDir, canaryId, { totalRequests, errorCount, latencyP99Ms }, options);
-          process.stdout.write(JSON.stringify(res) + "\n");
-          return EXIT_CODES.OK;
-        }
-        if (canaryAction === "evaluate" || canaryAction === "promote") {
-          const canaryId = flags.canaryId || flags["canary-id"] || positionals[1];
-          const res = evaluateAndPromoteCanary(mirqlDir, canaryId, { ...options, force: Boolean(flags.force) });
-          process.stdout.write(JSON.stringify(res) + "\n");
-          return res.ok ? EXIT_CODES.OK : (res.exit_code ?? EXIT_CODES.POLICY_DENIAL);
-        }
-        if (canaryAction === "rollback") {
-          const canaryId = flags.canaryId || flags["canary-id"] || positionals[1];
-          const reason = flags.reason || positionals.slice(2).join(" ");
-          const res = rollbackCanary(mirqlDir, canaryId, { ...options, reason });
-          process.stdout.write(JSON.stringify(res) + "\n");
-          return EXIT_CODES.OK;
-        }
-        process.stderr.write(JSON.stringify({ tool: TOOL, error: "unknown_canary_action", canaryAction }) + "\n");
-        return EXIT_CODES.USAGE_ERROR;
-      } catch (err) {
-        process.stderr.write(JSON.stringify({ ok: false, error: err.errorCode || err.name, message: err.message }) + "\n");
-        return err.exitCode ?? EXIT_CODES.POLICY_DENIAL;
-      }
+      const action = flags.action || positionals[0];
+      const args = flags.action ? positionals : positionals.slice(1);
+      return runCanaryAction(action, args, flags, mirqlDir, options);
     }
 
     case "promote": {
-      if (flags.canary || flags.stage) {
-        try {
-          const jobId = flags.jobId || flags["job-id"] || positionals[0];
-          const baseSha = flags.baseSha || flags["base-sha"] || positionals[1];
-          const candidateVersion = flags.candidateVersion || flags["candidate-version"];
-          const supervisorVersion = flags.supervisorVersion || flags["supervisor-version"];
-          const res = stageCanary(mirqlDir, { ...options, jobId, baseSha, candidateVersion, supervisorVersion });
-          process.stdout.write(JSON.stringify(res) + "\n");
-          return EXIT_CODES.OK;
-        } catch (err) {
-          process.stderr.write(JSON.stringify({ ok: false, error: err.errorCode || err.name, message: err.message }) + "\n");
-          return err.exitCode ?? EXIT_CODES.POLICY_DENIAL;
-        }
-      }
-      if (flags.sampleHealth || flags["sample-health"] || flags.sample) {
-        try {
-          const canaryId = flags.canaryId || flags["canary-id"] || positionals[0];
-          const totalRequests = (flags.totalRequests ?? flags["total-requests"]) !== undefined ? Number(flags.totalRequests ?? flags["total-requests"]) : undefined;
-          const errorCount = (flags.errorCount ?? flags["error-count"]) !== undefined ? Number(flags.errorCount ?? flags["error-count"]) : undefined;
-          const latencyP99Ms = (flags.latencyP99 ?? flags["latency-p99"]) !== undefined ? Number(flags.latencyP99 ?? flags["latency-p99"]) : undefined;
-          const res = sampleCanaryHealth(mirqlDir, canaryId, { totalRequests, errorCount, latencyP99Ms }, options);
-          process.stdout.write(JSON.stringify(res) + "\n");
-          return EXIT_CODES.OK;
-        } catch (err) {
-          process.stderr.write(JSON.stringify({ ok: false, error: err.errorCode || err.name, message: err.message }) + "\n");
-          return err.exitCode ?? EXIT_CODES.POLICY_DENIAL;
-        }
-      }
-      if (flags.evaluateCanary || flags["evaluate-canary"] || flags.evaluate) {
-        try {
-          const canaryId = flags.canaryId || flags["canary-id"] || positionals[0];
-          const res = evaluateAndPromoteCanary(mirqlDir, canaryId, { ...options, force: Boolean(flags.force) });
-          process.stdout.write(JSON.stringify(res) + "\n");
-          return res.ok ? EXIT_CODES.OK : (res.exit_code ?? EXIT_CODES.POLICY_DENIAL);
-        } catch (err) {
-          process.stderr.write(JSON.stringify({ ok: false, error: err.errorCode || err.name, message: err.message }) + "\n");
-          return err.exitCode ?? EXIT_CODES.POLICY_DENIAL;
-        }
-      }
-      if (flags.rollback) {
-        try {
-          const canaryId = flags.canaryId || flags["canary-id"] || positionals[0];
-          const reason = flags.reason || positionals.slice(1).join(" ");
-          const res = rollbackCanary(mirqlDir, canaryId, { ...options, reason });
-          process.stdout.write(JSON.stringify(res) + "\n");
-          return EXIT_CODES.OK;
-        } catch (err) {
-          process.stderr.write(JSON.stringify({ ok: false, error: err.errorCode || err.name, message: err.message }) + "\n");
-          return err.exitCode ?? EXIT_CODES.POLICY_DENIAL;
-        }
-      }
+      if (flags.canary || flags.stage) return runCanaryAction("stage", positionals, flags, mirqlDir, options);
+      if (flags.sampleHealth || flags.sample) return runCanaryAction("sample", positionals, flags, mirqlDir, options);
+      if (flags.evaluateCanary || flags.evaluate) return runCanaryAction("evaluate", positionals, flags, mirqlDir, options);
+      if (flags.rollback) return runCanaryAction("rollback", positionals, flags, mirqlDir, options);
 
       const jobId = flags.jobId || positionals[0];
       const baseSha = flags.baseSha || positionals[1];

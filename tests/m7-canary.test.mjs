@@ -361,6 +361,17 @@ describe("Milestone M7: Keyless Canary Promotion Gauntlet & Ouroboros Self-Hosti
       }
     });
 
+    for (const command of [["canary", "rollback"], ["promote", "--rollback"]]) {
+      it(`preserves all rollback reason words with --canary-id via ${command.join(" ")}`, () => {
+        const staged = stageCanary(mirqlDir, { jobId: setupReadyJob(), baseSha: "candidate-base" });
+        const code = queueMain([...command, "--canary-id", staged.canary_id, "health", "regression", "--dir", mirqlDir]);
+        assert.equal(code, EXIT_CODES.OK);
+        const event = readLedgerEvents(mirqlDir).at(-1).event;
+        assert.equal(event.type, "mirql.rollback");
+        assert.equal(event.payload.reason, "health regression");
+      });
+    }
+
     it("samples health and refuses premature forced promotion via the CLI", () => {
       const jobId = setupReadyJob();
 
