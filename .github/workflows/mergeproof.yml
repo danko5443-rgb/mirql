@@ -43,118 +43,53 @@ jobs:
           "
 
       - name: Run Candidate Test Suite
+        id: head_suite
         working-directory: candidate
         run: node scripts/run-tests.mjs
+
+      # Law 7 & 16: measure the BASE suite too — its real outcome feeds
+      # proof.suite_pass_base. Non-blocking on purpose: a red base is EVIDENCE
+      # (the notary must reject a PR that cannot prove improvement from a
+      # green base), not a CI infrastructure error.
+      - name: Run BASE test suite (Authoritative Measurement, Law 7)
+        id: base_suite
+        working-directory: base-notary
+        timeout-minutes: 15
+        continue-on-error: true
+        run: node scripts/run-tests.mjs
+
+      # Law 6 & 16: every proof field is MEASURED — suite outcomes mirror the
+      # step outcomes above (outcome, not conclusion, so continue-on-error reflects
+      # true test failure), the diff is the authoritative git diff, phi is
+      # computed by the base-notary's own engine, and causal_cycle_completed
+      # stays false until a verified reproducer artifact exists in this
+      # pipeline (never assumed, never faked).
+      # Law 7 & 9: N-1 base-notary executes the evidence builder; falls back to
+      # candidate copy only during bootstrap when base does not yet possess it.
+      - name: Build Honest PR Evidence (Measured Facts Only)
+        env:
+          BASE_NOTARY_DIR: ./base-notary
+          CANDIDATE_DIR: ./candidate
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          SUITE_PASS_BASE: ${{ steps.base_suite.outcome == 'success' }}
+          SUITE_PASS_HEAD: ${{ steps.head_suite.outcome == 'success' }}
+        run: |
+          if [ -f base-notary/scripts/ci-evidence.mjs ]; then
+            node base-notary/scripts/ci-evidence.mjs
+          else
+            node candidate/scripts/ci-evidence.mjs
+          fi
 
       - name: Evaluate Mergeproof Notary Gate (Base-Authored Conscience)
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        working-directory: candidate
         run: |
-          node -e "
-            const fs = require('fs');
-            const { spawnSync } = require('child_process');
-
-            const baseSha = process.env.BASE_SHA;
-            const headSha = process.env.HEAD_SHA;
-            const prNumber = parseInt(process.env.PR_NUMBER || '0', 10);
-            const prAuthor = process.env.PR_AUTHOR || 'unknown';
-
-            // Authoritative git diff (Law 7): fail closed if diff command fails
-            const diffRes = spawnSync('git', ['diff', '--name-status', baseSha + '...' + headSha], {
-              cwd: './candidate',
-              encoding: 'utf8',
-              timeout: 15000
-            });
-            if (diffRes.status !== 0) {
-              console.error('Git diff check failed against target tip:', diffRes.stderr || diffRes.stdout);
-              process.exit(1);
-            }
-
-            const isTestPath = (p) => {
-              if (typeof p !== 'string') return false;
-              const norm = p.replaceAll('\\\\', '/').toLowerCase();
-              return norm.startsWith('tests/') || norm.startsWith('test/') || norm.includes('.test.') || norm.includes('_test.');
-            };
-
-            const lines = diffRes.stdout ? diffRes.stdout.split(/\r?\n/).filter(Boolean) : [];
-            const filesChanged = [];
-            const testsDeleted = [];
-            for (const line of lines) {
-              const parts = line.split('\t');
-              const status = parts[0];
-              if (status.startsWith('R') && parts.length >= 3) {
-                const oldFile = parts[1];
-                const newFile = parts[2];
-                filesChanged.push(newFile);
-                if (isTestPath(oldFile) && !isTestPath(newFile)) {
-                  testsDeleted.push(oldFile);
-                }
-              } else if (parts.length >= 2) {
-                const file = parts[1];
-                filesChanged.push(file);
-                if (status.startsWith('D') && isTestPath(file)) {
-                  testsDeleted.push(file);
-                }
-              }
-            }
-
-            // Real base-authored phi complexity computation (Law 13 & Law 7)
-            let deltaPhi = 0;
-            try {
-              const { computePhi } = require('./base-notary/packages/run/phi.mjs');
-              const phiBase = computePhi('./base-notary');
-              const phiHead = computePhi('./candidate');
-              if (!Number.isSafeInteger(phiBase?.total) || !Number.isSafeInteger(phiHead?.total)) {
-                console.error('Law 13 Fail-Closed: base or candidate phi total is not a safe integer');
-                process.exit(1);
-              }
-              deltaPhi = phiHead.total - phiBase.total;
-            } catch (err) {
-              console.error('Law 7 Fail-Closed: base-authored computePhi failed:', err.message);
-              process.exit(1);
-            }
-
-            const prDoc = {
-              pr: {
-                number: prNumber,
-                base_sha: baseSha,
-                head_sha: headSha,
-                author: prAuthor,
-                kind: 'pr'
-              },
-              diff_stat: {
-                files_changed: filesChanged
-              },
-              evidence: {
-                tests_deleted: testsDeleted
-              },
-              proof: {
-                causal_cycle_completed: false,
-                suite_pass_head: true
-              },
-              phi: {
-                delta_phi: deltaPhi
-              }
-            };
-            const prDocPath = './candidate/pr-doc.json';
-            fs.writeFileSync(prDocPath, JSON.stringify(prDoc), 'utf8');
-
-            const notaryRes = spawnSync(process.execPath, [
-              '../base-notary/bin/mirql.mjs',
-              'm',
-              'check',
-              '--pr',
-              './pr-doc.json',
-              '--base',
-              baseSha,
-              '--head',
-              headSha
-            ], {
-              cwd: './candidate',
-              stdio: 'inherit'
-            });
-            process.exit(notaryRes.status ?? 1);
-          "
+          node ../base-notary/bin/mirql.mjs m check \
+            --pr ./pr-doc.json \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA"
