@@ -47,6 +47,7 @@ import {
   ulid,
   validateDocument,
   verifyEvent,
+  withLedgerLock,
 } from "../core/index.mjs";
 
 /** Tool name reported by this package. */
@@ -692,6 +693,7 @@ function updateCache(mirqlDir) {
  */
 export function appendEvent(mirqlDir, eventInput, options = {}) {
   const dir = resolveMirqlDir(mirqlDir);
+  return withLedgerLock(dir, () => {
   if (
     eventInput === null ||
     typeof eventInput !== "object" ||
@@ -859,6 +861,7 @@ export function appendEvent(mirqlDir, eventInput, options = {}) {
   appendLedgerLine(dir, jcs(event));
   updateCache(dir);
   return { status: "appended", seq: event.seq, hash: event.hash };
+  });
 }
 
 /**
@@ -1046,6 +1049,17 @@ export function verifyLedger(mirqlDir, options = {}) {
   const headHash = events.length
     ? eventHashOf(events.at(-1), rawLines.at(-1), isConformance)
     : GENESIS_PREV_HASH;
+  const expectedHead = options.expectHead ?? options["expect-head"];
+  if (typeof expectedHead === "string" && expectedHead.length > 0) {
+    if (headHash !== expectedHead) {
+      return {
+        valid: false,
+        error: "head_hash_mismatch",
+        expected: expectedHead,
+        actual: headHash,
+      };
+    }
+  }
   return { valid: true, event_count: events.length, head_hash: headHash };
 }
 
@@ -1299,7 +1313,10 @@ export function runCli(argv = []) {
       case "append":
         return cliAppend(dir, flags);
       case "verify": {
-        const result = verifyLedger(dir, { conformance: flags.conformance === true });
+        const result = verifyLedger(dir, {
+          conformance: flags.conformance === true,
+          expectHead: flags["expect-head"] ?? flags.expectHead,
+        });
         emitLine(jcs(result));
         return result.valid ? EXIT_CODES.OK : EXIT_CODES.INTEGRITY_VIOLATION;
       }

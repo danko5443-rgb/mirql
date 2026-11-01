@@ -104,7 +104,7 @@ export function foldState(events) {
     if (!evt || typeof evt !== "object") continue;
     state.seq = typeof evt.seq === "number" ? evt.seq : state.seq + 1;
     if (typeof evt.epoch === "number") state.epoch = evt.epoch;
-    if (typeof evt.hash === "string") state.last_event_hash = evt.hash;
+    if (typeof evt.hash === "string") { state.last_event_hash = evt.hash; state.last_hash = evt.hash; }
 
     const payload = evt.payload && typeof evt.payload === "object" ? evt.payload : {};
     const type = evt.type || "";

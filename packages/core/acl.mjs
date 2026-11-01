@@ -1,7 +1,7 @@
 /**
  * Law 3 — Single-Writer ACL.
  *
- * Every ledger event type has exactly one writer namespace permitted to emit
+ * Every ledger event type has an authorized writer namespace permitted to emit
  * it. This table is the canonical grant list; `validateDocument` refuses any
  * event whose (writer.ns, type) pair is not granted here.
  */
@@ -9,18 +9,18 @@ export const WRITER_ACL = Object.freeze(
   Object.assign(Object.create(null), {
     /** Queue: jobs, factory bookkeeping, mirql internal state. */
     "tool:queue": /^(job|factory|mirql)\.[a-z_]+$/,
-    /** Run supervisor: attempts, probes and warrants it issues. */
+    /** Run supervisor: attempts, probes, warrants it issues, and job lifecycle. */
     "tool:run_supervisor": /^(attempt|probe|warrant)\.[a-z_]+$/,
-    /** Log tool: the append-only ledger itself. */
-    "tool:log": /^ledger\.[a-z_]+$/,
+    /** Log tool: the append-only ledger itself (both ledger.* and log.* prefixes). */
+    "tool:log": /^(ledger|log)\.[a-z_]+$/,
     /** Inbox tool: human-facing events it records. */
-    "tool:inbox": /^human\.[a-z_]+$/,
+    "tool:inbox": /^(human|inbox)\.[a-z_]+$/,
     /** The human owner, via any medium. */
-    "human:owner": /^(?:human\.[a-z_]+|warrant\.(?:created|revoked)|mirql\.(?:genesis|halt|resume))$/,
-    /** The mergeproof notary: verdicts and promotions. */
-    "notary:mergeproof": /^(verdict|promotion)\.[a-z_]+$/,
-    /** Lifeguard daemon: may only ever roll things back. */
-    "daemon:lifeguard": /^(promotion|factory|mirql)\.rollback$/,
+    "human:owner": /^(?:human\.[a-z_]+|warrant\.(?:created|revoked)|mirql\.(?:genesis|halt|resume)|factory\.resumed)$/,
+    /** The mergeproof notary: verdicts, promotions, and merges. */
+    "notary:mergeproof": /^(verdict|promotion|merge)\.[a-z_]+$/,
+    /** Lifeguard daemon: out-of-band health, circuit breakers, and rollbacks. */
+    "daemon:lifeguard": /^(?:lifeguard\.[a-z_]+|(?:promotion|factory|mirql)\.rollback|factory\.resumed|mirql\.resume)$/,
   }),
 );
 

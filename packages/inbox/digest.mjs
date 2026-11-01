@@ -112,6 +112,7 @@ export function renderDigest(mirqlDir, options = {}) {
     mode: state.mode,
     epoch: state.epoch,
     seq: state.seq,
+    head_hash: state.last_hash ?? state.last_event_hash ?? "sha256:0000000000000000000000000000000000000000000000000000000000000000",
     halted: state.halted,
     budget_spent_micro_usd: state.budget_spent_micro_usd,
     pending_approvals: pendingApprovals,

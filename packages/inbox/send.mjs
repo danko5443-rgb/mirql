@@ -21,6 +21,7 @@ import {
   verifyEvent,
   validateDocument,
   EXIT_CODES,
+  withLedgerLock,
 } from "../core/index.mjs";
 import { authenticateHumanWriter } from "./keys.mjs";
 import { getLastEvent, appendEvent, requireGenesisLedger } from "./ledger.mjs";
@@ -37,6 +38,7 @@ import { getLastEvent, appendEvent, requireGenesisLedger } from "./ledger.mjs";
  * @returns {{ status: "sent", intent_id: string, warrant_id: string, warrant_hash: string, seq: number, event: object, warrant: object }}
  */
 export function sendIntent(mirqlDir, intentInput, options = {}) {
+  return withLedgerLock(mirqlDir, () => {
   if (!intentInput || typeof intentInput !== "object") {
     const err = new Error("intentInput must be a valid JSON object");
     err.exitCode = EXIT_CODES.USAGE_ERROR;
@@ -188,4 +190,5 @@ export function sendIntent(mirqlDir, intentInput, options = {}) {
     event: signedEvent,
     warrant: warrantDoc,
   };
+});
 }

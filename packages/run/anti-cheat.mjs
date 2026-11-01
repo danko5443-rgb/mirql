@@ -244,8 +244,14 @@ export function checkSwallowedExceptions(sourceCode, filename) {
       "",
     );
 
+    // Strip string literals (e.g. "}", 'swallowed', etc.)
+    cleaned = cleaned.replace(/(["'`])(?:\\.|(?!\1)[\s\S])*?\1/g, "");
+
     // Strip void expressions like `void e` or `void 0`
     cleaned = cleaned.replace(/\bvoid\s+[a-zA-Z0-9_$.]+/g, "");
+
+    // Strip variable declarations with no-op or dead assignments
+    cleaned = cleaned.replace(/\b(?:const|let|var)\s+[a-zA-Z0-9_$]+\s*=\s*;/g, "");
 
     // Strip semicolons, empty blocks, and whitespace
     cleaned = cleaned.replace(/[{};]/g, "").trim();
@@ -253,7 +259,7 @@ export function checkSwallowedExceptions(sourceCode, filename) {
     return cleaned.length === 0;
   }
 
-  // 1. Standard catch blocks: parse with balanced braces
+  // 1. Standard catch blocks: parse with balanced braces (ignoring strings and comments)
   const catchStartRegex = /catch\s*(?:\([^)]*\))?\s*\{/g;
   let match;
   while ((match = catchStartRegex.exec(sourceCode)) !== null) {
@@ -262,9 +268,47 @@ export function checkSwallowedExceptions(sourceCode, filename) {
     let body = "";
     while (idx < sourceCode.length && braceCount > 0) {
       const ch = sourceCode[idx];
-      if (ch === "{") braceCount++;
-      else if (ch === "}") braceCount--;
-      if (braceCount > 0) body += ch;
+      // Strings: skip characters until matching quote
+      if (ch === '"' || ch === "'" || ch === "`") {
+        const quote = ch;
+        body += ch;
+        idx++;
+        while (idx < sourceCode.length) {
+          const qCh = sourceCode[idx];
+          body += qCh;
+          if (qCh === "\\") {
+            idx++;
+            if (idx < sourceCode.length) body += sourceCode[idx];
+          } else if (qCh === quote) {
+            break;
+          }
+          idx++;
+        }
+      } else if (ch === "/" && sourceCode[idx + 1] === "/") {
+        // Line comment: skip to newline
+        while (idx < sourceCode.length && sourceCode[idx] !== "\n") {
+          body += sourceCode[idx];
+          idx++;
+        }
+        if (idx < sourceCode.length) body += sourceCode[idx];
+      } else if (ch === "/" && sourceCode[idx + 1] === "*") {
+        // Block comment: skip to end
+        body += "/*";
+        idx += 2;
+        while (idx < sourceCode.length - 1 && !(sourceCode[idx] === "*" && sourceCode[idx + 1] === "/")) {
+          body += sourceCode[idx];
+          idx++;
+        }
+        if (idx < sourceCode.length - 1) {
+          body += "*/";
+          idx += 2;
+          continue;
+        }
+      } else {
+        if (ch === "{") braceCount++;
+        else if (ch === "}") braceCount--;
+        if (braceCount > 0) body += ch;
+      }
       idx++;
     }
 
@@ -295,6 +339,22 @@ export function checkSwallowedExceptions(sourceCode, filename) {
         file: filename,
         pattern: match[0],
         line,
+      });
+    }
+  }
+
+  // 3. Global uncaughtException / unhandledRejection swallowing
+  const uncaughtRegex = /process\.(?:on|addListener)\s*\(\s*['"](?:uncaughtException|unhandledRejection)['"]\s*,\s*(?:async\s*)?(?:(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>\s*\{([^}]*)\}|(?:function\s*\([^)]*\)\s*\{([^}]*)\}))/g;
+  while ((match = uncaughtRegex.exec(sourceCode)) !== null) {
+    const handlerBody = match[1] ?? match[2] ?? "";
+    if (isEffectivelyEmpty(handlerBody) || !/(?:process\.exit|throw\b)/.test(handlerBody)) {
+      const upToMatch = sourceCode.slice(0, match.index);
+      const line = upToMatch.split("\n").length;
+      violations.push({
+        file: filename,
+        pattern: match[0],
+        line,
+        detail: "Empty or non-rethrowing uncaughtException / unhandledRejection handler",
       });
     }
   }

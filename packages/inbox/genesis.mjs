@@ -19,6 +19,7 @@ import {
   signEvent,
   verifyEvent,
   EXIT_CODES,
+  withLedgerLock,
 } from "../core/index.mjs";
 import {
   generateFactoryKeypairs,
@@ -88,6 +89,7 @@ function purgeStaleHumanKeys(mirqlDir) {
  */
 export function runGenesis(mirqlDir, options = {}) {
   const dir = resolvePath(mirqlDir);
+  return withLedgerLock(dir, () => {
 
   // 1. Ledger integrity & idempotency check BEFORE any writes (B4).
   const eventsPath = join(dir, "ledger", "events.jsonl");
@@ -107,6 +109,7 @@ export function runGenesis(mirqlDir, options = {}) {
         status: "already_initialized",
         seq: 1,
         hash: first.hash,
+        head_hash: first.hash,
         event: first,
       };
     }
@@ -202,8 +205,10 @@ export function runGenesis(mirqlDir, options = {}) {
     status: "initialized",
     seq: 1,
     hash: signedGenesis.hash,
+    head_hash: signedGenesis.hash,
     event: signedGenesis,
     human_key_path: humanKeyOut,
     tenant_id: tenantId,
   };
+  });
 }

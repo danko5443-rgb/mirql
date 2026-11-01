@@ -6,10 +6,6 @@ import {
   existsSync,
   mkdirSync,
   chmodSync,
-  openSync,
-  closeSync,
-  unlinkSync,
-  statSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import {
@@ -22,7 +18,10 @@ import {
   verifyEvent,
   validateDocument,
   canWriteEvent,
+  withLedgerLock,
 } from "../core/index.mjs";
+
+export { withLedgerLock };
 
 /**
  * Privileged events whose emission requires cryptographic verification against keyring.json.
@@ -37,71 +36,7 @@ const PRIVILEGED_EVENTS = new Set([
   "mirql.resume",
 ]);
 
-/**
- * Acquire exclusive lockfile with retry/backoff.
- * @param {string} lockPath
- * @param {number} [timeoutMs]
- * @returns {number} file descriptor
- */
-function acquireLock(lockPath, timeoutMs = 10000) {
-  const start = Date.now();
-  const sleepBuf = new Int32Array(new SharedArrayBuffer(4));
-  while (true) {
-    try {
-      const fd = openSync(lockPath, "wx");
-      return fd;
-    } catch (err) {
-      if (err.code !== "EEXIST") throw err;
-
-      if (Date.now() - start > timeoutMs) {
-        // Break stale lock older than 15s
-        try {
-          const st = statSync(lockPath);
-          if (Date.now() - st.mtimeMs > 15000) {
-            try {
-              unlinkSync(lockPath);
-            } catch {}
-            continue;
-          }
-        } catch {}
-        throw new Error(`Timeout acquiring ledger lockfile at ${lockPath}`);
-      }
-
-      Atomics.wait(sleepBuf, 0, 0, 15);
-    }
-  }
-}
-
-/**
- * Release exclusive lockfile.
- * @param {number} fd
- * @param {string} lockPath
- */
-function releaseLock(fd, lockPath) {
-  try {
-    if (fd !== null) closeSync(fd);
-  } catch {}
-  try {
-    unlinkSync(lockPath);
-  } catch {}
-}
-
-/**
- * Execute a function within the exclusive ledger lockfile.
- * @param {string} mirqlDir
- * @param {() => T} fn
- * @returns {T}
- */
-export function withLedgerLock(mirqlDir, fn) {
-  const lockPath = join(mirqlDir, "ledger.lock");
-  mkdirSync(mirqlDir, { recursive: true });
-  const fd = acquireLock(lockPath);
-  try {
-    return fn();
-  } finally {
-    releaseLock(fd, lockPath);
-  }
-}
+// withLedgerLock is imported and re-exported from @mirql/core
 
 /**
  * Load keyring from <mirqlDir>/ledger/keyring.json.
@@ -355,17 +290,7 @@ export function foldLedger(events, policy = {}, keyring = null) {
     const keyId = typeof evt.writer === "object" ? evt.writer.key_id : null;
 
     // Fix N1: Universal Law 3 ACL Verification for EVERY event
-    const isAclAuthorized =
-      canWriteEvent(writerNs, evt.type) ||
-      (writerNs === "human:owner" &&
-        (evt.type.startsWith("warrant.") ||
-          evt.type.startsWith("mirql.") ||
-          evt.type === "factory.resumed" ||
-          evt.type === "mirql.resume")) ||
-      (writerNs === "daemon:lifeguard" &&
-        (evt.type === "factory.resumed" ||
-          evt.type === "mirql.resume" ||
-          evt.type === "mirql.rollback"));
+    const isAclAuthorized = canWriteEvent(writerNs, evt.type);
 
     if (!isAclAuthorized) {
       // Writer namespace not authorized under Law 3 ACL -> ignore
