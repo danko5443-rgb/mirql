@@ -369,12 +369,14 @@ export function startHeartbeatTicker(heartbeatPath, intervalMs = 2000) {
 
 /**
  * Law 14 & Milestone M1: Event-Driven Reactive Supervisor Loop.
- * Listens for new events on the ledger (job.enqueued, job.leased, warrant.minted, human.intent)
+ * Listens for new events on the ledger (job.enqueued, warrant.minted, human.intent)
  * via zero-polling LedgerWatcher, automatically executing supervisor steps on demand.
  *
  * @param {object} options
  * @param {string} [options.mirqlDir]
  * @param {boolean} [options.initialRun=false]
+ * @param {Function} [options.leaseJob] - Optional callback to lease next job
+ * @param {Function} [options.getWarrant] - Optional callback to look up warrant document
  * @returns {Promise<{ watcher: import("../core/watcher.mjs").LedgerWatcher, getStepsExecuted: () => number, close: () => void }>}
  */
 export async function runSupervisorReactive(options = {}) {
@@ -382,24 +384,91 @@ export async function runSupervisorReactive(options = {}) {
   const ledgerPath = join(mirqlDir, "ledger", "events.jsonl");
 
   let stepsExecuted = 0;
+  let inFlight = false;
+  let queuedRerun = false;
+
   const watcher = createLedgerWatcher(ledgerPath, {
     debounceMs: options.debounceMs ?? 25,
     fromBeginning: false,
   });
 
+  watcher.on("error", (err) => {
+    if (process.env.MIRQL_DEBUG) {
+      process.stderr.write(`[mirql-supervisor-reactive] Watcher error: ${err.message}\n`);
+    }
+  });
+
   const runStep = async (triggerEvent) => {
-    try {
-      stepsExecuted++;
-      return await runSupervisor({ ...options, triggerEvent });
-    } catch (err) {
-      if (process.env.MIRQL_DEBUG) {
-        process.stderr.write(`[mirql-supervisor-reactive] Step error: ${err.message}\n`);
-      }
+    if (inFlight) {
+      queuedRerun = true;
       return null;
     }
+
+    inFlight = true;
+    let lastResult = null;
+    try {
+      do {
+        queuedRerun = false;
+
+        let warrant = options.warrant;
+        let epoch = options.epoch ?? 1;
+        let jobId = options.jobId;
+
+        if (typeof options.leaseJob === "function") {
+          const leaseRes = await options.leaseJob(mirqlDir);
+          if (!leaseRes || !leaseRes.ok || leaseRes.status !== "leased") {
+            continue;
+          }
+          epoch = leaseRes.epoch ?? epoch;
+          jobId = leaseRes.job_id ?? jobId;
+          if (leaseRes.warrant) {
+            warrant = leaseRes.warrant;
+          } else if (typeof options.getWarrant === "function") {
+            warrant = options.getWarrant(leaseRes.warrant_id);
+          } else {
+            warrant = { id: leaseRes.warrant_id };
+          }
+        } else if (triggerEvent?.payload?.warrant) {
+          warrant = triggerEvent.payload.warrant;
+          jobId = triggerEvent.payload.job_id ?? jobId;
+          epoch = triggerEvent.epoch ?? triggerEvent.payload.epoch ?? epoch;
+        } else if (triggerEvent?.payload?.warrant_id) {
+          warrant = { id: triggerEvent.payload.warrant_id };
+          jobId = triggerEvent.payload.job_id ?? jobId;
+          epoch = triggerEvent.epoch ?? triggerEvent.payload.epoch ?? epoch;
+        }
+
+        if (!warrant && !options.warrantId) {
+          continue;
+        }
+
+        try {
+          const stepResult = await runSupervisor({
+            ...options,
+            warrant,
+            warrantId: warrant?.id ?? options.warrantId,
+            epoch,
+            jobId,
+            triggerEvent,
+          });
+          if (stepResult) {
+            stepsExecuted++;
+            lastResult = stepResult;
+            watcher.emit("step", stepResult);
+          }
+        } catch (stepErr) {
+          if (process.env.MIRQL_DEBUG) {
+            process.stderr.write(`[mirql-supervisor-reactive] Execution error: ${stepErr.message}\n`);
+          }
+        }
+      } while (queuedRerun && !watcher.closed);
+    } finally {
+      inFlight = false;
+    }
+    return lastResult;
   };
 
-  const reactiveEvents = ["job.enqueued", "job.leased", "warrant.minted", "human.intent"];
+  const reactiveEvents = ["job.enqueued", "warrant.minted", "human.intent"];
 
   for (const evtType of reactiveEvents) {
     watcher.on(evtType, (evt) => {

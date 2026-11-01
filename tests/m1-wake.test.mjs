@@ -391,37 +391,44 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
   // 3. End-to-End Reactive Supervisor Loop (M1)
   // ---------------------------------------------------------------------------
   describe("3. End-to-End Reactive Supervisor Wake Loop", () => {
-    it("runSupervisorReactive wakes on newly appended ledger events", async () => {
+    it("runSupervisorReactive wakes, leases job, executes supervisor, and writes attempt.outcome to ledger", async () => {
       const ledgerDir = join(tempDir, "ledger");
       mkdirSync(ledgerDir, { recursive: true });
       const ledgerPath = join(ledgerDir, "events.jsonl");
       writeFileSync(ledgerPath, "", "utf8");
 
-      // Start reactive supervisor
+      const warrant = makeValidWarrant();
+
+      // Start reactive supervisor wired to queue lease
       const reactive = await runSupervisorReactive({
         mirqlDir: tempDir,
         debounceMs: 10,
         skipPidFile: true,
         noHeartbeatTicker: true,
+        leaseJob: () => leaseNextJob(tempDir),
+        getWarrant: (wId) => (wId === warrant.id ? warrant : null),
+        builderCommand: "exit 0",
       });
 
       try {
         assert.equal(reactive.getStepsExecuted(), 0);
 
-        // Append a job.enqueued event
-        const enqueuedEvent = {
-          v: 1,
-          id: ulid(),
-          type: "job.enqueued",
-          seq: 1,
-          payload: { job_id: "JOB-TEST-1" },
-        };
-        appendFileSync(ledgerPath, jcs(enqueuedEvent) + "\n", "utf8");
+        // Prepare outcome promise on ledger
+        const outcomePromise = waitForLedgerEvent(
+          ledgerPath,
+          (e) => e.type === "attempt.outcome" && e.payload?.warrant_id === warrant.id,
+          { timeoutMs: 3000, debounceMs: 10 },
+        );
 
-        // Wait for reactive supervisor to wake and step
-        await new Promise((r) => setTimeout(r, 100));
+        // Client submits warrant to queue
+        const sub = submitWarrant(tempDir, warrant, { repoRoot: ROOT });
+        assert.equal(sub.ok, true);
 
-        assert.ok(reactive.getStepsExecuted() >= 1, "Supervisor must wake and execute a step");
+        // Reactive supervisor wakes, leases the job, executes supervisor step, and writes attempt.outcome!
+        const outcomeEvent = await outcomePromise;
+        assert.equal(outcomeEvent.type, "attempt.outcome");
+        assert.equal(outcomeEvent.payload.warrant_id, warrant.id);
+        assert.ok(reactive.getStepsExecuted() >= 1, "Completed steps count must be >= 1");
       } finally {
         reactive.close();
       }
