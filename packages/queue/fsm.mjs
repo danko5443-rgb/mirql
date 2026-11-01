@@ -93,6 +93,23 @@ export function tick(state, policy = DEFAULT_POLICY, nowMs = Date.now(), options
     };
   }
 
+  // 2b. Circuit breaker checks
+  if (state.budget_breaker_tripped === true || options.budget_breaker_tripped === true) {
+    return {
+      action: "BUDGET_EXHAUSTED",
+      next_mode: state.mode || "BUILD",
+      exit_code: EXIT_CODES.BUDGET_EXHAUSTED,
+      reason: "circuit_breaker_budget_tripped",
+    };
+  }
+  if (options.force_harden === true && (state.mode === "BUILD" || !state.mode)) {
+    return {
+      action: "TRANSITION",
+      next_mode: "HARDEN",
+      reason: "circuit_breaker_force_harden",
+    };
+  }
+
   // 3. Fix B2: Reap expired leases
   const expiredLeases = Object.values(state.active_leases || {}).filter(
     (l) => !isLeaseLive(l, nowMs),

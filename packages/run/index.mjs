@@ -502,21 +502,32 @@ export function runCli(argv = []) {
             ? resolve(flags.dir)
             : resolve(workspaceDir, ".mirql");
 
-        if (flags.trip && typeof flags.trip === "string") {
-          if (!SUBSYSTEMS.includes(flags.trip)) {
+        if (flags.trip !== undefined) {
+          if (
+            typeof flags.trip !== "string" ||
+            flags.trip.trim() === "" ||
+            !SUBSYSTEMS.includes(flags.trip) ||
+            flags.trip === "all" ||
+            flags.trip === "lifeguard"
+          ) {
             emitError({
               error: "USAGE_ERROR",
-              reason: `invalid subsystem to trip: ${JSON.stringify(flags.trip)}; must be one of: ${SUBSYSTEMS.join(", ")}`,
+              reason: `invalid subsystem to trip: ${JSON.stringify(flags.trip)}; must be one of: ${SUBSYSTEMS.filter((s) => s !== "all" && s !== "lifeguard").join(", ")}`,
             });
             return EXIT_CODES.USAGE_ERROR;
           }
         }
 
-        if (flags.reset && typeof flags.reset === "string") {
-          if (!SUBSYSTEMS.includes(flags.reset) && flags.reset !== "all") {
+        if (flags.reset !== undefined) {
+          if (
+            typeof flags.reset !== "string" ||
+            flags.reset.trim() === "" ||
+            (!SUBSYSTEMS.includes(flags.reset) && flags.reset !== "all") ||
+            flags.reset === "lifeguard"
+          ) {
             emitError({
               error: "USAGE_ERROR",
-              reason: `invalid subsystem to reset: ${JSON.stringify(flags.reset)}; must be one of: ${SUBSYSTEMS.join(", ")}`,
+              reason: `invalid subsystem to reset: ${JSON.stringify(flags.reset)}; must be one of: ${SUBSYSTEMS.filter((s) => s !== "lifeguard").join(", ")}`,
             });
             return EXIT_CODES.USAGE_ERROR;
           }
@@ -524,11 +535,19 @@ export function runCli(argv = []) {
 
         let cooldownMs;
         if (flags.cooldown !== undefined) {
-          const cd = parseInt(flags.cooldown, 10);
+          const rawCd = String(flags.cooldown).trim();
+          if (!/^\d+$/.test(rawCd)) {
+            emitError({
+              error: "USAGE_ERROR",
+              reason: `cooldown must be a non-negative integer ms, got ${JSON.stringify(flags.cooldown)}`,
+            });
+            return EXIT_CODES.USAGE_ERROR;
+          }
+          const cd = parseInt(rawCd, 10);
           if (!Number.isSafeInteger(cd) || cd < 0) {
             emitError({
               error: "USAGE_ERROR",
-              reason: "cooldown must be a non-negative safe integer ms",
+              reason: "cooldown exceeds safe integer range",
             });
             return EXIT_CODES.USAGE_ERROR;
           }
@@ -544,6 +563,17 @@ export function runCli(argv = []) {
           autoQuarantine: Boolean(flags["auto-quarantine"] || flags.quarantine),
           runProbes: Boolean(flags.probes),
         });
+
+        if (flags.trip || flags.reset) {
+          if (flags.format === "text") {
+            process.stdout.write(`=== mirql Doctor Action: ${res.action.toUpperCase()} ===\n`);
+            process.stdout.write(`Target: ${res.target}\n`);
+            process.stdout.write(`Status: SUCCESS\n`);
+          } else {
+            emitLine(jcs(res));
+          }
+          return EXIT_CODES.OK;
+        }
 
         if (flags.format === "text") {
           process.stdout.write("=== mirql Doctor Health Report ===\n");

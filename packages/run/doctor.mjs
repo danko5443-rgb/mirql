@@ -1,13 +1,24 @@
 // packages/run/doctor.mjs — Autonomous Diagnostic Role & Multi-Tier Circuit Breakers.
 // Roles: roles/doctor.md (tier: max, emits: triage.report, circuit_breaker.recommendation)
-// Laws: Law 2 (Lifeguard Kill Authority), Law 14 (Convergence to Quiescence), Law 17 (Integer-Only JCS)
+// Laws: Law 2 (Lifeguard Kill Authority), Law 4 (Durable Ledger), Law 14 (Quiescence), Law 17 (Integer-Only JCS)
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { EXIT_CODES, jcs } from "../core/index.mjs";
+import {
+  EXIT_CODES,
+  jcs,
+  foldLedger,
+  readLedgerEvents,
+  foldQueueState,
+} from "../core/index.mjs";
 import { runProbe, KNOWN_PROBES } from "./probe.mjs";
-import { quarantineTest } from "./mutant.mjs";
+import { appendSupervisorEvent, getOrGenerateSupervisorKey } from "./ledger.mjs";
 
+/**
+ * Valid subsystems that can be evaluated, throttled, tripped, or reset.
+ * Note: Law 2 strictly forbids intercepting, masking, or tripping the Lifeguard daemon.
+ * Lifeguard retains unblockable kill authority and is never a trip target.
+ */
 export const SUBSYSTEMS = Object.freeze([
   "worker",
   "worker:flash",
@@ -16,7 +27,6 @@ export const SUBSYSTEMS = Object.freeze([
   "probe",
   "budget",
   "queue",
-  "lifeguard",
   "all",
 ]);
 
@@ -34,27 +44,6 @@ export const MACRO_STATES = Object.freeze([
   "QUIESCENT",
   "HALTED",
 ]);
-
-/**
- * Reads events from the append-only ledger without cross-package imports.
- *
- * @param {string} mirqlDir
- * @returns {object[]}
- */
-export function readLedgerEvents(mirqlDir) {
-  const eventsFile = join(mirqlDir, "ledger", "events.jsonl");
-  if (!existsSync(eventsFile)) return [];
-  const raw = readFileSync(eventsFile, "utf8").trim();
-  if (!raw) return [];
-  const lines = raw.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  const events = [];
-  for (const line of lines) {
-    try {
-      events.push(JSON.parse(line));
-    } catch {}
-  }
-  return events;
-}
 
 /**
  * Loads policy configuration from policy/mirql.json.
@@ -75,114 +64,9 @@ export function loadDoctorPolicy(mirqlDir, workspaceDir) {
     daily_budget_micro_usd: 25000000,
     per_job_budget_micro_usd: 1500000,
     retries_per_tier: 2,
-    macro_states: ["BUILD", "HARDEN", "PATROL", "QUIESCENT"],
+    ladder: ["flash", "mid", "max", "human"],
+    macro_states: ["BUILD", "HARDEN", "PATROL", "QUIESCENT", "HALTED"],
   };
-}
-
-/**
- * Folds ledger events into state projection without cross-package imports.
- *
- * @param {object[]} events
- * @returns {object}
- */
-export function reduceQueueState(events = []) {
-  const state = {
-    mode: "BUILD",
-    warrants: {},
-    jobs: {},
-    active_leases: {},
-    budget_spent_micro_usd: 0,
-    metrics: { total_cost_micro_usd: 0 },
-  };
-
-  for (const evt of events) {
-    if (!evt || !evt.type) continue;
-    switch (evt.type) {
-      case "mirql.genesis":
-      case "factory.transition":
-        if (evt.payload?.macro_state) state.mode = evt.payload.macro_state;
-        if (evt.payload?.next_mode) state.mode = evt.payload.next_mode;
-        break;
-      case "warrant.created":
-      case "warrant.issued": {
-        const wId = evt.payload?.warrant?.id || evt.payload?.id || evt.id;
-        if (wId) {
-          state.warrants[wId] = {
-            id: wId,
-            status: "open",
-            tier: evt.payload?.warrant?.tier || "flash",
-            failed_attempts: 0,
-            ...(evt.payload?.warrant || evt.payload || {}),
-          };
-        }
-        break;
-      }
-      case "warrant.converged": {
-        const wId = evt.payload?.warrant_id;
-        if (wId && state.warrants[wId]) {
-          state.warrants[wId].status = "completed";
-        }
-        break;
-      }
-      case "job.enqueued": {
-        const jId = evt.payload?.job_id || evt.payload?.id || evt.id;
-        if (jId) {
-          state.jobs[jId] = {
-            id: jId,
-            status: "queued",
-            warrant_id: evt.payload?.warrant_id,
-          };
-        }
-        break;
-      }
-      case "job.leased": {
-        const jId = evt.payload?.job_id;
-        const lId = evt.payload?.lease_id || jId;
-        if (lId) {
-          const leasedAt = evt.payload?.leased_at_ms || evt.hlc?.wall_ms || Date.now();
-          const ttl = evt.payload?.ttl_ms || 900000;
-          state.active_leases[lId] = {
-            lease_id: lId,
-            job_id: jId,
-            warrant_id: evt.payload?.warrant_id,
-            leased_at_ms: leasedAt,
-            ttl_ms: ttl,
-            expires_at_ms: evt.payload?.expires_at_ms || (leasedAt + ttl),
-          };
-        }
-        break;
-      }
-      case "job.completed": {
-        const jId = evt.payload?.job_id;
-        if (jId && state.jobs[jId]) state.jobs[jId].status = "completed";
-        for (const [k, v] of Object.entries(state.active_leases)) {
-          if (v.job_id === jId) delete state.active_leases[k];
-        }
-        break;
-      }
-      case "job.failed": {
-        const jId = evt.payload?.job_id;
-        const wId = evt.payload?.warrant_id;
-        if (jId && state.jobs[jId]) state.jobs[jId].status = "failed";
-        if (wId && state.warrants[wId]) {
-          state.warrants[wId].failed_attempts = (state.warrants[wId].failed_attempts || 0) + 1;
-        }
-        for (const [k, v] of Object.entries(state.active_leases)) {
-          if (v.job_id === jId) delete state.active_leases[k];
-        }
-        break;
-      }
-      case "attempt.outcome": {
-        const cost = evt.payload?.cost_micro_usd || 0;
-        if (Number.isSafeInteger(cost) && cost > 0) {
-          state.budget_spent_micro_usd += cost;
-          state.metrics.total_cost_micro_usd += cost;
-        }
-        break;
-      }
-    }
-  }
-  return state;
 }
 
 /**
@@ -195,31 +79,52 @@ export function reduceQueueState(events = []) {
 export function normalizeFailureSignature(input) {
   if (!input) return "SIG:UNKNOWN:unspecified_failure";
 
+  // If input is a ledger event, inspect domain payload cleanly
+  if (typeof input === "object" && !(input instanceof Error)) {
+    if (input.type === "probe.completed") {
+      const pName = input.payload?.type || input.payload?.probe || "unknown";
+      const cleanName = String(pName).toLowerCase().replace(/[^a-z0-9_]+/g, "_");
+      return `SIG:PROBE_FAIL:${cleanName}`;
+    }
+
+    if (input.type === "lifeguard.alert") {
+      const reason = input.payload?.reason || input.payload?.alert || "alert";
+      const cleanReason = String(reason).toLowerCase().replace(/[^a-z0-9_]+/g, "_");
+      return `SIG:LIFEGUARD_ALERT:${cleanReason}`;
+    }
+
+    if (input.type === "job.timeout" || input.type === "job.lease_expired") {
+      const ms = input.payload?.timeout_ms ?? input.payload?.ttl_ms ?? 0;
+      return `SIG:TIMEOUT:${Number.isSafeInteger(ms) && ms > 0 ? ms : "generic"}ms`;
+    }
+
+    if (input.type === "job.failed" || input.type === "attempt.failed") {
+      const reason = input.payload?.reason ?? input.payload?.error ?? input.payload?.status ?? "";
+      return normalizeFailureSignature(String(reason));
+    }
+
+    if (input.type === "attempt.outcome") {
+      const reason = input.payload?.error || input.payload?.verdict || input.payload?.status || "failed";
+      return normalizeFailureSignature(String(reason));
+    }
+
+    if (input.failure_signature) {
+      return String(input.failure_signature).replace(/[^a-zA-Z0-9_:-]+/g, "_");
+    }
+
+    if (input.name && input.error) {
+      const pName = String(input.name).toLowerCase().replace(/[^a-z0-9_]+/g, "_");
+      return `SIG:PROBE_FAIL:${pName}`;
+    }
+  }
+
   let raw = "";
   if (typeof input === "string") {
     raw = input;
   } else if (input instanceof Error) {
     raw = `${input.name}: ${input.message}`;
   } else if (typeof input === "object") {
-    if (input.failure_signature) {
-      return String(input.failure_signature);
-    }
-    if (input.type === "job.timeout") {
-      const timeoutMs = input.payload?.timeout_ms ?? 0;
-      return `SIG:TIMEOUT:${Number.isSafeInteger(timeoutMs) ? timeoutMs : 0}ms`;
-    }
-    if (input.type === "job.failed" || input.type === "attempt.failed") {
-      const reason = input.payload?.reason ?? input.payload?.error ?? input.payload?.status ?? "";
-      raw = `job_failed: ${reason}`;
-    } else if (input.probe) {
-      const pName = input.probe.probe ?? input.probe.name ?? "unknown";
-      const status = input.probe.status ?? "failed";
-      raw = `probe_${pName}_${status}`;
-    } else if (input.error || input.message || input.reason) {
-      raw = String(input.error || input.message || input.reason);
-    } else {
-      raw = JSON.stringify(input);
-    }
+    raw = input.message || input.reason || input.error || "";
   }
 
   // Strip volatile memory addresses, timestamps, and ULIDs
@@ -251,11 +156,14 @@ export function normalizeFailureSignature(input) {
   if (/flake|flakiness|non-deterministic/i.test(sanitized)) {
     return "SIG:FLAKE:non_deterministic_execution";
   }
-  if (/budget|ceiling|exhaust/i.test(sanitized)) {
+  if (/\b(budget_exceeded|daily_budget|budget_exhausted|budget_ceiling)\b/i.test(sanitized)) {
     return "SIG:BUDGET_EXCEEDED:ceiling_exhaustion";
   }
-  if (/lease|expired|hung/i.test(sanitized)) {
+  if (/\b(lease_expired|lease_timeout|hung_lease|lease_hung)\b/i.test(sanitized)) {
     return "SIG:LEASE_HUNG:lease_timeout";
+  }
+  if (/\b(retry_exhausted|tier_exhausted|retries_per_tier|max_retries)\b/i.test(sanitized)) {
+    return "SIG:TIER_EXHAUSTED:warrant_needs_human";
   }
   if (/concurrency/i.test(sanitized)) {
     return "SIG:CONCURRENCY:limit_exceeded";
@@ -285,36 +193,72 @@ export function diagnoseHealth(ledgerEvents = [], probeResults = [], queueStatus
   const incidents = [];
   const affectedJobs = new Set();
   const affectedProbes = new Set();
+  let lifeguardHalted = false;
 
-  // 1. Scan ledger events for failure events
-  for (const evt of ledgerEvents) {
+  // 1. Scan ledger events for failure events using exact production event shapes
+  for (const item of ledgerEvents) {
+    const evt = item && item.event ? item.event : item;
     if (!evt || typeof evt !== "object") continue;
     const type = evt.type ?? "";
-    const isFailureEvent =
-      type === "job.failed" ||
-      type === "job.timeout" ||
-      type === "attempt.failed" ||
-      type === "lifeguard.alert" ||
-      (type === "probe.completed" && evt.payload?.probe?.status !== "pass");
 
-    if (isFailureEvent) {
+    // Lifeguard alerts (Law 2: Lifeguard unblockable kill authority)
+    if (type === "lifeguard.alert") {
+      lifeguardHalted = true;
       const sig = normalizeFailureSignature(evt);
-      const jobId = evt.payload?.job_id ?? evt.payload?.id ?? evt.id;
-      if (jobId) affectedJobs.add(jobId);
-      if (type === "probe.completed") {
-        const pName = evt.payload?.probe?.probe ?? evt.payload?.probe?.name;
-        if (pName) affectedProbes.add(pName);
+      incidents.push({ source: "lifeguard", type, sig, raw: evt });
+      continue;
+    }
+
+    // Job timeouts
+    if (type === "job.timeout" || type === "job.lease_expired") {
+      const jId = evt.payload?.job_id;
+      if (jId) affectedJobs.add(jId);
+      const sig = normalizeFailureSignature(evt);
+      incidents.push({ source: "ledger", type, sig, raw: evt });
+      continue;
+    }
+
+    // Worker attempt outcomes that failed
+    if (type === "attempt.outcome") {
+      const p = evt.payload || {};
+      const isSuccess =
+        p.status === "completed" &&
+        (p.verdict === "auto_merge" || p.verdict === "pass" || !p.verdict);
+
+      if (!isSuccess) {
+        if (p.job_id) affectedJobs.add(p.job_id);
+        const sig = normalizeFailureSignature(p.error || p.verdict || "attempt_failed");
+        incidents.push({ source: "ledger", type, sig, raw: evt });
       }
-      incidents.push({
-        source: "ledger",
-        type,
-        sig,
-        raw: evt,
-      });
+      continue;
+    }
+
+    // Explicit job failures
+    if (type === "job.failed" || type === "attempt.failed") {
+      const jId = evt.payload?.job_id ?? evt.payload?.id ?? evt.id;
+      if (jId) affectedJobs.add(jId);
+      const sig = normalizeFailureSignature(evt);
+      incidents.push({ source: "ledger", type, sig, raw: evt });
+      continue;
+    }
+
+    // Completed probes: check real probe.completed shape (status !== "pass" or failures > 0)
+    if (type === "probe.completed") {
+      const p = evt.payload || {};
+      // Skip doctor's own diagnostic audit records
+      if (p.probe === "doctor" || p.type === "doctor") continue;
+      const isPass = p.status === "pass" && (p.failures === undefined || p.failures === 0);
+      if (!isPass) {
+        const pName = p.type || p.probe || "unknown";
+        affectedProbes.add(pName);
+        const sig = normalizeFailureSignature(evt);
+        incidents.push({ source: "probe_ledger", name: pName, sig, raw: evt });
+      }
+      continue;
     }
   }
 
-  // 2. Scan probe results
+  // 2. Scan active probeResults array passed directly from runner
   const pList = Array.isArray(probeResults)
     ? probeResults
     : probeResults && typeof probeResults === "object"
@@ -323,9 +267,10 @@ export function diagnoseHealth(ledgerEvents = [], probeResults = [], queueStatus
 
   for (const p of pList) {
     if (!p || typeof p !== "object") continue;
-    const isFail = p.ok === false || p.passed === false || (p.status && p.status !== "pass");
-    if (isFail) {
-      const pName = p.name ?? p.probe ?? "unknown";
+    if (p.name === "doctor" || p.probe === "doctor") continue;
+    const isPass = (p.ok === true || p.passed === true || p.status === "pass") && (p.failures === undefined || p.failures === 0);
+    if (!isPass) {
+      const pName = p.name ?? p.probe ?? p.type ?? "unknown";
       affectedProbes.add(pName);
       const sig = normalizeFailureSignature(p);
       incidents.push({
@@ -337,10 +282,8 @@ export function diagnoseHealth(ledgerEvents = [], probeResults = [], queueStatus
     }
   }
 
-  // 3. Scan queue status for hung leases and retry exhaustion
-  const warrants = Object.values(queueStatus.warrants || {});
+  // 3. Scan queue status for live hung leases and retry-exhausted warrants
   const activeLeases = Object.values(queueStatus.active_leases || {});
-
   for (const lease of activeLeases) {
     const expiry = lease.expires_at_ms ?? (lease.leased_at_ms + (lease.ttl_ms ?? 0));
     if (nowMs > expiry) {
@@ -355,8 +298,10 @@ export function diagnoseHealth(ledgerEvents = [], probeResults = [], queueStatus
     }
   }
 
+  const maxAttempts = Number.isSafeInteger(options.max_attempts) ? options.max_attempts : 3;
+  const warrants = Object.values(queueStatus.warrants || {});
   for (const w of warrants) {
-    if (w.status === "needs_human" || (w.failed_attempts || 0) >= 3) {
+    if (w.status === "needs_human" || (w.failed_attempts || 0) >= maxAttempts) {
       const sig = "SIG:TIER_EXHAUSTED:warrant_needs_human";
       incidents.push({
         source: "queue",
@@ -380,6 +325,7 @@ export function diagnoseHealth(ledgerEvents = [], probeResults = [], queueStatus
       affected_jobs: [],
       affected_probes: [],
       healthy: true,
+      lifeguard_halt: false,
     };
   }
 
@@ -389,10 +335,14 @@ export function diagnoseHealth(ledgerEvents = [], probeResults = [], queueStatus
     sigCounts.set(inc.sig, (sigCounts.get(inc.sig) || 0) + 1);
   }
 
-  // Identify dominant signature
+  // Identify dominant signature (prioritizing Lifeguard alerts)
   let primarySig = "";
   let maxCount = -1;
   for (const [sig, count] of sigCounts.entries()) {
+    if (sig.startsWith("SIG:LIFEGUARD_ALERT")) {
+      primarySig = sig;
+      break;
+    }
     if (count > maxCount) {
       maxCount = count;
       primarySig = sig;
@@ -403,7 +353,10 @@ export function diagnoseHealth(ledgerEvents = [], probeResults = [], queueStatus
   let rootCause = "Unclassified recurring defect detected across ledger and execution boundaries.";
   let remediation = "Inspect job logs and isolate failing module.";
 
-  if (primarySig.startsWith("SIG:TIMEOUT")) {
+  if (primarySig.startsWith("SIG:LIFEGUARD_ALERT")) {
+    rootCause = "Lifeguard daemon issued an out-of-band health alert; system integrity breached or heartbeat stale (Law 2).";
+    remediation = "System must immediately halt and undergo operator inspection. Do not resume without human affirmative clearance.";
+  } else if (primarySig.startsWith("SIG:TIMEOUT")) {
     rootCause = "Worker execution exceeded configured lease TTL; potential deadlock, heavy computation, or unbounded external wait.";
     remediation = "Reap hung leases via queue tick, scale worker timeout, or decompose task anchors into smaller warrants.";
   } else if (primarySig.startsWith("SIG:ASSERTION")) {
@@ -412,10 +365,10 @@ export function diagnoseHealth(ledgerEvents = [], probeResults = [], queueStatus
   } else if (primarySig.startsWith("SIG:SYNTAX")) {
     rootCause = "Unparseable syntax generated by unprivileged worker code mutation.";
     remediation = "Enforce pre-verification node check (node --check) and discard malformed candidate patches.";
-  } else if (primarySig.startsWith("SIG:DRIFT")) {
+  } else if (primarySig.startsWith("SIG:DRIFT") || primarySig === "SIG:PROBE_FAIL:drift") {
     rootCause = "Attempt modified files outside declared warrant anchors or introduced public API delta without citation.";
     remediation = "Re-anchor warrant or update surface.lock with explicit human citation.";
-  } else if (primarySig.startsWith("SIG:MUTANT_SURVIVOR")) {
+  } else if (primarySig.startsWith("SIG:MUTANT_SURVIVOR") || primarySig === "SIG:PROBE_FAIL:mutants") {
     rootCause = "Mutation kill rate dropped below the 8000 basis points (80.00%) floor.";
     remediation = "Augment test suite with targeted edge-case unit tests to kill surviving AST mutants.";
   } else if (primarySig.startsWith("SIG:FLAKE")) {
@@ -430,6 +383,12 @@ export function diagnoseHealth(ledgerEvents = [], probeResults = [], queueStatus
   } else if (primarySig.startsWith("SIG:TIER_EXHAUSTED")) {
     rootCause = "Job exhausted retry limits across worker tiers without passing verification.";
     remediation = "Escalate warrant to 'needs_human' inbox for human operator intervention or warrant refinement.";
+  } else if (primarySig.startsWith("SIG:PROBE_FAIL:tests")) {
+    rootCause = "Regression in core test suite or conformance verification.";
+    remediation = "Fix failing tests or quarantine flaky tests.";
+  } else if (primarySig.startsWith("SIG:PROBE_FAIL")) {
+    rootCause = `Declarative probe regression detected: ${primarySig}.`;
+    remediation = "Inspect probe logs and remediate detected invariant failure.";
   }
 
   return {
@@ -443,13 +402,14 @@ export function diagnoseHealth(ledgerEvents = [], probeResults = [], queueStatus
     affected_jobs: Array.from(affectedJobs).sort(),
     affected_probes: Array.from(affectedProbes).sort(),
     healthy: false,
+    lifeguard_halt: lifeguardHalted,
   };
 }
 
 /**
  * Multi-Tier Circuit Breaker Evaluator (roles/doctor.md).
  *
- * Tracks failure metrics across worker tiers (flash, mid, max), budget consumption,
+ * Tracks failure metrics across worker tiers (flash, mid, max), daily budget consumption,
  * and hung leases to prescribe autonomous circuit breaking directives.
  *
  * @param {object} systemMetrics
@@ -458,19 +418,20 @@ export function diagnoseHealth(ledgerEvents = [], probeResults = [], queueStatus
  */
 export function evaluateCircuitBreakers(systemMetrics = {}, options = {}) {
   const nowMs = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
+
   const tierFailures = {
-    flash: systemMetrics.tier_failures?.flash ?? 0,
-    mid: systemMetrics.tier_failures?.mid ?? 0,
-    max: systemMetrics.tier_failures?.max ?? 0,
+    flash: Number.isSafeInteger(systemMetrics.tier_failures?.flash) ? systemMetrics.tier_failures.flash : 0,
+    mid: Number.isSafeInteger(systemMetrics.tier_failures?.mid) ? systemMetrics.tier_failures.mid : 0,
+    max: Number.isSafeInteger(systemMetrics.tier_failures?.max) ? systemMetrics.tier_failures.max : 0,
   };
 
   const retriesPerTier = Number.isSafeInteger(options.retries_per_tier)
     ? options.retries_per_tier
     : 2;
 
-  const budgetSpent = Number.isSafeInteger(systemMetrics.budget_spent_micro_usd)
-    ? systemMetrics.budget_spent_micro_usd
-    : 0;
+  const budgetSpent = Number.isSafeInteger(systemMetrics.daily_budget_spent_micro_usd)
+    ? systemMetrics.daily_budget_spent_micro_usd
+    : (Number.isSafeInteger(systemMetrics.budget_spent_micro_usd) ? systemMetrics.budget_spent_micro_usd : 0);
 
   const budgetLimit = Number.isSafeInteger(systemMetrics.budget_limit_micro_usd)
     ? systemMetrics.budget_limit_micro_usd
@@ -482,12 +443,19 @@ export function evaluateCircuitBreakers(systemMetrics = {}, options = {}) {
 
   const totalFailures = tierFailures.flash + tierFailures.mid + tierFailures.max;
 
+  // Safe cooldown helper ensuring non-negative safe integers
+  const resolveCooldown = (userMs, defaultMs) => {
+    return Number.isSafeInteger(userMs) && userMs >= 0 ? userMs : defaultMs;
+  };
+
   // Rule 0: Operator manual trip override
   if (options.manual_trip) {
-    const target = SUBSYSTEMS.includes(options.manual_trip) ? options.manual_trip : "worker";
-    const cooldownMs = Number.isSafeInteger(options.cooldown_ms) && options.cooldown_ms > 0
-      ? options.cooldown_ms
-      : 3600000;
+    const rawTarget = options.manual_trip;
+    if (rawTarget === "lifeguard") {
+      throw new Error("Cannot trip lifeguard: Law 2 unblockable kill authority");
+    }
+    const target = SUBSYSTEMS.includes(rawTarget) && rawTarget !== "all" ? rawTarget : "worker";
+    const cooldownMs = resolveCooldown(options.cooldown_ms, 3600000);
     return {
       v: 1,
       type: "circuit_breaker.recommendation",
@@ -512,7 +480,7 @@ export function evaluateCircuitBreakers(systemMetrics = {}, options = {}) {
       type: "circuit_breaker.recommendation",
       target_subsystem: "budget",
       action: "trip",
-      cooldown_ms: options.cooldown_ms ?? 172800000, // 48h cooldown
+      cooldown_ms: resolveCooldown(options.cooldown_ms, 172800000), // 48h cooldown
       reason: "daily_budget_exhausted",
       metrics: {
         budget_spent_micro_usd: budgetSpent,
@@ -525,13 +493,14 @@ export function evaluateCircuitBreakers(systemMetrics = {}, options = {}) {
   }
 
   // Rule 2: Budget high watermark warning (>= 90%)
-  if (budgetLimit > 0 && budgetSpent >= Math.floor((budgetLimit * 90) / 100)) {
+  const watermark = Math.floor((budgetLimit / 100) * 90);
+  if (budgetLimit > 0 && budgetSpent >= watermark) {
     return {
       v: 1,
       type: "circuit_breaker.recommendation",
       target_subsystem: "budget",
       action: "throttle",
-      cooldown_ms: options.cooldown_ms ?? 3600000,
+      cooldown_ms: resolveCooldown(options.cooldown_ms, 3600000),
       reason: "daily_budget_near_ceiling",
       metrics: {
         budget_spent_micro_usd: budgetSpent,
@@ -550,7 +519,7 @@ export function evaluateCircuitBreakers(systemMetrics = {}, options = {}) {
       type: "circuit_breaker.recommendation",
       target_subsystem: "worker:max",
       action: "force_harden",
-      cooldown_ms: options.cooldown_ms ?? 1800000,
+      cooldown_ms: resolveCooldown(options.cooldown_ms, 1800000),
       reason: "max_tier_retry_exhausted_force_harden",
       metrics: {
         budget_spent_micro_usd: budgetSpent,
@@ -569,7 +538,7 @@ export function evaluateCircuitBreakers(systemMetrics = {}, options = {}) {
       type: "circuit_breaker.recommendation",
       target_subsystem: "worker:mid",
       action: "throttle",
-      cooldown_ms: options.cooldown_ms ?? 900000,
+      cooldown_ms: resolveCooldown(options.cooldown_ms, 900000),
       reason: "mid_tier_failures_escalate_to_max",
       metrics: {
         budget_spent_micro_usd: budgetSpent,
@@ -588,7 +557,7 @@ export function evaluateCircuitBreakers(systemMetrics = {}, options = {}) {
       type: "circuit_breaker.recommendation",
       target_subsystem: "worker:flash",
       action: "throttle",
-      cooldown_ms: options.cooldown_ms ?? 300000,
+      cooldown_ms: resolveCooldown(options.cooldown_ms, 300000),
       reason: "flash_tier_failures_escalate_to_mid",
       metrics: {
         budget_spent_micro_usd: budgetSpent,
@@ -607,7 +576,7 @@ export function evaluateCircuitBreakers(systemMetrics = {}, options = {}) {
       type: "circuit_breaker.recommendation",
       target_subsystem: "queue",
       action: "throttle",
-      cooldown_ms: options.cooldown_ms ?? 60000,
+      cooldown_ms: resolveCooldown(options.cooldown_ms, 60000),
       reason: "hung_leases_require_reap",
       metrics: {
         budget_spent_micro_usd: budgetSpent,
@@ -652,8 +621,8 @@ export function evaluateCircuitBreakers(systemMetrics = {}, options = {}) {
 export function evaluateMacroStateTransition(currentState, triageReport, breakerRecommendation, options = {}) {
   const current = currentState || "BUILD";
 
-  // Lifeguard or fatal budget trip -> HALTED
-  if (options.lifeguard_halt === true || (breakerRecommendation?.action === "trip" && breakerRecommendation.target_subsystem === "budget")) {
+  // Lifeguard or fatal budget trip -> HALTED (Law 2 unblockable kill authority)
+  if (options.lifeguard_halt === true || triageReport?.lifeguard_halt === true || (breakerRecommendation?.action === "trip" && breakerRecommendation.target_subsystem === "budget")) {
     if (current !== "HALTED") {
       return {
         should_transition: true,
@@ -695,7 +664,9 @@ export function evaluateMacroStateTransition(currentState, triageReport, breaker
     };
   }
 
-  if (current === "PATROL" && (options.probes_clean === true || triageReport?.healthy === true)) {
+  // PATROL -> QUIESCENT requires clean probes, healthy triage, AND non-tripped breakers
+  const isBreakerBlocking = breakerRecommendation?.action === "trip" || breakerRecommendation?.action === "force_harden";
+  if (current === "PATROL" && options.probes_clean === true && triageReport?.healthy === true && !isBreakerBlocking) {
     return {
       should_transition: true,
       from_state: current,
@@ -713,76 +684,165 @@ export function evaluateMacroStateTransition(currentState, triageReport, breaker
 }
 
 /**
- * Breaker state persistence manager for tracking active circuit trips and cooldowns.
+ * Reconstructs authoritative circuit breaker state by folding doctor events from the durable ledger (Law 4).
+ *
+ * @param {object[]} ledgerEvents
+ * @param {number} [nowMs=Date.now()]
+ * @returns {{ v: 1, subsystems: Record<string, object> }}
+ */
+export function foldBreakerStateFromLedger(ledgerEvents = [], nowMs = Date.now()) {
+  const subsystems = {};
+
+  for (const item of ledgerEvents) {
+    const evt = item && item.event ? item.event : item;
+    if (!evt || evt.type !== "probe.completed") continue;
+    const p = evt.payload || {};
+    if (p.probe !== "doctor" && p.type !== "doctor") continue;
+
+    const breaker = p.breaker;
+    if (!breaker || !breaker.target_subsystem) continue;
+
+    const target = breaker.target_subsystem;
+    const action = breaker.action;
+
+    if (action === "reset") {
+      if (target === "all") {
+        for (const k of Object.keys(subsystems)) delete subsystems[k];
+      } else {
+        delete subsystems[target];
+      }
+    } else if (action === "trip" || action === "throttle") {
+      const cooldownMs = Number.isSafeInteger(breaker.cooldown_ms) ? breaker.cooldown_ms : 3600000;
+      const trippedAt = Number.isSafeInteger(evt.hlc?.wall_ms) ? evt.hlc.wall_ms : nowMs;
+      const expiresAt = Number.isSafeInteger(p.expires_at_ms)
+        ? p.expires_at_ms
+        : Math.min(Number.MAX_SAFE_INTEGER, trippedAt + cooldownMs);
+
+      // Only maintain if unexpired
+      if (nowMs < expiresAt) {
+        subsystems[target] = {
+          state: action === "trip" ? "tripped" : "throttled",
+          reason: breaker.reason || "doctor_directive",
+          tripped_at_ms: trippedAt,
+          expires_at_ms: expiresAt,
+          cooldown_ms: cooldownMs,
+        };
+      }
+    }
+  }
+
+  return { v: 1, subsystems };
+}
+
+/**
+ * Checks whether a circuit breaker is currently active and tripped in the durable ledger.
+ *
+ * @param {string} mirqlDir
+ * @param {string} subsystem
+ * @param {number} [nowMs=Date.now()]
+ * @returns {boolean}
+ */
+export function isCircuitBreakerTripped(mirqlDir, subsystem, nowMs = Date.now()) {
+  const events = readLedgerEvents(mirqlDir);
+  const state = foldBreakerStateFromLedger(events, nowMs);
+  if (state.subsystems[subsystem]?.state === "tripped") return true;
+  if (subsystem.startsWith("worker:") && state.subsystems["worker"]?.state === "tripped") return true;
+  return false;
+}
+
+/**
+ * Breaker state manager: authoritative state lives in the durable ledger (Law 4),
+ * with an optional local cache file for fast out-of-band inspection.
  */
 export class BreakerStore {
   /**
    * @param {string} mirqlDir
+   * @param {object} [keypair]
    */
-  constructor(mirqlDir) {
+  constructor(mirqlDir, keypair = null) {
     this.mirqlDir = mirqlDir;
+    this.keypair = keypair;
     this.stateFile = join(mirqlDir, "state", "doctor_breakers.json");
   }
 
-  load() {
-    if (!existsSync(this.stateFile)) {
-      return {
-        v: 1,
-        subsystems: {},
-      };
-    }
+  load(nowMs = Date.now()) {
+    const events = readLedgerEvents(this.mirqlDir);
+    const folded = foldBreakerStateFromLedger(events, nowMs);
+    // Sync cache file
     try {
-      const parsed = JSON.parse(readFileSync(this.stateFile, "utf8"));
-      return parsed && typeof parsed === "object" ? parsed : { v: 1, subsystems: {} };
-    } catch {
-      return { v: 1, subsystems: {} };
-    }
-  }
-
-  save(data) {
-    const stateDir = join(this.mirqlDir, "state");
-    mkdirSync(stateDir, { recursive: true });
-    writeFileSync(this.stateFile, jcs(data) + "\n", "utf8");
+      const stateDir = join(this.mirqlDir, "state");
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(this.stateFile, jcs(folded) + "\n", "utf8");
+    } catch {}
+    return folded;
   }
 
   trip(subsystem, reason = "manual_trip", cooldownMs = 3600000, nowMs = Date.now()) {
-    const data = this.load();
-    data.subsystems = data.subsystems || {};
-    data.subsystems[subsystem] = {
-      state: "tripped",
-      reason,
-      tripped_at_ms: nowMs,
-      expires_at_ms: nowMs + cooldownMs,
-      cooldown_ms: cooldownMs,
-    };
-    this.save(data);
-    return data.subsystems[subsystem];
+    if (subsystem === "lifeguard" || subsystem === "all") {
+      throw new Error(`Invalid subsystem to trip: "${subsystem}". Lifeguard has unblockable authority.`);
+    }
+
+    const safeCd = Number.isSafeInteger(cooldownMs) && cooldownMs >= 0 ? cooldownMs : 3600000;
+    const expiresAt = Math.min(Number.MAX_SAFE_INTEGER, nowMs + safeCd);
+
+    const keypair = this.keypair || getOrGenerateSupervisorKey(this.mirqlDir);
+    appendSupervisorEvent(
+      this.mirqlDir,
+      {
+        type: "probe.completed",
+        payload: {
+          probe: "doctor",
+          type: "doctor",
+          status: "fail",
+          breaker: {
+            action: "trip",
+            target_subsystem: subsystem,
+            cooldown_ms: safeCd,
+            reason,
+          },
+          expires_at_ms: expiresAt,
+        },
+        nowMs,
+      },
+      keypair,
+    );
+
+    return this.load(nowMs).subsystems[subsystem];
   }
 
-  reset(subsystem) {
-    const data = this.load();
-    data.subsystems = data.subsystems || {};
-    if (subsystem === "all") {
-      data.subsystems = {};
-    } else {
-      delete data.subsystems[subsystem];
+  reset(subsystem, nowMs = Date.now()) {
+    if (subsystem === "lifeguard") {
+      throw new Error("Lifeguard is not managed by circuit breakers");
     }
-    this.save(data);
+
+    const keypair = this.keypair || getOrGenerateSupervisorKey(this.mirqlDir);
+    appendSupervisorEvent(
+      this.mirqlDir,
+      {
+        type: "probe.completed",
+        payload: {
+          probe: "doctor",
+          type: "doctor",
+          status: "pass",
+          breaker: {
+            action: "reset",
+            target_subsystem: subsystem,
+            cooldown_ms: 0,
+            reason: "manual_reset",
+          },
+          expires_at_ms: 0,
+        },
+        nowMs,
+      },
+      keypair,
+    );
+
+    return this.load(nowMs);
   }
 
   isTripped(subsystem, nowMs = Date.now()) {
-    const data = this.load();
-    const entry = data.subsystems?.[subsystem];
-    if (!entry) return false;
-    if (entry.state === "tripped") {
-      if (nowMs < (entry.expires_at_ms || 0)) {
-        return true;
-      }
-      // Cooldown expired
-      delete data.subsystems[subsystem];
-      this.save(data);
-    }
-    return false;
+    const data = this.load(nowMs);
+    return Boolean(data.subsystems?.[subsystem]?.state === "tripped");
   }
 }
 
@@ -797,11 +857,14 @@ export function runDoctor(options = {}) {
   const workspaceDir = options.workspaceDir ?? process.cwd();
   const nowMs = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
 
-  const store = new BreakerStore(mirqlDir);
+  const store = new BreakerStore(mirqlDir, options.keypair);
 
   // Handle explicit reset flag
   if (options.reset) {
-    store.reset(options.reset);
+    if (options.reset === "lifeguard") {
+      throw new Error("Lifeguard is not managed by circuit breakers (Law 2)");
+    }
+    store.reset(options.reset, nowMs);
     return {
       ok: true,
       healthy: true,
@@ -813,6 +876,9 @@ export function runDoctor(options = {}) {
 
   // Handle explicit trip flag
   if (options.trip) {
+    if (options.trip === "lifeguard" || options.trip === "all") {
+      throw new Error(`Invalid subsystem to trip: "${options.trip}" (Law 2)`);
+    }
     const cooldownMs = Number.isSafeInteger(options.cooldown_ms) ? options.cooldown_ms : 3600000;
     const entry = store.trip(options.trip, options.reason || "operator_flag", cooldownMs, nowMs);
     return {
@@ -833,19 +899,19 @@ export function runDoctor(options = {}) {
     ledgerEvents = [];
   }
 
-  // Reduce queue state directly from ledger events
-  let queueState = {};
-  try {
-    queueState = reduceQueueState(ledgerEvents);
-  } catch {
-    queueState = {};
-  }
-
   // Load policy
   const policy = loadDoctorPolicy(mirqlDir, workspaceDir);
 
+  // Fold real queue state using the canonical fold from @mirql/core
+  let queueState = {};
+  try {
+    queueState = foldQueueState(mirqlDir, policy);
+  } catch {
+    queueState = foldLedger(ledgerEvents, policy);
+  }
+
   // Probe outputs
-  const probeResults = options.probeResults || [];
+  const probeResults = options.probeResults ? [...options.probeResults] : [];
   if (options.runProbes) {
     for (const p of KNOWN_PROBES) {
       try {
@@ -858,45 +924,63 @@ export function runDoctor(options = {}) {
   }
 
   // Run health triage
-  const triage = diagnoseHealth(ledgerEvents, probeResults, queueState, { nowMs });
+  const triage = diagnoseHealth(ledgerEvents, probeResults, queueState, {
+    nowMs,
+    max_attempts: policy.retries_per_tier ?? 2,
+  });
 
-  // Auto-quarantine flaky test if requested
-  if (options.autoQuarantine && triage.failure_signature.startsWith("SIG:FLAKE")) {
-    const qDir = join(mirqlDir, "quarantine");
-    for (const p of probeResults) {
-      if (p.name === "tests" && p.testFile) {
-        try {
-          quarantineTest(p.testFile, qDir);
-          triage.quarantine_applied = p.testFile;
-        } catch {}
+  // Calculate daily budget spend within the last 24 hours (86,400,000 ms)
+  const oneDayAgo = nowMs - 86400000;
+  let dailyBudgetSpent = 0;
+  for (const item of ledgerEvents) {
+    const evt = item && item.event ? item.event : item;
+    if (evt && evt.type === "attempt.outcome") {
+      const evtTime = evt.hlc?.wall_ms || (evt.ts ? Date.parse(evt.ts) : 0);
+      if (evtTime >= oneDayAgo) {
+        const cost = evt.payload?.cost_micro_usd || 0;
+        if (Number.isSafeInteger(cost) && cost > 0) {
+          dailyBudgetSpent += cost;
+        }
       }
     }
   }
 
-  // Compute tier metrics
+  // Count consecutive failures on active/unresolved warrants per tier using policy ladder
+  const ladder = policy.ladder || ["flash", "mid", "max", "human"];
   const tierFailures = { flash: 0, mid: 0, max: 0 };
   const warrants = Object.values(queueState.warrants || {});
+
   for (const w of warrants) {
-    const tier = w.tier || (w.class === "architectural" ? "max" : "flash");
-    const fails = w.failed_attempts || 0;
-    if (fails > 0 && tier in tierFailures) {
-      tierFailures[tier] = Math.max(tierFailures[tier], fails);
+    // Only active or needs_human warrants count towards current tier failures (completed warrants are cleared)
+    if (w.status !== "completed") {
+      const fails = w.failed_attempts || 0;
+      if (fails > 0) {
+        for (let i = 1; i <= fails; i++) {
+          const tier = ladder[i - 1] || "flash";
+          if (tier in tierFailures) {
+            tierFailures[tier] = Math.max(tierFailures[tier], 1);
+          }
+        }
+        // The current attempt tier is the one failing consecutively
+        const currentTier = ladder[fails - 1] || "flash";
+        if (currentTier in tierFailures) {
+          tierFailures[currentTier] = Math.max(tierFailures[currentTier], fails);
+        }
+      }
     }
   }
 
-  // Check active hung leases
+  // Check active hung leases from live queue state
   let hungLeasesCount = 0;
   for (const l of Object.values(queueState.active_leases || {})) {
     const exp = l.expires_at_ms ?? (l.leased_at_ms + (l.ttl_ms ?? 0));
     if (nowMs > exp) hungLeasesCount++;
   }
 
-  const budgetSpent = queueState.budget_spent_micro_usd ?? queueState.metrics?.total_cost_micro_usd ?? 0;
   const budgetLimit = policy.daily_budget_micro_usd ?? 25000000;
-
   const breakerMetrics = {
     tier_failures: tierFailures,
-    budget_spent_micro_usd: budgetSpent,
+    daily_budget_spent_micro_usd: dailyBudgetSpent,
     budget_limit_micro_usd: budgetLimit,
     hung_leases_count: hungLeasesCount,
   };
@@ -913,12 +997,45 @@ export function runDoctor(options = {}) {
     breaker,
     {
       nowMs,
+      lifeguard_halt: triage.lifeguard_halt || queueState.halted === true,
       all_warrants_resolved: warrants.length > 0 && warrants.every((w) => w.status === "completed"),
+      hardening_passed: Boolean(options.hardening_passed || queueState.hardening_passed),
+      probes_clean: options.probes_clean !== undefined ? Boolean(options.probes_clean) : queueState.probes_clean,
     },
   );
 
-  const breakerState = store.load();
-  const isHealthy = triage.healthy && breaker.action !== "trip" && breaker.action !== "force_harden";
+  const breakerState = store.load(nowMs);
+  const hasActiveTrippedBreakers = Object.values(breakerState.subsystems || {}).some(
+    (s) => s.state === "tripped" && nowMs < (s.expires_at_ms || 0)
+  );
+  const isHealthy =
+    triage.healthy &&
+    breaker.action !== "trip" &&
+    breaker.action !== "force_harden" &&
+    !triage.lifeguard_halt &&
+    !hasActiveTrippedBreakers;
+
+  // Persist doctor evaluation to durable ledger
+  try {
+    const keypair = options.keypair || getOrGenerateSupervisorKey(mirqlDir);
+    appendSupervisorEvent(
+      mirqlDir,
+      {
+        type: "probe.completed",
+        payload: {
+          probe: "doctor",
+          type: "doctor",
+          status: isHealthy ? "pass" : "fail",
+          triage,
+          breaker,
+          transition,
+          expires_at_ms: breaker.action === "trip" ? Math.min(Number.MAX_SAFE_INTEGER, nowMs + breaker.cooldown_ms) : 0,
+        },
+        nowMs,
+      },
+      keypair,
+    );
+  } catch {}
 
   return {
     ok: true,
