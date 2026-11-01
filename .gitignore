@@ -3,4 +3,5 @@ node_modules/
 *.key.json
 *.private.json
 *.tmp
+*.mutant-bak
 .DS_Store

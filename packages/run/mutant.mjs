@@ -1,6 +1,19 @@
 // packages/run/mutant.mjs — Milestone M4: Incremental AST Mutation Engine & Flake Detector.
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
-import { join, resolve, basename } from "node:path";
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  renameSync,
+  unlinkSync,
+  cpSync,
+  rmSync,
+  mkdtempSync,
+  chmodSync,
+  lstatSync,
+} from "node:fs";
+import { join, resolve, basename, dirname, relative } from "node:path";
+import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { sanitizeAgentEnv } from "./agent.mjs";
 
@@ -331,13 +344,137 @@ function hashString(str) {
 }
 
 /**
+ * True when the path looks like a test file (same rule as the mergeproof
+ * evaluator and CI evidence builder).
+ * @param {string} p
+ * @returns {boolean}
+ */
+function isTestFilePath(p) {
+  const norm = String(p ?? "").replaceAll("\\", "/").toLowerCase();
+  return (
+    norm.startsWith("tests/") ||
+    norm.startsWith("test/") ||
+    norm.includes(".test.") ||
+    norm.includes("_test.")
+  );
+}
+
+/**
+ * Locates a BOUNDED workspace root to snapshot for sandboxed mutation:
+ *   1. the git root containing the source, when there is one; otherwise
+ *   2. the shared directory when source and tests are colocated in it.
+ * Anything else (disjoint trees, unbounded shared ancestors) returns null —
+ * callers must fail closed rather than copy an unbounded directory.
+ *
+ * @param {string} sourcePath
+ * @param {string|string[]} [testPaths]
+ * @returns {string | null}
+ */
+function findWorkspaceRoot(sourcePath, testPaths) {
+  const sourceDir = dirname(resolve(sourcePath));
+  let dir = sourceDir;
+  while (true) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  const first = Array.isArray(testPaths) ? testPaths[0] : testPaths;
+  if (first && dirname(resolve(first)).toLowerCase() === sourceDir.toLowerCase()) {
+    return sourceDir;
+  }
+  return null;
+}
+
+/**
+ * Creates a throwaway sandbox copy of the workspace (issue #14): mutants are
+ * written into the copy, never into the real tree. A SIGKILL between mutant
+ * runs can leak at most a temp directory — the real workspace is untouched.
+ *
+ * @param {string} sourcePath
+ * @param {string|string[]} testPaths
+ * @returns {{ root: string, source: string, tests: string[] } | null}
+ */
+function makeSandbox(sourcePath, testPaths) {
+  const root = findWorkspaceRoot(sourcePath, testPaths);
+  if (!root) return null;
+
+  let sandboxRoot = null;
+  try {
+    sandboxRoot = mkdtempSync(join(tmpdir(), "mirql-mutant-"));
+    cpSync(root, sandboxRoot, {
+      recursive: true,
+      filter: (src) => {
+        const name = basename(src);
+        return name !== ".git" && name !== "node_modules" && name !== ".mirql";
+      },
+    });
+
+    const map = (abs) => join(sandboxRoot, relative(root, abs));
+    const sandboxSource = map(resolve(sourcePath));
+    const rawTestPaths = (Array.isArray(testPaths) ? testPaths : [testPaths]).filter(Boolean);
+    const sandboxTests = rawTestPaths.map(map);
+    if (!existsSync(sandboxSource) || sandboxTests.some((t) => !existsSync(t))) {
+      rmSync(sandboxRoot, { recursive: true, force: true });
+      return null;
+    }
+
+    // Dissolve symlinks on the mutation path in the sandbox (issue #14 / B1):
+    // If sandboxSource is a symlink, writeFileSync would mutate the target outside the sandbox.
+    // Replace symlink with real file content inside the sandbox.
+    try {
+      const st = lstatSync(sandboxSource);
+      if (st.isSymbolicLink()) {
+        unlinkSync(sandboxSource);
+        writeFileSync(sandboxSource, readFileSync(resolve(sourcePath)));
+      }
+    } catch {}
+
+    for (let i = 0; i < sandboxTests.length; i++) {
+      const t = sandboxTests[i];
+      const realT = rawTestPaths[i];
+      try {
+        const tst = lstatSync(t);
+        if (tst.isSymbolicLink()) {
+          unlinkSync(t);
+          writeFileSync(t, readFileSync(resolve(realT)));
+        }
+      } catch {}
+    }
+
+    // cpSync preserves file modes; the sandbox owns its copies, so the mutation
+    // target must be writable even if the real file was read-only.
+    try {
+      chmodSync(sandboxSource, 0o666);
+    } catch {}
+    return { root: sandboxRoot, source: sandboxSource, tests: sandboxTests };
+  } catch (err) {
+    if (sandboxRoot && existsSync(sandboxRoot)) {
+      try {
+        rmSync(sandboxRoot, { recursive: true, force: true });
+      } catch {}
+    }
+    return null;
+  }
+}
+
+/**
  * Runs mutation testing against a source file and a test suite.
- * Enforces pre-flight baseline test verification, crash-safe restoration, and the M4 invariant:
+ * Enforces pre-flight baseline test verification and the M4 invariant:
  * kill rate must achieve at least 8000 bp (80%) floor.
+ *
+ * Isolation contract (issue #14): with the default spawn runner, the engine
+ * snapshots the workspace to a temp sandbox and mutates ONLY the copy — the
+ * real source file is never written. A crash (including SIGKILL from the
+ * lifeguard, which cannot run signal traps) leaves the real tree intact.
+ * A legacy `<source>.mutant-bak` from pre-isolation versions is still healed
+ * on entry. When a custom `testRunner` is provided the engine writes nothing
+ * at all — the runner receives each mutant and decides how to test it.
  *
  * @param {object} options
  * @param {string} options.sourcePath - Path to source file being evaluated
- * @param {string} [options.testPath] - Path to test file covering the source
+ * @param {string|string[]} [options.testPath] - Test file(s) covering the source
  * @param {number} [options.maxMutants=20] - Maximum mutants to evaluate (> 0)
  * @param {number} [options.killThresholdBp=8000] - Required kill rate (inviolable floor 8000 bp)
  * @param {Function} [options.testRunner] - Custom test runner for sandboxing
@@ -366,7 +503,9 @@ export function runMutationTesting(options = {}) {
     throw new Error(`sourcePath not found: ${sourcePath}`);
   }
 
-  if (!testRunner && (!testPath || !existsSync(testPath))) {
+  const testPaths = Array.isArray(testPath) ? testPath : [testPath];
+
+  if (!testRunner && (testPaths.length === 0 || testPaths.some((t) => !t || !existsSync(t)))) {
     throw new Error(`testPath not found or missing: ${testPath}`);
   }
 
@@ -381,7 +520,8 @@ export function runMutationTesting(options = {}) {
 
   const backupPath = `${sourcePath}.mutant-bak`;
 
-  // Fail-safe crash recovery: if previous run died ungracefully, restore from backup immediately
+  // Fail-safe crash recovery: heal workspaces corrupted by pre-isolation
+  // versions (which mutated the real file under a .mutant-bak backup).
   if (existsSync(backupPath)) {
     try {
       writeFileSync(sourcePath, readFileSync(backupPath, "utf8"), "utf8");
@@ -391,25 +531,16 @@ export function runMutationTesting(options = {}) {
 
   const originalContent = readFileSync(sourcePath, "utf8");
 
-  // Multi-run pre-flight baseline stability verification
-  const { env: cleanEnv } = sanitizeAgentEnv(process.env);
-  for (let b = 0; b < 2; b++) {
-    let baselinePassed = false;
-    if (typeof testRunner === "function") {
-      baselinePassed = Boolean(testRunner({ id: "baseline", original: "", mutated: "", isBaseline: true }));
-    } else {
-      const baselineResult = spawnSync(process.execPath, ["--test", testPath], {
-        encoding: "utf8",
-        timeout: 15000,
-        env: { ...cleanEnv, NODE_ENV: "test" },
-      });
-      baselinePassed = baselineResult.status === 0;
-    }
-
-    if (!baselinePassed) {
+  // Sandbox the run when using the real spawn runner (isolation, issue #14).
+  // A custom testRunner already isolates by contract (it applies mutant.mutatedCode
+  // itself); writing the real file for it was pure collateral risk.
+  let sandbox = null;
+  if (typeof testRunner !== "function") {
+    sandbox = makeSandbox(sourcePath, testPaths);
+    if (!sandbox) {
       return {
         ok: false,
-        error: "BASELINE_TEST_FAILED",
+        error: "SANDBOX_UNAVAILABLE",
         source_path: sourcePath,
         kill_rate_bp: 0,
         kill_threshold_bp: killThresholdBp,
@@ -417,61 +548,99 @@ export function runMutationTesting(options = {}) {
         mutants_killed: 0,
         mutants_survived: 0,
         survived_mutants: [],
-        summary: "Baseline test failed or was non-deterministic on unmutated source; mutation testing aborted",
+        summary: "Cannot build an isolated sandbox for this source/test layout; refusing to mutate the real workspace",
       };
     }
   }
 
-  const allMutants = generateMutants(originalContent, options);
-  const mutantsToTest = allMutants.slice(0, maxMutants);
-
-  if (mutantsToTest.length === 0) {
-    return {
-      ok: false,
-      error: "NO_MUTATION_POINTS",
-      source_path: sourcePath,
-      kill_rate_bp: 0,
-      kill_threshold_bp: killThresholdBp,
-      mutants_total: 0,
-      mutants_killed: 0,
-      mutants_survived: 0,
-      survived_mutants: [],
-      summary: "No valid AST mutation points found in target source",
-    };
-  }
-
-  let killedCount = 0;
-  const survivedMutants = [];
-
-  // Write safe backup file for crash recovery
-  writeFileSync(backupPath, originalContent, "utf8");
-
-  // Signal traps for abort safety
-  const restoreOnAbort = () => {
-    try {
-      if (existsSync(backupPath)) {
-        writeFileSync(sourcePath, readFileSync(backupPath, "utf8"), "utf8");
-        unlinkSync(backupPath);
-      }
-    } catch {}
-  };
-  process.once("SIGINT", restoreOnAbort);
-  process.once("SIGTERM", restoreOnAbort);
+  const mutationTarget = sandbox ? sandbox.source : null;
+  const spawnTestPaths = sandbox ? sandbox.tests : testPaths;
 
   try {
+    // Multi-run pre-flight baseline stability verification
+    const { env: cleanEnv } = sanitizeAgentEnv(process.env);
+    for (let b = 0; b < 2; b++) {
+      let baselinePassed = false;
+      if (typeof testRunner === "function") {
+        baselinePassed = Boolean(testRunner({ id: "baseline", original: "", mutated: "", isBaseline: true }));
+      } else {
+        const baselineResult = spawnSync(process.execPath, ["--test", ...spawnTestPaths], {
+          encoding: "utf8",
+          timeout: 15000,
+          env: { ...cleanEnv, NODE_ENV: "test" },
+        });
+        if (baselineResult.error) {
+          return {
+            ok: false,
+            error: "BASELINE_TEST_FAILED",
+            source_path: sourcePath,
+            kill_rate_bp: 0,
+            kill_threshold_bp: killThresholdBp,
+            mutants_total: 0,
+            mutants_killed: 0,
+            mutants_survived: 0,
+            survived_mutants: [],
+            summary: `Baseline test runner error: ${baselineResult.error.message}`,
+          };
+        }
+        baselinePassed = baselineResult.status === 0;
+      }
+
+      if (!baselinePassed) {
+        return {
+          ok: false,
+          error: "BASELINE_TEST_FAILED",
+          source_path: sourcePath,
+          kill_rate_bp: 0,
+          kill_threshold_bp: killThresholdBp,
+          mutants_total: 0,
+          mutants_killed: 0,
+          mutants_survived: 0,
+          survived_mutants: [],
+          summary: "Baseline test failed or was non-deterministic on unmutated source; mutation testing aborted",
+        };
+      }
+    }
+
+    const allMutants = generateMutants(originalContent, options);
+    const mutantsToTest = allMutants.slice(0, maxMutants);
+
+    if (mutantsToTest.length === 0) {
+      return {
+        ok: false,
+        error: "NO_MUTATION_POINTS",
+        source_path: sourcePath,
+        kill_rate_bp: 0,
+        kill_threshold_bp: killThresholdBp,
+        mutants_total: 0,
+        mutants_killed: 0,
+        mutants_survived: 0,
+        survived_mutants: [],
+        summary: "No valid AST mutation points found in target source",
+      };
+    }
+
+    let killedCount = 0;
+    const survivedMutants = [];
+
     for (const mutant of mutantsToTest) {
-      // Apply mutant
-      writeFileSync(sourcePath, mutant.mutatedCode, "utf8");
+      // Apply mutant — ONLY ever inside the sandbox copy (or the custom runner)
+      if (mutationTarget) {
+        writeFileSync(mutationTarget, mutant.mutatedCode, "utf8");
+      }
 
       let testPassed = false;
       if (typeof testRunner === "function") {
         testPassed = Boolean(testRunner(mutant));
       } else {
-        const result = spawnSync(process.execPath, ["--test", testPath], {
+        const result = spawnSync(process.execPath, ["--test", ...spawnTestPaths], {
           encoding: "utf8",
           timeout: 15000,
           env: { ...cleanEnv, NODE_ENV: "test" },
         });
+        if (result.error) {
+          throw new Error(`Test runner failed executing mutant ${mutant.id}: ${result.error.message}`);
+        }
         testPassed = result.status === 0;
       }
 
@@ -491,34 +660,30 @@ export function runMutationTesting(options = {}) {
         killedCount++;
       }
     }
+
+    const total = mutantsToTest.length;
+    // Calculate basis points: 0 to 10000 bp (Law 17 safe integer arithmetic)
+    const killRateBp = Math.trunc((killedCount * 10000) / total);
+    const passed = killRateBp >= killThresholdBp;
+
+    return {
+      ok: passed,
+      source_path: sourcePath,
+      kill_rate_bp: killRateBp,
+      kill_threshold_bp: killThresholdBp,
+      mutants_total: total,
+      mutants_killed: killedCount,
+      mutants_survived: survivedMutants.length,
+      survived_mutants: survivedMutants,
+      summary: `Mutation testing: ${killedCount}/${total} killed (${killRateBp} bp, threshold: ${killThresholdBp} bp)`,
+    };
   } finally {
-    process.removeListener("SIGINT", restoreOnAbort);
-    process.removeListener("SIGTERM", restoreOnAbort);
-    // ALWAYS restore original source file and clean backup
-    writeFileSync(sourcePath, originalContent, "utf8");
-    if (existsSync(backupPath)) {
+    if (sandbox) {
       try {
-        unlinkSync(backupPath);
+        rmSync(sandbox.root, { recursive: true, force: true });
       } catch {}
     }
   }
-
-  const total = mutantsToTest.length;
-  // Calculate basis points: 0 to 10000 bp (Law 17 safe integer arithmetic)
-  const killRateBp = Math.trunc((killedCount * 10000) / total);
-  const passed = killRateBp >= killThresholdBp;
-
-  return {
-    ok: passed,
-    source_path: sourcePath,
-    kill_rate_bp: killRateBp,
-    kill_threshold_bp: killThresholdBp,
-    mutants_total: total,
-    mutants_killed: killedCount,
-    mutants_survived: survivedMutants.length,
-    survived_mutants: survivedMutants,
-    summary: `Mutation testing: ${killedCount}/${total} killed (${killRateBp} bp, threshold: ${killThresholdBp} bp)`,
-  };
 }
 
 /**
