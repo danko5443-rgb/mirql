@@ -1,7 +1,14 @@
 // tests/queue.test.mjs — Comprehensive test suite for Work Package W4: mirql-queue
 import { test, describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  appendFileSync,
+  existsSync,
+  statSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -15,6 +22,7 @@ import {
   signEvent,
   hlcTick,
 } from "../packages/core/index.mjs";
+import { runSupervisor } from "../packages/run/index.mjs";
 import {
   getQueueStatus,
   submitWarrant,
@@ -1746,6 +1754,99 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       assert.equal(status.warrants[warrant.id].failed_attempts, 0);
       // Cost was tracked (5 * 5000 = 25000)
       assert.equal(status.budget_spent_micro_usd, 25_000);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // P0 Remediation: H1 (supervisor epoch threading) and H4 (key permissions)
+  // ---------------------------------------------------------------------------
+  describe("P0 Remediation: H1 supervisor epoch threading & H4 key permissions", () => {
+    it("H1: supervisor threads the leased epoch (2) so the fold accepts attempt.outcome and completes the job", () => {
+      const warrant = makeValidWarrant({
+        id: ulid(1_700_001_000_000),
+        semantic_fingerprint: sha256("warrant-h1-epoch-threading"),
+      });
+      submitWarrant(tempDir, warrant, { repoRoot: ROOT });
+
+      // Lease the job — the first lease bumps the epoch from 1 to 2.
+      const leased = leaseNextJob(tempDir);
+      assert.equal(leased.ok, true);
+      assert.equal(leased.epoch, 2);
+
+      // Register the supervisor writer key so the fold verifies its signature.
+      const supervisorKp = generateEd25519Keypair();
+      saveKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
+
+      const res = runSupervisor({
+        mirqlDir: tempDir,
+        keypair: supervisorKp,
+        jobId: leased.job_id,
+        warrantId: warrant.id,
+        epoch: leased.epoch,
+        builderCommand: "node -v",
+        runCheck: ({ stage }) => ({ exitCode: stage === "green_on_head" ? 0 : 1 }),
+      });
+
+      assert.equal(res.verified, true);
+      assert.equal(res.outcome.epoch, 2);
+      assert.equal(res.event.epoch, 2);
+      assert.equal(res.event.payload.epoch, 2);
+      assert.equal(res.event.payload.status, "completed");
+
+      const status = getQueueStatus(tempDir);
+      // The fold ACCEPTED the outcome: job and warrant reach "completed".
+      assert.equal(status.jobs[leased.job_id].status, "completed");
+      assert.equal(status.jobs[leased.job_id].outcome_verdict, "auto_merge");
+      assert.equal(status.warrants[warrant.id].status, "completed");
+      const folded = foldQueueState(tempDir);
+      assert.equal(folded.metrics.warrants_completed, 1);
+      assert.equal(folded.metrics.jobs_completed, 1);
+      // The lease is closed.
+      assert.equal(status.active_leases.length, 0);
+    });
+
+    it("H1: a supervisor outcome with the default epoch 1 is still fenced off an epoch-2 lease (stale discard preserved)", () => {
+      const warrant = makeValidWarrant({
+        id: ulid(1_700_001_100_000),
+        semantic_fingerprint: sha256("warrant-h1-stale-fence-preserved"),
+      });
+      submitWarrant(tempDir, warrant, { repoRoot: ROOT });
+
+      const leased = leaseNextJob(tempDir);
+      assert.equal(leased.ok, true);
+      assert.equal(leased.epoch, 2);
+
+      const supervisorKp = generateEd25519Keypair();
+      saveKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
+
+      // NOTE: no `epoch` passed — the supervisor records the legacy default 1.
+      runSupervisor({
+        mirqlDir: tempDir,
+        keypair: supervisorKp,
+        jobId: leased.job_id,
+        warrantId: warrant.id,
+        builderCommand: "node -v",
+        runCheck: ({ stage }) => ({ exitCode: stage === "green_on_head" ? 0 : 1 }),
+      });
+
+      const status = getQueueStatus(tempDir);
+      // Law 5 fencing still discards the mismatched-epoch outcome: the job
+      // stays leased and the warrant does NOT complete.
+      assert.equal(status.jobs[leased.job_id].status, "leased");
+      assert.notEqual(status.warrants[warrant.id].status, "completed");
+      assert.equal(status.active_leases.length, 1);
+    });
+
+    it("H4: getOrCreateQueueKeypair writes the private key 0o600 inside a 0o700 keys directory", () => {
+      const kp = getOrCreateQueueKeypair(tempDir);
+      const keyPath = join(tempDir, "keys", "queue.key.json");
+      assert.ok(existsSync(keyPath), "queue key file must exist");
+      assert.equal(typeof kp.privateKey, "string");
+
+      if (process.platform !== "win32") {
+        assert.equal(statSync(keyPath).mode & 0o777, 0o600);
+        assert.equal(statSync(join(tempDir, "keys")).mode & 0o777, 0o700);
+      }
     });
   });
 });

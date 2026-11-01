@@ -1,7 +1,9 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { resolve, join } from "node:path";
+import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { EXIT_CODES } from "../core/index.mjs";
+import { sanitizeAgentEnv } from "./agent.mjs";
 import {
   checkAntiCheat,
   checkHumanOnlyPaths,
@@ -154,11 +156,14 @@ function verifyFixture(fixtureInput) {
 function evaluateCheckResult(check, fixture = {}) {
   if (check.ok) {
     // Fail closed: proof must be present
+    // C1: causal proof STRICTLY requires proof.causal_cycle_completed === true.
+    // A self-reported `suite_pass_head` is not causal evidence of a fix and
+    // must never substitute for the completed Red-Green-ReRed cycle.
     const proof = fixture.proof;
     const hasProof =
       proof &&
       typeof proof === "object" &&
-      (proof.causal_cycle_completed === true || proof.suite_pass_head === true);
+      proof.causal_cycle_completed === true;
 
     if (!hasProof) {
       return {
@@ -194,6 +199,24 @@ function evaluateCheckResult(check, fixture = {}) {
 
 /**
  * Executes the Triple-Execution Red-Green-ReRed sequence against a real git repository.
+ *
+ * H2 (isolation): the triple-run NEVER executes in the live working tree.
+ * A disposable `git worktree` is created under the OS temp directory
+ * (`mirql-verify-wt-*`) and every checkout/test command runs inside it, so
+ * the user's checked-out branch and any uncommitted/untracked files are
+ * completely untouched. The worktree is force-removed in a `finally` block.
+ *
+ * H3 (env sanitization): candidate runner commands are spawned with the
+ * sanitized environment from `sanitizeAgentEnv` — MIRQL_HUMAN_KEY, AI
+ * provider API keys, and every other non-allowlisted variable are stripped
+ * from child processes; only safe variables (PATH, NODE_ENV, SystemRoot,
+ * TEMP, ...) survive.
+ *
+ * H5 (anti-cheat wiring): the base..head diff is fed into `checkAntiCheat`
+ * before any verdict is returned. A humanOnly path (e.g. CONSTITUTION.md)
+ * modified in the diff escalates to `{ verified: false, verdict:
+ * "needs_human", rule: "MP-001" }`; deleted test files reject under MP-002;
+ * other anti-cheat violations reject or escalate per their rule.
  */
 function verifyGitRepository(options) {
   const repoDir = options.workspaceDir ?? options.repoDir ?? process.cwd();
@@ -202,25 +225,16 @@ function verifyGitRepository(options) {
   const reproducerCmd = options.reproducerCommand ?? options.reproducer ?? "npm test";
   const fullTestCmd = options.testCommand ?? reproducerCmd;
 
-  function git(args) {
-    const res = spawnSync("git", args, {
-      cwd: repoDir,
-      encoding: "utf8",
-      timeout: 30000,
-    });
-    return res;
+  function git(args, cwd = repoDir) {
+    return spawnSync("git", args, { cwd, encoding: "utf8", timeout: 30000 });
   }
 
-  function runCmd(cmd) {
-    const cleanEnv = { ...process.env };
-    for (const k of Object.keys(cleanEnv)) {
-      if (k.startsWith("NODE_TEST_")) {
-        delete cleanEnv[k];
-      }
-    }
+  function runCmd(cmd, cwd = repoDir) {
+    // H3: never inherit the full process environment — strip secrets.
+    const { env: cleanEnv } = sanitizeAgentEnv(process.env);
     const res = spawnSync(cmd, {
       shell: true,
-      cwd: repoDir,
+      cwd,
       env: cleanEnv,
       encoding: "utf8",
       timeout: 30000,
@@ -231,27 +245,99 @@ function verifyGitRepository(options) {
     return { exitCode: code, stdout: res.stdout, stderr: res.stderr };
   }
 
-  // Identify files changed between base and head
-  const diffRes = git(["diff", "--name-only", baseSha, headSha]);
-  const allChanged = diffRes.stdout
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  const isTestPath = (f) => /test|spec/i.test(f) || f.startsWith("tests/");
 
-  const testFiles = allChanged.filter(
-    (f) => /test|spec/i.test(f) || f.startsWith("tests/"),
-  );
-  const nonTestFiles = allChanged.filter(
-    (f) => !/test|spec/i.test(f) && !f.startsWith("tests/"),
-  );
+  // Identify files changed between base and head, including change status
+  // (H5: deletions of test files must be detectable for MP-002).
+  const diffRes = git(["diff", "--name-status", baseSha, headSha]);
+  if (diffRes.error || diffRes.status !== 0) {
+    return {
+      verified: false,
+      verdict: "reject",
+      rule: "GIT_DIFF_FAILED",
+      violation: "GIT_DIFF_FAILED",
+      detail: `git diff ${baseSha}..${headSha} failed in ${repoDir}: ${
+        diffRes.stderr ?? diffRes.error?.message ?? "unknown git error"
+      }`,
+    };
+  }
 
-  try {
-    // 1. Red on Base: checkout base code, retain reproducer test from head
-    git(["checkout", baseSha, "--force"]);
-    if (testFiles.length > 0) {
-      git(["checkout", headSha, "--", ...testFiles]);
+  const changeEntries = [];
+  for (const line of diffRes.stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    const parts = trimmed.split("\t");
+    if (parts.length < 2 || !/^[A-Z]+\d*$/.test(parts[0])) continue;
+    const status = parts[0][0];
+    if (status === "R" || status === "C") {
+      // Rename/copy: the surviving (destination) path is the changed file.
+      changeEntries.push({ status: "A", path: parts[parts.length - 1] });
+    } else {
+      changeEntries.push({ status, path: parts[1] });
     }
-    const redRes = runCmd(reproducerCmd);
+  }
+
+  const allChanged = changeEntries.map((e) => e.path);
+  const deletedTests = changeEntries
+    .filter((e) => e.status === "D" && isTestPath(e.path))
+    .map((e) => e.path);
+
+  // H5: anti-cheat gate over the git diff BEFORE running the triple-execution.
+  const antiCheatCheck = checkAntiCheat({
+    diff_stat: { files_changed: allChanged },
+    evidence: {
+      tests_deleted: deletedTests,
+      ...(deletedTests.length > 0
+        ? { detail: `Git diff deletes test file(s): ${deletedTests.join(", ")}` }
+        : {}),
+    },
+    human_approved: options.humanApproved === true || options.human_approval === true,
+  });
+
+  if (!antiCheatCheck.ok) {
+    return {
+      verified: false,
+      // H5: touching a humanOnly path in a git diff escalates to a human.
+      verdict:
+        antiCheatCheck.rule === "MP-001"
+          ? "needs_human"
+          : (antiCheatCheck.verdict ?? "reject"),
+      rule: antiCheatCheck.rule,
+      violation: antiCheatCheck.violation,
+      detail: antiCheatCheck.detail,
+      flags: antiCheatCheck.flags ?? [],
+      checks: { anti_cheat: { passed: false, violations_count: 1 } },
+    };
+  }
+
+  const testFiles = allChanged.filter((f) => isTestPath(f));
+
+  // H2: everything below runs inside a disposable worktree — the live
+  // working tree of `repoDir` is never checked out, reset, or touched.
+  let worktreeDir = null;
+  try {
+    worktreeDir = mkdtempSync(join(tmpdir(), "mirql-verify-wt-"));
+    const addRes = git(["worktree", "add", "--detach", worktreeDir, headSha]);
+    if (addRes.error || addRes.status !== 0) {
+      return {
+        verified: false,
+        verdict: "reject",
+        rule: "WORKTREE_SETUP_FAILED",
+        violation: "WORKTREE_SETUP_FAILED",
+        detail: `Failed to create disposable verification worktree at ${worktreeDir}: ${
+          addRes.stderr ?? addRes.error?.message ?? "unknown git error"
+        }`,
+      };
+    }
+
+    const gitWt = (args) => git(args, worktreeDir);
+
+    // 1. Red on Base: base code with the head reproducer tests retained
+    gitWt(["checkout", baseSha, "--force"]);
+    if (testFiles.length > 0) {
+      gitWt(["checkout", headSha, "--", ...testFiles]);
+    }
+    const redRes = runCmd(reproducerCmd, worktreeDir);
     if (!Number.isInteger(redRes.exitCode)) {
       return {
         verified: false,
@@ -282,9 +368,9 @@ function verifyGitRepository(options) {
       };
     }
 
-    // 2. Green on Head: checkout full head state
-    git(["checkout", headSha, "--force"]);
-    const greenRes = runCmd(fullTestCmd);
+    // 2. Green on Head: full head state
+    gitWt(["checkout", headSha, "--force"]);
+    const greenRes = runCmd(fullTestCmd, worktreeDir);
     if (!Number.isInteger(greenRes.exitCode) || greenRes.exitCode !== 0) {
       return {
         verified: false,
@@ -299,11 +385,13 @@ function verifyGitRepository(options) {
       };
     }
 
-    // 3. Re-Red: revert non-test files while keeping test changes
-    if (nonTestFiles.length > 0) {
-      git(["checkout", baseSha, "--", ...nonTestFiles]);
+    // 3. Re-Red: revert every non-test change (base code + head tests). A
+    // full base checkout handles added AND deleted non-test files correctly.
+    gitWt(["checkout", baseSha, "--force"]);
+    if (testFiles.length > 0) {
+      gitWt(["checkout", headSha, "--", ...testFiles]);
     }
-    const reRedRes = runCmd(reproducerCmd);
+    const reRedRes = runCmd(reproducerCmd, worktreeDir);
     if (!Number.isInteger(reRedRes.exitCode)) {
       return {
         verified: false,
@@ -361,7 +449,16 @@ function verifyGitRepository(options) {
       },
     };
   } finally {
-    git(["checkout", headSha, "--force"]);
+    // H2: always dispose of the disposable worktree. The live working tree
+    // was never touched, so no restore checkout is needed.
+    if (worktreeDir !== null) {
+      try {
+        git(["worktree", "remove", "--force", worktreeDir]);
+      } catch {}
+      try {
+        rmSync(worktreeDir, { recursive: true, force: true });
+      } catch {}
+    }
   }
 }
 

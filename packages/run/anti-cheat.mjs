@@ -477,8 +477,10 @@ export function checkAntiCheat(input = {}) {
       surface.delta_count > 0 &&
       !surface.roadmap_ref);
 
-  const hasCausalProof =
-    proof.causal_cycle_completed === true || proof.suite_pass_head === true;
+  // C1: causal proof STRICTLY requires the completed triple-execution cycle.
+  // A self-reported `suite_pass_head` is not causal evidence and must not
+  // unlock humanApprove surfaces (MP-005).
+  const hasCausalProof = proof?.causal_cycle_completed === true;
 
   const humanApproveCheck = checkHumanApprovePaths(filesChanged);
   const touchesHumanApproveWithoutApproval =

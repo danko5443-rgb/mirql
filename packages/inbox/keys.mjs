@@ -149,13 +149,22 @@ export function keyringEntry(entry, entryKey) {
 }
 
 /**
- * Write a file containing private key material with mode 0o600.
+ * Write a file containing private key material with mode 0o600 (H4: unified
+ * private-key permissions). The parent directory is created with mode 0o700
+ * and best-effort re-chmodded, since `mkdirSync` mode bits only apply to
+ * newly created directories.
  *
  * @param {string} filePath
  * @param {string} contents
  */
 export function writePrivateFile(filePath, contents) {
-  mkdirSync(dirname(filePath), { recursive: true });
+  const dir = dirname(filePath);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(dir, 0o700);
+  } catch {
+    // Some platforms ignore directory mode bits; best effort only.
+  }
   writeFileSync(filePath, contents, { encoding: "utf8", mode: 0o600 });
   try {
     chmodSync(filePath, 0o600);
@@ -230,8 +239,15 @@ function purgeStaleHumanKeys(keysDir) {
 export function generateFactoryKeypairs(mirqlDir, options = {}) {
   const keysDir = join(mirqlDir, "keys");
   const ledgerDir = join(mirqlDir, "ledger");
-  mkdirSync(keysDir, { recursive: true });
-  mkdirSync(ledgerDir, { recursive: true });
+  // H4: private-key material lives only under 0o700 directories.
+  mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+  mkdirSync(ledgerDir, { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(keysDir, 0o700);
+  } catch {}
+  try {
+    chmodSync(ledgerDir, 0o700);
+  } catch {}
   purgeStaleHumanKeys(keysDir);
 
   // B4: fresh genesis rebuilds the keyring — no pre-planted entries survive.
@@ -294,9 +310,10 @@ export function generateFactoryKeypairs(mirqlDir, options = {}) {
         keyId: generated.keyId,
         writer: { ns: item.ns, key_id: generated.keyId },
       };
-      writeFileSync(keyPath, JSON.stringify(kp, null, 2) + "\n", "utf8");
+      // H4: every private key file (including aliases) is written 0o600.
+      writePrivateFile(keyPath, JSON.stringify(kp, null, 2) + "\n");
       for (const alias of item.aliases) {
-        writeFileSync(join(keysDir, alias), JSON.stringify(kp, null, 2) + "\n", "utf8");
+        writePrivateFile(join(keysDir, alias), JSON.stringify(kp, null, 2) + "\n");
       }
     }
 

@@ -20,6 +20,7 @@
     "lines_deleted": 95
   },
   "proof": {
+    "causal_cycle_completed": true,
     "suite_pass_base": true,
     "suite_pass_head": true,
     "test_count_base": 51,

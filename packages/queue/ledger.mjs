@@ -5,6 +5,7 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
+  chmodSync,
   openSync,
   closeSync,
   unlinkSync,
@@ -227,8 +228,19 @@ export function getOrCreateQueueKeypair(mirqlDir, customKeyFile) {
       },
     };
 
-    mkdirSync(dirname(keyPath), { recursive: true });
-    writeFileSync(keyPath, JSON.stringify(kp, null, 2) + "\n", "utf8");
+    // H4: private keys are written with mode 0o600 inside a 0o700 directory.
+    const keysDir = dirname(keyPath);
+    mkdirSync(keysDir, { recursive: true, mode: 0o700 });
+    try {
+      chmodSync(keysDir, 0o700);
+    } catch {}
+    writeFileSync(keyPath, JSON.stringify(kp, null, 2) + "\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    try {
+      chmodSync(keyPath, 0o600);
+    } catch {}
   }
 
   // Ensure tool:queue is registered in <mirqlDir>/ledger/keyring.json
