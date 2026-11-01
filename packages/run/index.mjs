@@ -9,7 +9,17 @@ import {
   createLedgerWatcher,
   waitForLedgerEvent,
 } from "../core/index.mjs";
-import { computePhi, checkPhiReduction } from "./phi.mjs";
+import {
+  computePhi,
+  checkPhiReduction,
+  evaluatePhiGate,
+  verifyThrift,
+} from "./phi.mjs";
+import {
+  detectDrift,
+  verifyClaimCheck,
+  formatDriftEvent,
+} from "./drift.mjs";
 import {
   checkAntiCheat,
   checkHumanOnlyPaths,
@@ -47,6 +57,7 @@ export const SUBCOMMANDS = Object.freeze([
   "bing-bong",
   "bb",
   "phi",
+  "drift",
   "help",
 ]);
 
@@ -335,6 +346,12 @@ export function runCli(argv = []) {
       return EXIT_CODES.OK;
     }
 
+    case "drift": {
+      const res = detectDrift(flags.dir ?? process.cwd());
+      emitLine(jcs(res));
+      return res.ok ? EXIT_CODES.OK : EXIT_CODES.REJECT;
+    }
+
     default: {
       emitError({
         error: "USAGE_ERROR",
@@ -394,6 +411,11 @@ export default main;
 export {
   computePhi,
   checkPhiReduction,
+  evaluatePhiGate,
+  verifyThrift,
+  detectDrift,
+  verifyClaimCheck,
+  formatDriftEvent,
   verifyAttempt,
   runSupervisor,
   runSupervisorReactive,

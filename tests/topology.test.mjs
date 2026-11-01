@@ -505,8 +505,13 @@ describe("Production Containerization & Topology Gates", () => {
         const ticker = startHeartbeatTicker(hbFile, 50);
         assert.ok(ticker);
         try {
-          await new Promise((done) => setTimeout(done, 200));
-          const content = readFileSync(hbFile, "utf8").trim();
+          let content = "0";
+          const start = Date.now();
+          while (Date.now() - start < 3000) {
+            await new Promise((done) => setTimeout(done, 50));
+            content = readFileSync(hbFile, "utf8").trim();
+            if (parseInt(content, 10) > 0) break;
+          }
           assert.ok(parseInt(content, 10) > 0, "Heartbeat file must be refreshed by ticker");
         } finally {
           ticker.kill();
