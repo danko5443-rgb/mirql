@@ -90,6 +90,31 @@ export function calc(a, b) {
       assert.equal(m4.length, 0, "Inline block comments must be completely masked");
     });
 
+    it("masks multi-line block comments spanning multiple lines and regex literals", () => {
+      // Multi-line block comment with operator on middle line
+      const multiLineCode = `
+export function fMulti() {
+  const x = 1; /* start
+   a === b
+   end */ const y = 2;
+  return x + y;
+}
+`;
+      const mutantsMulti = generateMutants(multiLineCode);
+      // Only x + y should be mutated (1 mutant), the a === b inside comment must be skipped
+      assert.equal(mutantsMulti.length, 1);
+      assert.equal(mutantsMulti[0].original, " + ");
+
+      // Regex literal with operator inside
+      const regexCode = `
+export function fRegex(s) {
+  return /a + b/.test(s);
+}
+`;
+      const mutantsRegex = generateMutants(regexCode);
+      assert.equal(mutantsRegex.length, 0, "Operators inside regex literals must be masked");
+    });
+
     it("skips string literals, comments, and identifiers containing target words", () => {
       // String with "a === b" and identifier "construed" containing "true"
       const code = `

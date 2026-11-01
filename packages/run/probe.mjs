@@ -192,6 +192,7 @@ export function runProbe(options = {}) {
           min_kill_rate_bp: minKillRateBp,
           failures: 1,
           duration_ms: 0,
+          error: err instanceof Error ? err.message : String(err),
         };
       }
     } else {

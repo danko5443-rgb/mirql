@@ -25,12 +25,12 @@ export const MUTATION_OPERATORS = Object.freeze([
  * @param {string} line
  * @returns {string}
  */
-export function maskStringsAndComments(line) {
+export function maskStringsAndComments(line, initialInBlockComment = false) {
   let masked = "";
   let inDouble = false;
   let inSingle = false;
   let inBacktick = false;
-  let inBlockComment = false;
+  let inBlockComment = Boolean(initialInBlockComment);
 
   for (let i = 0; i < line.length; i++) {
     const char = line[i];
@@ -74,6 +74,29 @@ export function maskStringsAndComments(line) {
         masked += " ";
         continue;
       }
+      // Mask regular expression literals
+      if (char === "/" && !isEscaped) {
+        const before = masked.trimEnd();
+        const lastChar = before.slice(-1);
+        const isRegexPrefix =
+          !before ||
+          "=(:[{,;!&|?+-~^%*<>".includes(lastChar) ||
+          /\b(?:return|throw|yield|typeof|delete|void|case|in|instanceof)$/.test(before);
+        if (isRegexPrefix) {
+          let closingIdx = -1;
+          for (let j = i + 1; j < line.length; j++) {
+            if (line[j] === "/" && line[j - 1] !== "\\") {
+              closingIdx = j;
+              break;
+            }
+          }
+          if (closingIdx !== -1) {
+            masked += " ".repeat(closingIdx - i + 1);
+            i = closingIdx;
+            continue;
+          }
+        }
+      }
       masked += char;
     } else if (inDouble) {
       masked += " ";
@@ -87,7 +110,15 @@ export function maskStringsAndComments(line) {
     }
   }
 
-  return masked;
+  return {
+    masked,
+    inBlockComment,
+    toString() { return masked; },
+    includes(sub) { return masked.includes(sub); },
+    indexOf(sub) { return masked.indexOf(sub); },
+    slice(s, e) { return masked.slice(s, e); },
+    [Symbol.toPrimitive]() { return masked; },
+  };
 }
 
 /**
@@ -165,23 +196,33 @@ export function generateMutants(sourceCode, options = {}) {
     ? (options.changedLines instanceof Set ? options.changedLines : new Set(options.changedLines))
     : null;
 
+  let inBlockComment = false;
   for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
     const lineNum = lineIdx + 1;
+    const line = lines[lineIdx];
+
+    const maskRes = maskStringsAndComments(line, inBlockComment);
+    const masked = maskRes.masked;
+    const wasInBlockComment = inBlockComment;
+    inBlockComment = maskRes.inBlockComment;
 
     // Incremental filter: skip lines not in changedLines if specified
     if (changedSet && !changedSet.has(lineNum)) {
       continue;
     }
 
-    const line = lines[lineIdx];
     const trimmed = line.trim();
 
-    // Skip blank and pure comment lines
-    if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*")) {
+    // Skip blank and pure comment lines (including lines within multi-line block comments)
+    if (
+      !trimmed ||
+      trimmed.startsWith("//") ||
+      trimmed.startsWith("/*") ||
+      trimmed.startsWith("*") ||
+      (wasInBlockComment && !masked.trim())
+    ) {
       continue;
     }
-
-    const masked = maskStringsAndComments(line);
 
     // 1. invert-conditional
     if (allowedOps.includes("invert-conditional")) {
