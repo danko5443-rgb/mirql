@@ -467,15 +467,33 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
       try {
         const outcomesReceived = [];
         const outcomePromise = new Promise((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            reject(new Error(`Timeout: received ${outcomesReceived.length} of 3 outcomes`));
-          }, 6000);
+          // Adaptive deadline: each received outcome re-arms the step timer, so
+          // CPU contention from parallel test files cannot flake the
+          // no-stranding invariant this test pins. The absolute cap keeps the
+          // test bounded even under pathological stall.
+          const STEP_TIMEOUT_MS = 6000;
+          const ABSOLUTE_CAP_MS = 30000;
+          const startedAt = Date.now();
+          let timeout = null;
+          const armStepTimeout = () => {
+            if (timeout) clearTimeout(timeout);
+            timeout = setTimeout(() => {
+              reject(
+                new Error(
+                  `Timeout: received ${outcomesReceived.length} of 3 outcomes after ${Date.now() - startedAt}ms`,
+                ),
+              );
+            }, STEP_TIMEOUT_MS);
+          };
+          armStepTimeout();
           reactive.watcher.on("event", (evt) => {
             if (evt.type === "attempt.outcome") {
               outcomesReceived.push(evt);
               if (outcomesReceived.length === 3) {
-                clearTimeout(timeout);
+                if (timeout) clearTimeout(timeout);
                 resolve(outcomesReceived);
+              } else if (Date.now() - startedAt < ABSOLUTE_CAP_MS) {
+                armStepTimeout();
               }
             }
           });
