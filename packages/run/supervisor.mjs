@@ -350,17 +350,10 @@ export function touchHeartbeat(mirqlDir) {
  */
 export function startHeartbeatTicker(heartbeatPath, intervalMs = 2000) {
   try {
+    const code = `const fs = require('node:fs'); const f = process.argv[1]; function tick() { try { fs.writeFileSync(f, Date.now() + '\\n', 'utf8'); } catch {} } tick(); setInterval(tick, ${intervalMs});`;
     const cp = spawn(
       process.execPath,
-      [
-        "-e",
-        `const fs = require('fs');
-         const f = process.argv[1];
-         setInterval(() => {
-           try { fs.writeFileSync(f, Date.now() + '\\n', 'utf8'); } catch {}
-         }, ${intervalMs});`,
-        heartbeatPath,
-      ],
+      ["-e", code, heartbeatPath],
       { stdio: "ignore", detached: false },
     );
     return cp;
