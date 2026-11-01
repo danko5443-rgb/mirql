@@ -46,3 +46,12 @@ export {
   waitForLedgerEvent,
 } from "./watcher.mjs";
 
+export {
+  foldLedger,
+  readLedgerEvents,
+  readVerifiedLedgerEvents,
+  foldQueueState,
+  loadKeyring,
+  PRIVILEGED_EVENTS,
+  getTrustedPublicKey,
+} from "./fold.mjs";

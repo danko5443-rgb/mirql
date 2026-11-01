@@ -271,6 +271,7 @@ describe("Work Package W2: Conformance Suite", () => {
         "mirql r drift",
         "mirql r mutant",
         "mirql r flake",
+        "mirql r doctor",
         "mirql q tick",
         "mirql q submit",
         "mirql q status",

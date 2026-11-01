@@ -56,6 +56,17 @@ import {
   startHeartbeatTicker,
 } from "./supervisor.mjs";
 import { runProbe, KNOWN_PROBES } from "./probe.mjs";
+import {
+  diagnoseHealth,
+  evaluateCircuitBreakers,
+  evaluateMacroStateTransition,
+  normalizeFailureSignature,
+  BreakerStore,
+  runDoctor,
+  SUBSYSTEMS,
+  CIRCUIT_ACTIONS,
+  MACRO_STATES,
+} from "./doctor.mjs";
 import { runBingBong, extractModelFamily } from "./bing-bong.mjs";
 import { appendSupervisorEvent, getOrGenerateSupervisorKey } from "./ledger.mjs";
 
@@ -73,6 +84,7 @@ export const SUBCOMMANDS = Object.freeze([
   "drift",
   "mutant",
   "flake",
+  "doctor",
   "help",
 ]);
 
@@ -366,7 +378,7 @@ export function runCli(argv = []) {
     case "drift": {
       const res = detectDrift(flags.dir ?? process.cwd());
       emitLine(jcs(res));
-      return res.ok ? EXIT_CODES.OK : EXIT_CODES.REJECT;
+      return res.ok ? EXIT_CODES.OK : EXIT_CODES.DOMAIN_NEGATIVE;
     }
 
     case "mutant": {
@@ -442,7 +454,7 @@ export function runCli(argv = []) {
           changedLines,
         });
         emitLine(jcs(res));
-        return res.ok ? EXIT_CODES.OK : EXIT_CODES.REJECT;
+        return res.ok ? EXIT_CODES.OK : EXIT_CODES.DOMAIN_NEGATIVE;
       } catch (err) {
         emitError({
           error: "USAGE_ERROR",
@@ -471,7 +483,114 @@ export function runCli(argv = []) {
           res.quarantine = qRes;
         }
         emitLine(jcs(res));
-        return res.flaky ? EXIT_CODES.REJECT : EXIT_CODES.OK;
+        return res.flaky ? EXIT_CODES.DOMAIN_NEGATIVE : EXIT_CODES.OK;
+      } catch (err) {
+        emitError({
+          error: "USAGE_ERROR",
+          reason: err instanceof Error ? err.message : String(err),
+        });
+        return EXIT_CODES.USAGE_ERROR;
+      }
+    }
+
+    case "doctor": {
+      try {
+        const workspaceDir = flags.workspace ? resolve(flags.workspace) : process.cwd();
+        const mirqlDir = flags.ledger
+          ? resolve(flags.ledger)
+          : flags.dir
+            ? resolve(flags.dir)
+            : resolve(workspaceDir, ".mirql");
+
+        if (flags.trip !== undefined) {
+          if (
+            typeof flags.trip !== "string" ||
+            flags.trip.trim() === "" ||
+            !SUBSYSTEMS.includes(flags.trip) ||
+            flags.trip === "all" ||
+            flags.trip === "lifeguard"
+          ) {
+            emitError({
+              error: "USAGE_ERROR",
+              reason: `invalid subsystem to trip: ${JSON.stringify(flags.trip)}; must be one of: ${SUBSYSTEMS.filter((s) => s !== "all" && s !== "lifeguard").join(", ")}`,
+            });
+            return EXIT_CODES.USAGE_ERROR;
+          }
+        }
+
+        if (flags.reset !== undefined) {
+          if (
+            typeof flags.reset !== "string" ||
+            flags.reset.trim() === "" ||
+            (!SUBSYSTEMS.includes(flags.reset) && flags.reset !== "all") ||
+            flags.reset === "lifeguard"
+          ) {
+            emitError({
+              error: "USAGE_ERROR",
+              reason: `invalid subsystem to reset: ${JSON.stringify(flags.reset)}; must be one of: ${SUBSYSTEMS.filter((s) => s !== "lifeguard").join(", ")}`,
+            });
+            return EXIT_CODES.USAGE_ERROR;
+          }
+        }
+
+        let cooldownMs;
+        if (flags.cooldown !== undefined) {
+          const rawCd = String(flags.cooldown).trim();
+          if (!/^\d+$/.test(rawCd)) {
+            emitError({
+              error: "USAGE_ERROR",
+              reason: `cooldown must be a non-negative integer ms, got ${JSON.stringify(flags.cooldown)}`,
+            });
+            return EXIT_CODES.USAGE_ERROR;
+          }
+          const cd = parseInt(rawCd, 10);
+          if (!Number.isSafeInteger(cd) || cd < 0) {
+            emitError({
+              error: "USAGE_ERROR",
+              reason: "cooldown exceeds safe integer range",
+            });
+            return EXIT_CODES.USAGE_ERROR;
+          }
+          cooldownMs = cd;
+        }
+
+        const res = runDoctor({
+          mirqlDir,
+          workspaceDir,
+          trip: flags.trip,
+          reset: flags.reset,
+          cooldown_ms: cooldownMs,
+          autoQuarantine: Boolean(flags["auto-quarantine"] || flags.quarantine),
+          runProbes: Boolean(flags.probes),
+        });
+
+        if (flags.trip || flags.reset) {
+          if (flags.format === "text") {
+            process.stdout.write(`=== mirql Doctor Action: ${res.action.toUpperCase()} ===\n`);
+            process.stdout.write(`Target: ${res.target}\n`);
+            process.stdout.write(`Status: SUCCESS\n`);
+          } else {
+            emitLine(jcs(res));
+          }
+          return EXIT_CODES.OK;
+        }
+
+        if (flags.format === "text") {
+          process.stdout.write("=== mirql Doctor Health Report ===\n");
+          process.stdout.write(`Healthy: ${res.healthy ? "YES" : "NO"}\n`);
+          if (res.triage) {
+            process.stdout.write(`Signature: ${res.triage.failure_signature}\n`);
+            process.stdout.write(`Root Cause: ${res.triage.root_cause_analysis}\n`);
+            process.stdout.write(`Remediation: ${res.triage.recommended_remediation}\n`);
+          }
+          if (res.breaker) {
+            process.stdout.write(`Circuit Breaker: [${res.breaker.target_subsystem}] -> ${res.breaker.action} (${res.breaker.reason})\n`);
+          }
+        } else {
+          emitLine(jcs(res));
+        }
+
+        return res.healthy ? EXIT_CODES.OK : EXIT_CODES.DOMAIN_NEGATIVE;
       } catch (err) {
         emitError({
           error: "USAGE_ERROR",
@@ -584,4 +703,13 @@ export {
   LedgerWatcher,
   createLedgerWatcher,
   waitForLedgerEvent,
+  diagnoseHealth,
+  evaluateCircuitBreakers,
+  evaluateMacroStateTransition,
+  normalizeFailureSignature,
+  BreakerStore,
+  runDoctor,
+  SUBSYSTEMS,
+  CIRCUIT_ACTIONS,
+  MACRO_STATES,
 };

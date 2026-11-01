@@ -13,6 +13,7 @@ import { runAgent } from "./agent.mjs";
 import { verifyAttempt } from "./verify.mjs";
 import { computePhi } from "./phi.mjs";
 import { appendSupervisorEvent, getOrGenerateSupervisorKey } from "./ledger.mjs";
+import { isCircuitBreakerTripped } from "./doctor.mjs";
 
 /**
  * Law 2 — Privileged Parent Broker (mirql r supervisor).
@@ -120,6 +121,15 @@ export function runSupervisor(options = {}) {
     (options.signingKey
       ? { privateKey: options.signingKey, keyId: options.keyId ?? "ed25519:custom" }
       : getOrGenerateSupervisorKey(mirqlDir));
+
+  // Check circuit breaker before unprivileged worker invocation
+  const workerTier = warrant.tier || options.tier || "flash";
+  const supervisorNowMs = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
+  if (isCircuitBreakerTripped(mirqlDir, `worker:${workerTier}`, supervisorNowMs) || isCircuitBreakerTripped(mirqlDir, "worker", supervisorNowMs)) {
+    const breakerErr = new Error(`Circuit breaker tripped for worker tier "${workerTier}"`);
+    breakerErr.code = "CIRCUIT_BREAKER_TRIPPED";
+    throw breakerErr;
+  }
 
   // 3. Invoke unprivileged agent worker
   const agentStartTime = Date.now();
