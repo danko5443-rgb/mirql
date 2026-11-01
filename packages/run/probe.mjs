@@ -112,26 +112,70 @@ export function runProbe(options = {}) {
       duration_ms: 15,
     };
   } else if (probeName === "tests") {
-    // If explicit test results are provided, use them; otherwise count conformance/unit tests
-    const failures = Number.isSafeInteger(options.failures)
-      ? options.failures
-      : config?.threshold_failures ?? 0;
-    const passedCount = Number.isSafeInteger(options.passed)
-      ? options.passed
-      : 189;
-    const passed = failures === 0;
-
-    probeResult = {
-      name: config?.name ?? "unit_conformance_suite",
-      type: "tests",
-      status: passed ? "pass" : "fail",
-      passed,
-      threshold_failures: config?.threshold_failures ?? 0,
-      failures,
-      passed_count: passedCount,
-      passed: passedCount,
-      duration_ms: 50,
-    };
+    const startedMs = Date.now();
+    if (Number.isSafeInteger(options.failures) && Number.isSafeInteger(options.passed)) {
+      // Explicit measured results supplied by the caller
+      const failures = options.failures;
+      const passedCount = options.passed;
+      const passed = failures === 0;
+      probeResult = {
+        name: config?.name ?? "unit_conformance_suite",
+        type: "tests",
+        status: passed ? "pass" : "fail",
+        passed,
+        threshold_failures: config?.threshold_failures ?? 0,
+        failures,
+        passed_count: passedCount,
+        duration_ms: Date.now() - startedMs,
+      };
+    } else if (process.env.NODE_TEST_CONTEXT !== undefined || process.env.NODE_ENV === "test") {
+      // Issue #16: never sign a pass that was not measured. Inside a test
+      // run (node --test sets NODE_TEST_CONTEXT) we cannot spawn the suite
+      // (recursion), so report honestly instead of inventing counts.
+      probeResult = {
+        name: config?.name ?? "unit_conformance_suite",
+        type: "tests",
+        status: "not_implemented",
+        passed: false,
+        threshold_failures: config?.threshold_failures ?? 0,
+        failures: 1,
+        error: "no measured counts supplied and the suite cannot be spawned from inside a test run",
+        duration_ms: Date.now() - startedMs,
+      };
+    } else {
+      // Run the configured suite command and measure the real outcome
+      const command = typeof config?.command === "string" && config.command.trim() !== ""
+        ? config.command.trim()
+        : "npm test";
+      const parts = command.split(/\s+/);
+      const timeoutMs = Number.isSafeInteger(config?.timeout_ms) ? config.timeout_ms : 600_000;
+      let failures = 1;
+      let passedCount = null;
+      try {
+        const res = spawnSync(parts[0], parts.slice(1), {
+          cwd: workspaceDir,
+          encoding: "utf8",
+          timeout: timeoutMs,
+        });
+        failures = res.status === 0 ? 0 : 1;
+        const m = String(res.stdout || "").match(/pass\s+(\d+)/);
+        if (m) passedCount = parseInt(m[1], 10);
+      } catch {
+        failures = 1;
+      }
+      const passed = failures === 0;
+      probeResult = {
+        name: config?.name ?? "unit_conformance_suite",
+        type: "tests",
+        status: passed ? "pass" : "fail",
+        passed,
+        threshold_failures: config?.threshold_failures ?? 0,
+        failures,
+        passed_count: passedCount,
+        command,
+        duration_ms: Date.now() - startedMs,
+      };
+    }
   } else if (probeName === "surface") {
     if (options.delta !== undefined) {
       const allowed = config?.allowed_delta ?? 0;

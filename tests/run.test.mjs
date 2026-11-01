@@ -508,7 +508,11 @@ test("tautological test", () => {
       assert.equal(validation.valid, true, `Outcome document invalid: ${JSON.stringify(validation.errors)}`);
       assert.equal(res.outcome.v, 1);
       assert.equal(res.outcome.status, "pass");
-      assert.ok(Number.isSafeInteger(res.outcome.cost.micro_usd));
+      // Issue #16: unmeasured telemetry is flagged, never invented — this run
+      // supplied no gateway cost, so no micro_usd number may appear.
+      assert.equal(res.outcome.cost.measured, 0);
+      assert.equal(res.outcome.cost.micro_usd, undefined);
+      assert.equal(res.outcome.thrift.measured, 0);
       assert.ok(Number.isSafeInteger(res.outcome.phi.phi_before));
       assert.ok(Number.isSafeInteger(res.outcome.phi.phi_after));
 
@@ -556,18 +560,21 @@ test("tautological test", () => {
   // 4. 0-Token Probes (B4)
   // -------------------------------------------------------------------------
   describe("4. 0-Token Probes", () => {
-    it("B4: executes tests probe and records signed probe.completed event", () => {
+    it("B4: tests probe with MEASURED counts records a signed pass (issue #16: no fake 189)", () => {
       const kp = generateEd25519Keypair();
       const res = runProbe({
         mirqlDir: tempDir,
         probe: "tests",
         keypair: kp,
+        failures: 0,
+        passed: 472,
       });
 
       assert.equal(res.ok, true);
       assert.equal(res.probe.name, "unit_conformance_suite");
       assert.equal(res.probe.status, "pass");
-      assert.ok(Number.isSafeInteger(res.probe.failures));
+      assert.equal(res.probe.failures, 0);
+      assert.equal(res.probe.passed_count, 472);
 
       const eventsPath = join(tempDir, "ledger", "events.jsonl");
       const eventDoc = JSON.parse(readFileSync(eventsPath, "utf8").trim());
@@ -576,6 +583,20 @@ test("tautological test", () => {
 
       const verified = verifyEvent(eventDoc, kp.publicKey);
       assert.equal(verified.ok, true);
+    });
+
+    it("B4: tests probe without measured counts NEVER signs a pass (inside a test run)", () => {
+      const kp = generateEd25519Keypair();
+      const res = runProbe({
+        mirqlDir: tempDir,
+        probe: "tests",
+        keypair: kp,
+      });
+
+      assert.equal(res.ok, false);
+      assert.equal(res.probe.status, "not_implemented");
+      assert.equal(res.probe.passed, false);
+      assert.match(res.probe.error, /no measured counts supplied/);
     });
 
     it("B4: complexity probe computes real metrics and checks threshold from policy/probes.toml", () => {
