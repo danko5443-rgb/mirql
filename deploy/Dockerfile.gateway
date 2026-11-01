@@ -1,0 +1,26 @@
+# deploy/Dockerfile.gateway — mirql LLM Gateway Sidecar
+# Security: Unprivileged user (1003), read-only rootfs, integer-only micro_usd budget metering (Law 1 & 17)
+
+FROM node:22-alpine
+
+RUN addgroup -g 1003 gateway && \
+    adduser -u 1003 -G gateway -s /bin/sh -D gateway
+
+WORKDIR /app
+
+COPY --chown=gateway:gateway package.json surface.lock ./
+COPY --chown=gateway:gateway packages/ ./packages/
+COPY --chown=gateway:gateway policy/ ./policy/
+
+ENV NODE_ENV=production
+ENV PORT=8080
+ENV HOME=/app
+
+RUN mkdir -p /tmp && chown -R gateway:gateway /tmp
+
+USER 1003:1003
+
+EXPOSE 8080
+
+ENTRYPOINT ["node", "packages/daemons/llm-gateway.mjs"]
+CMD ["--port", "8080"]

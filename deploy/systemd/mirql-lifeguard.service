@@ -1,0 +1,21 @@
+[Unit]
+Description=mirql Lifeguard 30m Probation Watchdog Daemon (Law 2)
+Documentation=https://github.com/ahmed-3m/mirql
+After=mirql-launcher.service
+Wants=mirql-launcher.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/mirql
+ExecStart=/usr/bin/node /opt/mirql/packages/daemons/lifeguard.mjs --watch --timeout 1800
+Restart=always
+RestartSec=10s
+
+# Out-of-band kill and rollback authority
+NoNewPrivileges=false
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

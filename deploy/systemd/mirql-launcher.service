@@ -1,0 +1,33 @@
+[Unit]
+Description=mirql Autonomous Factory Launcher
+Documentation=https://github.com/ahmed-3m/mirql
+After=network.target
+
+[Service]
+Type=simple
+User=mirql
+Group=mirql
+WorkingDirectory=/opt/mirql
+ExecStart=/usr/bin/node /opt/mirql/bin/mirql.mjs q daemon
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# Strict security sandbox
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/mirql/.mirql /tmp
+
+# Resource limits
+LimitNOFILE=65535
+MemoryMax=4G
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

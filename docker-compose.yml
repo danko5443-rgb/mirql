@@ -1,0 +1,3 @@
+# docker-compose.yml — root forwarder to deploy/compose.yaml
+include:
+  - path: deploy/compose.yaml
