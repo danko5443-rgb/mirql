@@ -100,14 +100,19 @@ export function createJourneySandbox(options = {}) {
 export function executeCli(args, ctx = {}) {
   const repoRoot = ctx.repoRoot || resolve(process.cwd());
   const binMirql = join(repoRoot, "bin", "mirql.mjs");
-  const env = {
-    ...process.env,
+  const cleanEnv = {
+    PATH: process.env.PATH,
+    SYSTEMROOT: process.env.SYSTEMROOT,
+    COMSPEC: process.env.COMSPEC,
+    TEMP: process.env.TEMP,
+    TMP: process.env.TMP,
+    NODE_ENV: process.env.NODE_ENV || "test",
     ...(ctx.mirqlDir ? { MIRQL_DIR: ctx.mirqlDir } : {}),
   };
 
   const res = spawnSync(process.execPath, [binMirql, ...args], {
     cwd: ctx.sandboxDir || process.cwd(),
-    env,
+    env: cleanEnv,
     encoding: "utf8",
   });
 
@@ -184,10 +189,9 @@ export function formatRegressionReportedEvent(regression, options = {}) {
  */
 function runScenarioInitToMerge(ctx) {
   const { sandboxDir, mirqlDir } = ctx;
-  const steps = [];
 
   // Step 1: Genesis bootstrap
-  steps.push("mirql i genesis");
+  ctx.step("mirql i genesis");
   const humanKeyOut = join(sandboxDir, "operator_human.key.json");
   const genesisRes = executeCli(["i", "genesis", "--human-key-out", humanKeyOut], ctx);
   if (genesisRes.status !== 0) {
@@ -195,7 +199,7 @@ function runScenarioInitToMerge(ctx) {
   }
 
   // Step 2: Bounded Proposer intake
-  steps.push("mirql i propose --roadmap-ref M6 --title 'Journey scout integration'");
+  ctx.step("mirql i propose --roadmap-ref M6 --title 'Journey scout integration'");
   const propRes = executeCli([
     "i", "propose",
     "--roadmap-ref", "M6",
@@ -209,7 +213,7 @@ function runScenarioInitToMerge(ctx) {
   const proposalId = propRes.parsed.proposal_id;
 
   // Step 3: 1-Tap Affirmative Action (Law 6, Law 11)
-  steps.push(`mirql i act ${proposalId} --approve`);
+  ctx.step(`mirql i act ${proposalId} --approve`);
   const actRes = executeCli(["i", "act", proposalId, "--approve", "--key", humanKeyOut], ctx);
   if (actRes.status !== 0 || !actRes.parsed?.warrant_id) {
     throw new Error(`1-Tap act failed with exit ${actRes.status}: ${actRes.stderr}`);
@@ -217,27 +221,27 @@ function runScenarioInitToMerge(ctx) {
   const warrantId = actRes.parsed.warrant_id;
 
   // Step 4: Queue tick
-  steps.push("mirql q tick");
+  ctx.step("mirql q tick");
   const tickRes = executeCli(["q", "tick"], ctx);
   if (tickRes.status !== 0) {
     throw new Error(`Queue tick failed with exit ${tickRes.status}: ${tickRes.stderr}`);
   }
 
   // Step 5: Factory Digest verification (Law 6)
-  steps.push("mirql i digest");
+  ctx.step("mirql i digest");
   const digestRes = executeCli(["i", "digest"], ctx);
   if (digestRes.status !== 0 || digestRes.parsed?.tool !== "inbox") {
     throw new Error(`Digest failed to render inbox report: ${digestRes.stderr}`);
   }
 
   // Step 6: Verify factory quiescence
-  steps.push("verify factory quiescence");
-  const eventsFile = join(mirqlDir, "ledger", "events.jsonl");
-  if (!existsSync(eventsFile)) {
-    throw new Error("Ledger events file missing");
+  ctx.step("mirql q status");
+  const statusRes = executeCli(["q", "status"], ctx);
+  if (statusRes.status !== 0 || statusRes.parsed?.halted === true) {
+    throw new Error(`Queue status failed quiescence check: ${statusRes.stderr}`);
   }
 
-  return { ok: true, steps };
+  return { ok: true, steps: ctx.stepsCompleted };
 }
 
 /**
@@ -250,10 +254,9 @@ function runScenarioInitToMerge(ctx) {
  */
 function runScenarioFaultToRecovery(ctx) {
   const { sandboxDir, mirqlDir } = ctx;
-  const steps = [];
 
   // Step 1: Genesis bootstrap
-  steps.push("mirql i genesis");
+  ctx.step("mirql i genesis");
   const humanKeyOut = join(sandboxDir, "operator_human.key.json");
   const genesisRes = executeCli(["i", "genesis", "--human-key-out", humanKeyOut], ctx);
   if (genesisRes.status !== 0) {
@@ -261,7 +264,7 @@ function runScenarioFaultToRecovery(ctx) {
   }
 
   // Step 2: Propose and approve a fault scenario warrant
-  steps.push("mirql i propose fault warrant");
+  ctx.step("mirql i propose fault warrant");
   const propRes = executeCli([
     "i", "propose",
     "--roadmap-ref", "M5",
@@ -273,37 +276,41 @@ function runScenarioFaultToRecovery(ctx) {
     throw new Error(`Fault proposal failed: ${propRes.stderr}`);
   }
 
+  ctx.step("mirql i act fault warrant --approve");
   const actRes = executeCli(["i", "act", propRes.parsed.proposal_id, "--approve", "--key", humanKeyOut], ctx);
   if (actRes.status !== 0) {
     throw new Error(`Fault proposal approval failed: ${actRes.stderr}`);
   }
 
   // Step 3: Queue tick
-  steps.push("mirql q tick");
-  executeCli(["q", "tick"], ctx);
+  ctx.step("mirql q tick");
+  const tickRes = executeCli(["q", "tick"], ctx);
+  if (tickRes.status !== 0) {
+    throw new Error(`Queue tick failed: ${tickRes.stderr}`);
+  }
 
   // Step 4: Doctor diagnosis evaluates health
-  steps.push("mirql r doctor");
+  ctx.step("mirql r doctor");
   const doctorRes = executeCli(["r", "doctor"], ctx);
-  if (doctorRes.status === null) {
-    throw new Error("Doctor execution crashed");
+  if (doctorRes.status !== 0 || !doctorRes.parsed?.ok) {
+    throw new Error(`Doctor execution failed or missing health status: ${doctorRes.stderr}`);
   }
 
   // Step 5: Breaker trip
-  steps.push("mirql r doctor --trip worker:flash");
+  ctx.step("mirql r doctor --trip worker:flash");
   const tripRes = executeCli(["r", "doctor", "--trip", "worker:flash", "--reason", "repeated_worker_failures"], ctx);
-  if (tripRes.status !== 0) {
+  if (tripRes.status !== 0 || tripRes.parsed?.action !== "trip") {
     throw new Error(`Doctor trip failed: ${tripRes.stderr}`);
   }
 
   // Step 6: Breaker reset & Recovery
-  steps.push("mirql r doctor --reset worker:flash");
+  ctx.step("mirql r doctor --reset worker:flash");
   const resetRes = executeCli(["r", "doctor", "--reset", "worker:flash"], ctx);
-  if (resetRes.status !== 0) {
+  if (resetRes.status !== 0 || resetRes.parsed?.action !== "reset") {
     throw new Error(`Doctor reset failed: ${resetRes.stderr}`);
   }
 
-  return { ok: true, steps };
+  return { ok: true, steps: ctx.stepsCompleted };
 }
 
 /**
@@ -316,15 +323,17 @@ function runScenarioFaultToRecovery(ctx) {
  */
 function runScenarioQuarantineToHarden(ctx) {
   const { sandboxDir, mirqlDir } = ctx;
-  const steps = [];
 
   // Step 1: Genesis bootstrap
-  steps.push("mirql i genesis");
+  ctx.step("mirql i genesis");
   const humanKeyOut = join(sandboxDir, "operator_human.key.json");
-  executeCli(["i", "genesis", "--human-key-out", humanKeyOut], ctx);
+  const genesisRes = executeCli(["i", "genesis", "--human-key-out", humanKeyOut], ctx);
+  if (genesisRes.status !== 0) {
+    throw new Error(`Genesis failed: ${genesisRes.stderr}`);
+  }
 
   // Step 2: Create a simulated test file that exhibits flakiness
-  steps.push("create non-deterministic test file");
+  ctx.step("create non-deterministic test file");
   const testsDir = join(sandboxDir, "tests");
   mkdirSync(testsDir, { recursive: true });
   const flakyTestFile = join(testsDir, "flaky.test.mjs");
@@ -337,7 +346,7 @@ it("flaky test", () => {
   `.trim() + "\n", "utf8");
 
   // Step 3: Execute Quarantine
-  steps.push(`quarantine flaky test ${flakyTestFile}`);
+  ctx.step(`quarantine flaky test ${flakyTestFile}`);
   const quarantineDir = join(mirqlDir, "quarantine");
   const quarantineRes = quarantineTest(flakyTestFile, quarantineDir, {
     reason: "non-deterministic flake detected across iterations",
@@ -347,7 +356,7 @@ it("flaky test", () => {
   }
 
   // Step 4: Verify quarantine directory and moved test file
-  steps.push("verify quarantine directory");
+  ctx.step("verify quarantine directory");
   if (!existsSync(quarantineDir)) {
     throw new Error(`Quarantine directory missing at ${quarantineDir}`);
   }
@@ -356,7 +365,14 @@ it("flaky test", () => {
     throw new Error(`Quarantine directory empty`);
   }
 
-  return { ok: true, steps };
+  // Step 5: Run doctor diagnosis on post-quarantine state
+  ctx.step("mirql r doctor");
+  const doctorRes = executeCli(["r", "doctor"], ctx);
+  if (doctorRes.status !== 0 || !doctorRes.parsed?.ok) {
+    throw new Error(`Doctor failed to verify quarantined state: ${doctorRes.stderr}`);
+  }
+
+  return { ok: true, steps: ctx.stepsCompleted };
 }
 
 /**
@@ -405,16 +421,21 @@ export function runJourney(scenarioName, options = {}) {
 
   const sandbox = createJourneySandbox(options);
   const startMs = Date.now();
-  let stepsCompleted = [];
+  const ctx = {
+    sandboxDir: sandbox.sandboxDir,
+    mirqlDir: sandbox.mirqlDir,
+    repoRoot: options.repoRoot || resolve(process.cwd()),
+    options,
+    currentStep: "scenario_start",
+    stepsCompleted: [],
+    step(name) {
+      this.currentStep = name;
+      this.stepsCompleted.push(name);
+    },
+  };
 
   try {
     let result;
-    const ctx = {
-      sandboxDir: sandbox.sandboxDir,
-      mirqlDir: sandbox.mirqlDir,
-      repoRoot: options.repoRoot || resolve(process.cwd()),
-      options,
-    };
 
     switch (normName) {
       case "init-to-merge":
@@ -430,18 +451,17 @@ export function runJourney(scenarioName, options = {}) {
         throw new Error(`Unhandled scenario ${normName}`);
     }
 
-    stepsCompleted = result.steps || [];
     const durationMs = Date.now() - startMs;
 
     return {
       ok: true,
       journey_name: normName,
-      steps_completed: stepsCompleted,
+      steps_completed: ctx.stepsCompleted,
       duration_ms: durationMs,
     };
   } catch (err) {
     const durationMs = Date.now() - startMs;
-    const failedStep = stepsCompleted[stepsCompleted.length - 1] || "scenario_start";
+    const failedStep = ctx.currentStep || "scenario_start";
     const severity = normName === "init-to-merge" ? "critical" : "degraded";
 
     const gap = formatJourneyGapEvent({
@@ -450,12 +470,12 @@ export function runJourney(scenarioName, options = {}) {
       expected_behavior: "Step succeeds without exception and advances journey lifecycle",
       observed_behavior: err.message || String(err),
       exit_code: err.exitCode ?? EXIT_CODES.DOMAIN_NEGATIVE,
-      reproduction_steps: [...stepsCompleted, failedStep],
+      reproduction_steps: [...ctx.stepsCompleted],
     }, options);
 
     const regression = formatRegressionReportedEvent({
       severity,
-      minimal_repro: [...stepsCompleted, failedStep],
+      minimal_repro: [...ctx.stepsCompleted],
       details: `Journey ${normName} broke at step "${failedStep}": ${err.message}`,
       journey_name: normName,
     }, options);
@@ -463,7 +483,7 @@ export function runJourney(scenarioName, options = {}) {
     return {
       ok: false,
       journey_name: normName,
-      steps_completed: stepsCompleted,
+      steps_completed: ctx.stepsCompleted,
       duration_ms: durationMs,
       gap,
       regression,

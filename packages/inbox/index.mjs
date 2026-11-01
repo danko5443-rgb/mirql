@@ -90,6 +90,16 @@ export function resolveMirqlDir(dirArg) {
   return resolvePath(raw);
 }
 
+const BOOLEAN_FLAGS = new Set([
+  "approve",
+  "reject",
+  "kill",
+  "resume",
+  "help",
+  "version",
+  "all",
+]);
+
 /**
  * CLI parser helper. Kebab-case flags (--signing-key, --target-id,
  * --idempotency-key, --human-key-out, ...) populate BOTH the kebab-case and
@@ -114,7 +124,9 @@ function parseArgs(args) {
         setOpt(arg.slice(2, eqIdx), arg.slice(eqIdx + 1));
       } else {
         const key = arg.slice(2);
-        if (i + 1 < args.length && !args[i + 1].startsWith("-")) {
+        if (BOOLEAN_FLAGS.has(key)) {
+          setOpt(key, true);
+        } else if (i + 1 < args.length && !args[i + 1].startsWith("-")) {
           setOpt(key, args[i + 1]);
           i += 1;
         } else {
@@ -123,7 +135,9 @@ function parseArgs(args) {
       }
     } else if (arg.startsWith("-")) {
       const key = arg.slice(1);
-      if (i + 1 < args.length && !args[i + 1].startsWith("-")) {
+      if (BOOLEAN_FLAGS.has(key)) {
+        setOpt(key, true);
+      } else if (i + 1 < args.length && !args[i + 1].startsWith("-")) {
         setOpt(key, args[i + 1]);
         i += 1;
       } else {

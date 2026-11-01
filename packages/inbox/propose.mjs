@@ -80,7 +80,7 @@ export function distillIntent(rawInput, options = {}) {
     } else if (/\b(canary|promote|ouroboros|self-host|slsa|sigstore)\b/i.test(text)) {
       roadmapRef = "M7";
     } else {
-      roadmapRef = "M6";
+      roadmapRef = "";
     }
   }
 
@@ -130,6 +130,12 @@ export function distillIntent(rawInput, options = {}) {
   if (!redCheck) {
     // Generate default verified reproducer based on category and title
     redCheck = "npm test";
+  }
+
+  if (/\b(curl|wget|fetch|nc|ncat|ssh|scp|ftp|skip_base_fail)\b/i.test(redCheck)) {
+    const err = new Error("Reproducer command violates Law 1 (Offline Litmus) or anti-cheat: network calls and skip_base_fail are forbidden");
+    err.exitCode = EXIT_CODES.POLICY_DENIAL;
+    throw err;
   }
 
   const reproducerVerified = Boolean(redCheck && redCheck.trim().length > 0);
@@ -276,10 +282,18 @@ export function createProposal(mirqlDir, proposalInput, options = {}) {
     throw err;
   }
 
+  // Check red_check for anti-cheat bypass and Law 1 offline litmus
+  if (/\b(curl|wget|fetch|nc|ncat|ssh|scp|ftp|skip_base_fail)\b/i.test(redCheck)) {
+    const err = new Error("Proposal red_check violates Law 1 (Offline Litmus) or anti-cheat: illicit command detected");
+    err.exitCode = EXIT_CODES.POLICY_DENIAL;
+    throw err;
+  }
+
   // 2. Validate against NOT-ROADMAP.md negative-space filter
   const corpus = {
     description,
     proposedInvariants,
+    red_check: redCheck,
     roadmapRef,
     surfaceImpact,
     title,

@@ -124,12 +124,35 @@ export function actOnItem(mirqlDir, actionInput, options = {}) {
     // 2. B8: confine target lookup strictly to .mirql/proposals/<target_id>.json
     //    and require the file to exist before acting.
     const proposalFile = join(mirqlDir, "proposals", `${targetId}.json`);
-    if (!existsSync(proposalFile)) {
-      throw domainError(
-        "target_not_found",
-        `target_not_found: no proposal document at proposals/${targetId}.json`,
-        EXIT_CODES.USAGE_ERROR,
-      );
+    let prop = null;
+    if (decision !== "resume") {
+      if (!existsSync(proposalFile)) {
+        throw domainError(
+          "target_not_found",
+          `target_not_found: no proposal document at proposals/${targetId}.json`,
+          EXIT_CODES.USAGE_ERROR,
+        );
+      }
+      try {
+        prop = JSON.parse(readFileSync(proposalFile, "utf8"));
+      } catch (parseErr) {
+        throw domainError(
+          "corrupt_proposal",
+          `corrupt_proposal: unable to parse proposals/${targetId}.json: ${parseErr.message}`,
+          EXIT_CODES.USAGE_ERROR,
+        );
+      }
+
+      // B2: Check that proposal is currently pending before approve or reject
+      if (decision === "approve" || decision === "reject") {
+        if (prop.status && prop.status !== "pending") {
+          throw domainError(
+            "invalid_proposal_state",
+            `invalid_proposal_state: proposal ${targetId} is already "${prop.status}" and cannot be ${decision}d again`,
+            EXIT_CODES.POLICY_DENIAL,
+          );
+        }
+      }
     }
 
     // 3. Map decision to event type. B5: resume emits `mirql.resume` so both
@@ -151,6 +174,76 @@ export function actOnItem(mirqlDir, actionInput, options = {}) {
     const epoch = typeof lastEvent?.epoch === "number" ? lastEvent.epoch : 1;
     const tenantId = typeof lastEvent?.tenant_id === "string" ? lastEvent.tenant_id : "mirql-core";
 
+    // Pre-construct and validate warrant document if decision is approve (B3: Atomicity)
+    let warrantId = null;
+    let warrantDoc = null;
+    let warrantHash = null;
+    let semanticFingerprint = null;
+    let anchors = null;
+    let budget = null;
+
+    if (decision === "approve" && prop) {
+      warrantId = ulid(nowMs + 1);
+      const warrantClass =
+        prop.kind === "bug" || prop.kind === "bugfix"
+          ? "surgical"
+          : (/^[a-z][a-z0-9_]{1,63}$/.test(prop.kind || "") ? prop.kind : "feature");
+      const redCheckCmd = prop.red_check || "npm test";
+      anchors = Array.isArray(prop.scope)
+        ? prop.scope
+        : (prop.scope ? [prop.scope] : ["packages/**"]);
+      budget = Number.isSafeInteger(prop.budget_micro_usd) ? prop.budget_micro_usd : 1500000;
+
+      const evidenceObj = {
+        kind: prop.kind || "feature",
+        proposal_id: targetId,
+        summary: prop.description || prop.title || "",
+        title: prop.title || "",
+      };
+
+      const intentSummary = {
+        class: warrantClass,
+        kind: prop.kind || "feature",
+        red_check: redCheckCmd,
+        scope: anchors,
+        summary: prop.description || prop.title || "",
+        title: prop.title || "",
+      };
+      semanticFingerprint = sha256(jcs(intentSummary));
+
+      warrantDoc = {
+        v: 1,
+        id: warrantId,
+        class: warrantClass,
+        semantic_fingerprint: semanticFingerprint,
+        anchors,
+        evidence: evidenceObj,
+        red_check: {
+          command: redCheckCmd,
+          passed: false,
+        },
+        scope: {
+          allow: anchors,
+          deny: [],
+        },
+        budget_micro_usd: budget,
+        created_by: "human:owner",
+      };
+
+      const warrantValidation = validateDocument("warrant", warrantDoc);
+      if (!warrantValidation.valid) {
+        throw domainError(
+          "invalid_warrant",
+          `Generated warrant document violates warrant.schema.json: ${warrantValidation.errors.join("; ")}`,
+          EXIT_CODES.USAGE_ERROR,
+        );
+      }
+      warrantHash = sha256(jcs(warrantDoc));
+    }
+
+    // Deterministic deduplication idempotency key (B2)
+    const idempotencyKey = options.idempotencyKey || `act:${decision}:${targetId}`;
+
     const envelope = {
       v: 1,
       id: ulid(nowMs),
@@ -164,7 +257,7 @@ export function actOnItem(mirqlDir, actionInput, options = {}) {
         ns: "human:owner",
         key_id: humanKp.keyId,
       },
-      idempotency_key: options.idempotencyKey || `act:${decision}:${targetId}:${seq}`,
+      idempotency_key: idempotencyKey,
       prev_hash: lastHash,
       payload: {
         decided_at_ms: nowMs,
@@ -184,76 +277,18 @@ export function actOnItem(mirqlDir, actionInput, options = {}) {
       );
     }
 
-    // 4. Append to ledger and update state cache
+    // 4. Append human action to ledger and update state cache (all validations passed)
     appendEvent(mirqlDir, signedEvent);
 
-    let warrantId = null;
-    let warrantDoc = null;
     let warrantEvent = null;
 
-    // 5. If targetId corresponds to a proposal, update its document status.
-    //    (resume targets the halt state itself, not the proposal document.)
-    if (decision !== "resume") {
-      const prop = JSON.parse(readFileSync(proposalFile, "utf8"));
+    // 5. If targetId corresponds to a proposal, update its document status and write warrant.
+    if (decision !== "resume" && prop) {
       prop.status = decision === "approve" ? "approved" : (decision === "reject" ? "rejected" : decision);
       prop.updated_at = new Date(nowMs).toISOString();
       prop.action_reason = reason;
 
-      if (decision === "approve") {
-        // Milestone M6: 1-Tap approval mints and enqueues the warrant (Law 6, Law 11, Law 16)
-        warrantId = ulid(nowMs + 1);
-        const warrantClass =
-          prop.kind === "bug" || prop.kind === "bugfix"
-            ? "surgical"
-            : (/^[a-z][a-z0-9_]{1,63}$/.test(prop.kind || "") ? prop.kind : "feature");
-        const redCheckCmd = prop.red_check || "npm test";
-        const anchors = Array.isArray(prop.scope)
-          ? prop.scope
-          : (prop.scope ? [prop.scope] : ["packages/**"]);
-        const budget = Number.isSafeInteger(prop.budget_micro_usd) ? prop.budget_micro_usd : 1500000;
-
-        const evidenceObj = {
-          kind: prop.kind || "feature",
-          proposal_id: targetId,
-          summary: prop.description || prop.title || "",
-          title: prop.title || "",
-        };
-
-        const intentSummary = {
-          class: warrantClass,
-          kind: prop.kind || "feature",
-          red_check: redCheckCmd,
-          scope: anchors,
-          summary: prop.description || prop.title || "",
-          title: prop.title || "",
-        };
-        const semanticFingerprint = sha256(jcs(intentSummary));
-
-        warrantDoc = {
-          v: 1,
-          id: warrantId,
-          class: warrantClass,
-          semantic_fingerprint: semanticFingerprint,
-          anchors,
-          evidence: evidenceObj,
-          red_check: {
-            command: redCheckCmd,
-            passed: false,
-          },
-          scope: {
-            allow: anchors,
-            deny: [],
-          },
-          budget_micro_usd: budget,
-          created_by: "human:owner",
-        };
-
-        const warrantValidation = validateDocument("warrant", warrantDoc);
-        if (!warrantValidation.valid) {
-          throw new Error(`Generated warrant document violates warrant.schema.json: ${warrantValidation.errors.join("; ")}`);
-        }
-
-        const warrantHash = sha256(jcs(warrantDoc));
+      if (decision === "approve" && warrantDoc) {
         const warrantsDir = join(mirqlDir, "warrants");
         mkdirSync(warrantsDir, { recursive: true });
         const warrantFile = join(warrantsDir, `${warrantId}.json`);
@@ -277,7 +312,7 @@ export function actOnItem(mirqlDir, actionInput, options = {}) {
           },
           idempotency_key: options.idempotencyKey
             ? `${options.idempotencyKey}:warrant`
-            : `warrant:${warrantId}`,
+            : `warrant:${targetId}`,
           prev_hash: latest.lastHash,
           payload: {
             anchors,
