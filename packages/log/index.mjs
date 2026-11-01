@@ -201,12 +201,14 @@ function eventHashOf(event, rawLine, allowRawLine = false) {
 // ---------------------------------------------------------------------------
 
 /**
- * Load `ledger/keyring.json` (a map of key_id -> base64url public key).
- * A missing or unparsable keyring is treated as empty — the ledger itself
- * still verifies via embedded writer key ids.
+ * Load `ledger/keyring.json`: a map of key_id (and/or writer namespace) to
+ * either a base64url public key string (legacy) or a namespace-bound entry
+ * `{ ns, publicKey }` (canonical since W5b). A missing or unparsable keyring
+ * is treated as empty — the ledger itself still verifies via embedded writer
+ * key ids.
  *
  * @param {string} mirqlDir
- * @returns {Record<string, string>}
+ * @returns {Record<string, unknown>}
  */
 function loadKeyring(mirqlDir) {
   const file = keyringFile(mirqlDir);
@@ -226,9 +228,15 @@ function loadKeyring(mirqlDir) {
  * options.publicKey, then keyring[event.writer.key_id], then the raw key
  * embedded in an `ed25519:<43-char-base64url>` writer key id.
  *
+ * Keyring entries may be plain public-key strings (legacy) or namespace-
+ * bound objects `{ ns, publicKey }` (canonical since W5b). When the entry is
+ * bound to a namespace that differs from `event.writer.ns`, resolution fails
+ * closed (returns null): a key registered for `tool:queue` can never verify
+ * an event claiming to be written by `human:owner` (Law 3 binding).
+ *
  * @param {object} event
  * @param {string} mirqlDir
- * @param {{ publicKey?: string, keyring?: Record<string, string> }} [options]
+ * @param {{ publicKey?: string, keyring?: Record<string, unknown> }} [options]
  * @returns {string | null} base64url raw public key, or null when unresolvable
  */
 function resolvePublicKey(event, mirqlDir, options = {}) {
@@ -238,7 +246,23 @@ function resolvePublicKey(event, mirqlDir, options = {}) {
   const hasKeyring = options.keyring !== undefined || existsSync(kFile);
   if (hasKeyring) {
     const keyring = options.keyring ?? loadKeyring(mirqlDir);
-    const trustedKey = keyring[keyId];
+    const raw = keyring[keyId];
+    if (raw === undefined || raw === null) {
+      return null; // key not registered in keyring: fail closed (B3)
+    }
+    let trustedKey = raw;
+    if (typeof trustedKey === "object" && !Array.isArray(trustedKey)) {
+      // Namespace-bound keyring entry: { ns, publicKey }.
+      if (
+        typeof trustedKey.ns === "string" &&
+        trustedKey.ns.length > 0 &&
+        typeof event?.writer?.ns === "string" &&
+        trustedKey.ns !== event.writer.ns
+      ) {
+        return null; // Namespace binding violation!
+      }
+      trustedKey = trustedKey.publicKey ?? trustedKey.pubkey;
+    }
     if (typeof trustedKey !== "string" || trustedKey.length === 0) {
       return null;
     }
@@ -361,9 +385,13 @@ function richFold(events, rawLines = []) {
 
     if (type === "mirql.genesis") {
       if (typeof payload.macro_state === "string") state.mode = payload.macro_state;
-    } else if (type === "factory.halted" || type === "mirql.halted") {
+    } else if (type === "factory.halted" || type === "mirql.halted" || type === "mirql.halt") {
       state.halted = true;
-    } else if (type === "factory.resumed" || type === "mirql.resumed") {
+    } else if (
+      type === "factory.resumed" ||
+      type === "mirql.resumed" ||
+      type === "mirql.resume"
+    ) {
       state.halted = false;
     } else if (type === "warrant.created") {
       if (warrantId !== null) {

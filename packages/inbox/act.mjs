@@ -1,0 +1,191 @@
+// packages/inbox/act.mjs — Cryptographically signed human sovereignty actions (Law 6).
+//
+// Remediation B1 (Law 6): human:owner credentials are never loaded
+// implicitly; `--key <path>` / `--signing-key <material>` or MIRQL_HUMAN_KEY
+// (outside `.mirql/`) is required, otherwise the action fails closed with
+// POLICY_DENIAL (`credentials_required`).
+//
+// Remediation B5: `--decision resume` emits `mirql.resume` (signed by
+// human:owner, authorized by policy/writers.yaml and the reconciled Law 3
+// ACL) — NOT `human.approval` — so both the mirql-queue and mirql-log folds
+// lift the halt state cleanly.
+//
+// Remediation B8: target_id must be a Crockford ULID; lookup is confined to
+// `.mirql/proposals/<target_id>.json` with directory traversal rejected.
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import {
+  ulid,
+  hlcTick,
+  signEvent,
+  verifyEvent,
+  EXIT_CODES,
+} from "../core/index.mjs";
+import { authenticateHumanWriter } from "./keys.mjs";
+import { getLastEvent, appendEvent, requireGenesisLedger } from "./ledger.mjs";
+
+const VALID_DECISIONS = Object.freeze(["approve", "reject", "kill", "resume"]);
+
+/** Crockford Base32 ULID (matches schemas/event.schema.json id pattern). */
+const ULID_PATTERN = /^[0-9A-HJKMNPQRSTVWXYZ]{26}$/;
+
+/** Structured domain error with a machine-readable code for CLI JSON output. */
+function domainError(code, message, exitCode) {
+  const err = new Error(message);
+  err.errorCode = code;
+  err.exitCode = exitCode;
+  return err;
+}
+
+/**
+ * Validate and confine a target id: strict Crockford ULID, no directory
+ * traversal (`..`, `/`, `\`), lookup confined to .mirql/proposals/<id>.json.
+ *
+ * @param {unknown} targetId
+ * @returns {string} the validated target id
+ * @throws structured Error (invalid_target_id, USAGE_ERROR)
+ */
+function validateTargetId(targetId) {
+  if (typeof targetId !== "string" || targetId.length === 0) {
+    throw domainError(
+      "invalid_target_id",
+      "invalid_target_id: target_id is required (--target-id <26-char Crockford ULID>)",
+      EXIT_CODES.USAGE_ERROR,
+    );
+  }
+  if (
+    targetId.includes("..") ||
+    targetId.includes("/") ||
+    targetId.includes("\\") ||
+    !ULID_PATTERN.test(targetId)
+  ) {
+    throw domainError(
+      "invalid_target_id",
+      `invalid_target_id: ${JSON.stringify(targetId)} is not a 26-char Crockford ULID; directory traversal is rejected and lookup is confined to .mirql/proposals/<id>.json`,
+      EXIT_CODES.USAGE_ERROR,
+    );
+  }
+  return targetId;
+}
+
+/**
+ * Execute a cryptographically signed human decision on an inbox item.
+ * Verifies that the action is signed exclusively by human:owner.
+ *
+ * @param {string} mirqlDir
+ * @param {object} actionInput
+ * @param {object} [options]
+ * @returns {{ status: "acted", decision: string, target_id: string, seq: number, event: object }}
+ */
+export function actOnItem(mirqlDir, actionInput, options = {}) {
+  if (!actionInput || typeof actionInput !== "object") {
+    throw domainError("invalid_input", "actionInput must be an object", EXIT_CODES.USAGE_ERROR);
+  }
+
+  const decision = (actionInput.decision || options.decision || "").toLowerCase();
+  if (!VALID_DECISIONS.includes(decision)) {
+    throw domainError(
+      "invalid_decision",
+      `invalid_decision ${JSON.stringify(decision)}; expected one of ${VALID_DECISIONS.join(", ")}`,
+      EXIT_CODES.USAGE_ERROR,
+    );
+  }
+
+  const targetId = validateTargetId(
+    actionInput.target_id || options["target-id"] || options.targetId,
+  );
+
+  const reason = actionInput.reason || options.reason || "";
+
+  // 1. Authenticate human:owner Ed25519 key — explicit credentials only.
+  //    (Law 6 — Silence Is Never Consent; fail closed with
+  //    credentials_required when no key is provided.)
+  requireGenesisLedger(mirqlDir);
+  const humanKp = authenticateHumanWriter(mirqlDir, options);
+
+  // 2. B8: confine target lookup strictly to .mirql/proposals/<target_id>.json
+  //    and require the file to exist before acting.
+  const proposalFile = join(mirqlDir, "proposals", `${targetId}.json`);
+  if (!existsSync(proposalFile)) {
+    throw domainError(
+      "target_not_found",
+      `target_not_found: no proposal document at proposals/${targetId}.json`,
+      EXIT_CODES.USAGE_ERROR,
+    );
+  }
+
+  // 3. Map decision to event type. B5: resume emits `mirql.resume` so both
+  //    the queue and log folds lift the halt cleanly (not human.approval).
+  let eventType;
+  if (decision === "approve") {
+    eventType = "human.approval";
+  } else if (decision === "reject") {
+    eventType = "human.rejection";
+  } else if (decision === "kill") {
+    eventType = "human.kill";
+  } else {
+    eventType = "mirql.resume";
+  }
+
+  const nowMs = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
+  const { lastEvent, count, lastHash } = getLastEvent(mirqlDir);
+  const seq = count + 1;
+  const epoch = typeof lastEvent?.epoch === "number" ? lastEvent.epoch : 1;
+  const tenantId = typeof lastEvent?.tenant_id === "string" ? lastEvent.tenant_id : "mirql-core";
+
+  const envelope = {
+    v: 1,
+    id: ulid(nowMs),
+    tenant_id: tenantId,
+    seq,
+    epoch,
+    hlc: hlcTick(lastEvent?.hlc, nowMs, options.node || "local"),
+    ts: new Date(nowMs).toISOString(),
+    type: eventType,
+    writer: {
+      ns: "human:owner",
+      key_id: humanKp.keyId,
+    },
+    idempotency_key: options.idempotencyKey || `act:${decision}:${targetId}:${seq}`,
+    prev_hash: lastHash,
+    payload: {
+      decided_at_ms: nowMs,
+      decision,
+      reason,
+      target_id: targetId,
+    },
+  };
+
+  const signedEvent = signEvent(envelope, humanKp.privateKey, humanKp.keyId);
+  const verifyRes = verifyEvent(signedEvent, humanKp.publicKey);
+  if (!verifyRes.ok) {
+    throw domainError(
+      "INTEGRITY_VIOLATION",
+      `Signature verification failed: ${verifyRes.reason}`,
+      EXIT_CODES.INTEGRITY_VIOLATION,
+    );
+  }
+
+  // 4. Append to ledger and update state cache
+  appendEvent(mirqlDir, signedEvent);
+
+  // 5. If targetId corresponds to a proposal, update its document status.
+  //    (resume targets the halt state itself, not the proposal document.)
+  if (decision !== "resume") {
+    try {
+      const prop = JSON.parse(readFileSync(proposalFile, "utf8"));
+      prop.status = decision === "approve" ? "approved" : (decision === "reject" ? "rejected" : decision);
+      prop.updated_at = new Date(nowMs).toISOString();
+      prop.action_reason = reason;
+      writeFileSync(proposalFile, JSON.stringify(prop, null, 2) + "\n", "utf8");
+    } catch {}
+  }
+
+  return {
+    status: "acted",
+    decision,
+    target_id: targetId,
+    seq,
+    event: signedEvent,
+  };
+}
