@@ -263,4 +263,25 @@ test("sub", () => { assert.equal(sub(5, 2), 3); });
     const gitignore = readFileSync(join(process.cwd(), ".gitignore"), "utf8");
     assert.match(gitignore, /\*\.mutant-bak/);
   });
+  it("deriveChangedSources picks up untracked files (Law 6 fail-closed diff surface)", () => {
+    const ws = makeWorkspace();
+    try {
+      git(ws, "config", "user.email", "test@test.local");
+      git(ws, "config", "user.name", "Tester");
+      const dummy = join(ws, "src", "dummy.mjs");
+      writeFileSync(dummy, "export const x = 1;\n", "utf8");
+      git(ws, "add", "-A");
+      git(ws, "commit", "-q", "-m", "initial");
+
+      const untracked = join(ws, "src", "untracked.mjs");
+      writeFileSync(untracked, "export const y = 2;\n", "utf8");
+
+      const res = deriveChangedSources(ws, "HEAD");
+      assert.equal(res.ok, true);
+      assert.ok(res.files.some((f) => f.includes("untracked.mjs")), "untracked source must be included");
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
 });

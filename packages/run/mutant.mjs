@@ -10,6 +10,7 @@ import {
   rmSync,
   mkdtempSync,
   chmodSync,
+  lstatSync,
 } from "node:fs";
 import { join, resolve, basename, dirname, relative } from "node:path";
 import { tmpdir } from "node:os";
@@ -399,30 +400,63 @@ function makeSandbox(sourcePath, testPaths) {
   const root = findWorkspaceRoot(sourcePath, testPaths);
   if (!root) return null;
 
-  const sandboxRoot = mkdtempSync(join(tmpdir(), "mirql-mutant-"));
-  cpSync(root, sandboxRoot, {
-    recursive: true,
-    filter: (src) => {
-      const name = basename(src);
-      return name !== ".git" && name !== "node_modules" && name !== ".mirql";
-    },
-  });
+  let sandboxRoot = null;
+  try {
+    sandboxRoot = mkdtempSync(join(tmpdir(), "mirql-mutant-"));
+    cpSync(root, sandboxRoot, {
+      recursive: true,
+      filter: (src) => {
+        const name = basename(src);
+        return name !== ".git" && name !== "node_modules" && name !== ".mirql";
+      },
+    });
 
-  const map = (abs) => join(sandboxRoot, relative(root, abs));
-  const sandboxSource = map(resolve(sourcePath));
-  const sandboxTests = (Array.isArray(testPaths) ? testPaths : [testPaths])
-    .filter(Boolean)
-    .map(map);
-  if (!existsSync(sandboxSource) || sandboxTests.some((t) => !existsSync(t))) {
-    rmSync(sandboxRoot, { recursive: true, force: true });
+    const map = (abs) => join(sandboxRoot, relative(root, abs));
+    const sandboxSource = map(resolve(sourcePath));
+    const rawTestPaths = (Array.isArray(testPaths) ? testPaths : [testPaths]).filter(Boolean);
+    const sandboxTests = rawTestPaths.map(map);
+    if (!existsSync(sandboxSource) || sandboxTests.some((t) => !existsSync(t))) {
+      rmSync(sandboxRoot, { recursive: true, force: true });
+      return null;
+    }
+
+    // Dissolve symlinks on the mutation path in the sandbox (issue #14 / B1):
+    // If sandboxSource is a symlink, writeFileSync would mutate the target outside the sandbox.
+    // Replace symlink with real file content inside the sandbox.
+    try {
+      const st = lstatSync(sandboxSource);
+      if (st.isSymbolicLink()) {
+        unlinkSync(sandboxSource);
+        writeFileSync(sandboxSource, readFileSync(resolve(sourcePath)));
+      }
+    } catch {}
+
+    for (let i = 0; i < sandboxTests.length; i++) {
+      const t = sandboxTests[i];
+      const realT = rawTestPaths[i];
+      try {
+        const tst = lstatSync(t);
+        if (tst.isSymbolicLink()) {
+          unlinkSync(t);
+          writeFileSync(t, readFileSync(resolve(realT)));
+        }
+      } catch {}
+    }
+
+    // cpSync preserves file modes; the sandbox owns its copies, so the mutation
+    // target must be writable even if the real file was read-only.
+    try {
+      chmodSync(sandboxSource, 0o666);
+    } catch {}
+    return { root: sandboxRoot, source: sandboxSource, tests: sandboxTests };
+  } catch (err) {
+    if (sandboxRoot && existsSync(sandboxRoot)) {
+      try {
+        rmSync(sandboxRoot, { recursive: true, force: true });
+      } catch {}
+    }
     return null;
   }
-  // cpSync preserves file modes; the sandbox owns its copies, so the mutation
-  // target must be writable even if the real file was read-only.
-  try {
-    chmodSync(sandboxSource, 0o666);
-  } catch {}
-  return { root: sandboxRoot, source: sandboxSource, tests: sandboxTests };
 }
 
 /**
@@ -535,6 +569,20 @@ export function runMutationTesting(options = {}) {
           timeout: 15000,
           env: { ...cleanEnv, NODE_ENV: "test" },
         });
+        if (baselineResult.error) {
+          return {
+            ok: false,
+            error: "BASELINE_TEST_FAILED",
+            source_path: sourcePath,
+            kill_rate_bp: 0,
+            kill_threshold_bp: killThresholdBp,
+            mutants_total: 0,
+            mutants_killed: 0,
+            mutants_survived: 0,
+            survived_mutants: [],
+            summary: `Baseline test runner error: ${baselineResult.error.message}`,
+          };
+        }
         baselinePassed = baselineResult.status === 0;
       }
 
@@ -590,6 +638,9 @@ export function runMutationTesting(options = {}) {
           timeout: 15000,
           env: { ...cleanEnv, NODE_ENV: "test" },
         });
+        if (result.error) {
+          throw new Error(`Test runner failed executing mutant ${mutant.id}: ${result.error.message}`);
+        }
         testPassed = result.status === 0;
       }
 

@@ -3,7 +3,7 @@ import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { EXIT_CODES } from "../core/index.mjs";
 import { computePhi } from "./phi.mjs";
-import { runMutationTesting } from "./mutant.mjs";
+import { runMutationTesting, extractChangedLines } from "./mutant.mjs";
 import { appendSupervisorEvent, getOrGenerateSupervisorKey } from "./ledger.mjs";
 
 export const KNOWN_PROBES = Object.freeze([
@@ -68,22 +68,31 @@ export function loadProbeConfig(probeName, rootDir = process.cwd()) {
  * @returns {{ ok: boolean, files?: string[], error?: string }}
  */
 export function deriveChangedSources(workspaceDir, base = "HEAD~1") {
-  const res = spawnSync("git", ["diff", "--name-only", base], {
-    cwd: workspaceDir,
-    encoding: "utf8",
-    timeout: 15000,
-  });
-  if (res.status !== 0) {
-    const err = (res.stderr || res.stdout || `git diff exit ${res.status}`).trim();
-    return { ok: false, error: `cannot measure diff against ${base}: ${err}` };
-  }
-  const files = String(res.stdout || "")
-    .split(/\r?\n/)
-    .map((f) => f.trim())
-    .filter(Boolean)
-    .filter((f) => f.endsWith(".mjs"))
-    .filter((f) => !f.includes(".test."))
-    .filter((f) => /^(packages|bin|scripts)\//.test(f));
+  const gitZ = (args) => {
+    const res = spawnSync("git", ["-c", "core.quotePath=false", ...args], {
+      cwd: workspaceDir,
+      encoding: "utf8",
+      timeout: 15000,
+    });
+    if (res.status !== 0) {
+      const err = (res.stderr || res.stdout || `git ${args[0]} exit ${res.status}`).trim();
+      return { ok: false, error: `cannot measure diff against ${base}: ${err}` };
+    }
+    const raw = String(res.stdout || "");
+    return { ok: true, items: raw.split("\0").filter(Boolean) };
+  };
+
+  const diffRes = gitZ(["diff", "--name-only", "-z", "--diff-filter=ACMRT", base]);
+  if (!diffRes.ok) return diffRes;
+
+  const untrackedRes = gitZ(["ls-files", "--others", "-z", "--exclude-standard"]);
+  if (!untrackedRes.ok) return untrackedRes;
+
+  const allFiles = [...new Set([...diffRes.items, ...untrackedRes.items])];
+  const files = allFiles
+    .filter((f) => f.endsWith(".mjs") || f.endsWith(".js"))
+    .filter((f) => !f.includes(".test.") && !f.includes("/tests/") && !f.includes("/test/"));
+
   return { ok: true, files };
 }
 
@@ -376,9 +385,22 @@ export function runProbe(options = {}) {
             continue;
           }
           try {
+            let changedLines;
+            try {
+              const diffRes = spawnSync("git", ["diff", "-U0", base, "--", sourceRel], {
+                cwd: workspaceDir,
+                encoding: "utf8",
+                timeout: 15000,
+              });
+              if (diffRes.status === 0 && diffRes.stdout) {
+                changedLines = extractChangedLines(diffRes.stdout);
+              }
+            } catch {}
+
             const res = runMutationTesting({
               sourcePath: sourceAbs,
               testPath: importingTests,
+              changedLines: changedLines?.length > 0 ? changedLines : undefined,
               killThresholdBp: minKillRateBp,
             });
             fileResults.push({
