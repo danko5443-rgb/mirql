@@ -4,9 +4,13 @@
 // CLI contract:
 //   mirql m check [--pr <path|json>] [--base <sha>] [--head <sha>]
 //                 [--dir <mirqlDir>] [--key <notaryKeyPath>] [--sign]
+//                 [--surface] [--workspace <dir>]
 //
 // - `--pr` accepts a fixture file path or inline JSON; without it the PR
 //   document is read from stdin.
+// - `--surface` verifies surface.lock consistency against the workspace
+//   (every locked bin exists in bin/, every locked command cites a locked
+//   bin, and no uncited bin ships beside them) instead of evaluating a PR.
 // - `--base` asserts the authoritative target tip SHA (MP-004 STALE_BASE on
 //   mismatch); `--head` asserts the actual head SHA the same way.
 // - `--sign` signs the verdict with the notary key and appends the
@@ -17,8 +21,8 @@
 //
 // Bare invocation, `--help`, `-h`, and `status` keep the W1 stub contract:
 //   { "tool": "mergeproof", "status": "stub" }
-import { existsSync, readFileSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join, resolve as resolvePath } from "node:path";
 import { EXIT_CODES, jcs } from "../core/index.mjs";
 import { evaluatePullRequest, TOOL } from "./evaluator.mjs";
 import { signAndAppendVerdict } from "./notary.mjs";
@@ -51,7 +55,7 @@ function resolveMirqlDir(mirqlDir) {
  * @returns {{ positional: string[], flags: Record<string, string | boolean> }}
  */
 function parseArgs(argv) {
-  const BOOL_FLAGS = new Set(["sign", "help"]);
+  const BOOL_FLAGS = new Set(["sign", "help", "surface"]);
   const positional = [];
   const flags = {};
   for (let i = 0; i < argv.length; i++) {
@@ -191,12 +195,81 @@ function emitUsage() {
 }
 
 /**
+ * `check --surface`: verify surface.lock consistency against the workspace
+ * (issue #16 — the command policy/probes.toml declares must actually exist).
+ * Real measurements only: bins present in bin/, commands citing locked bins,
+ * and no uncited bins shipping beside the lock.
+ *
+ * @param {Record<string, string | boolean>} flags
+ * @returns {number} exit code
+ */
+function cliSurfaceCheck(flags) {
+  const workspaceDir =
+    typeof flags.workspace === "string" && flags.workspace.length > 0
+      ? resolvePath(flags.workspace)
+      : process.cwd();
+  const lockPath = join(workspaceDir, "surface.lock");
+  const out = {
+    tool: TOOL,
+    command: "check",
+    surface: true,
+    workspace: workspaceDir,
+  };
+
+  if (!existsSync(lockPath)) {
+    emitLine(jcs({ ...out, ok: false, verdict: "reject", rule: "SURFACE_LOCK_MISSING", detail: `surface.lock not found at ${lockPath}` }));
+    return EXIT_CODES.DOMAIN_NEGATIVE;
+  }
+
+  let lock;
+  try {
+    lock = JSON.parse(readFileSync(lockPath, "utf8"));
+  } catch (err) {
+    emitLine(jcs({ ...out, ok: false, verdict: "reject", rule: "SURFACE_LOCK_INVALID", detail: `surface.lock is not valid JSON: ${err instanceof Error ? err.message : String(err)}` }));
+    return EXIT_CODES.DOMAIN_NEGATIVE;
+  }
+
+  const lockedBins = Array.isArray(lock.bins) ? lock.bins.filter((b) => typeof b === "string") : [];
+  const lockedCommands = Array.isArray(lock.commands) ? lock.commands.filter((c) => typeof c === "string") : [];
+  const binDir = join(workspaceDir, "bin");
+
+  const missingBins = lockedBins.filter((b) => !existsSync(join(binDir, `${b}.mjs`)));
+  const unknownCommands = lockedCommands.filter((c) => {
+    const binName = c.trim().split(/\s+/)[0];
+    return !binName || !lockedBins.includes(binName);
+  });
+  let uncitedBins = [];
+  if (existsSync(binDir)) {
+    const onDisk = readdirSync(binDir)
+      .filter((f) => f.endsWith(".mjs"))
+      .map((f) => f.slice(0, -".mjs".length));
+    uncitedBins = onDisk.filter((b) => !lockedBins.includes(b));
+  }
+
+  const ok = missingBins.length === 0 && unknownCommands.length === 0 && uncitedBins.length === 0;
+  emitLine(jcs({
+    ...out,
+    ok,
+    verdict: ok ? "auto_merge" : "reject",
+    checked_bins: lockedBins.length,
+    checked_commands: lockedCommands.length,
+    missing_bins: missingBins,
+    unknown_commands: unknownCommands,
+    uncited_bins: uncitedBins,
+  }));
+  return ok ? EXIT_CODES.OK : EXIT_CODES.DOMAIN_NEGATIVE;
+}
+
+/**
  * `check` subcommand: evaluate (and optionally sign) one PR document.
  *
  * @param {Record<string, string | boolean>} flags
  * @returns {number} exit code
  */
 function cliCheck(flags) {
+  if (flags.surface === true) {
+    return cliSurfaceCheck(flags);
+  }
   const prDoc = loadPrDocument(flags);
   try {
     jcs(prDoc);

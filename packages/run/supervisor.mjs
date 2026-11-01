@@ -1,6 +1,13 @@
-import { spawn } from "node:child_process";
-import { join, resolve } from "node:path";
-import { readFileSync, existsSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { join, resolve, relative, dirname } from "node:path";
+import {
+  readFileSync,
+  readdirSync,
+  existsSync,
+  writeFileSync,
+  mkdirSync,
+  unlinkSync,
+} from "node:fs";
 import {
   ulid,
   sha256,
@@ -180,6 +187,86 @@ export function runSupervisor(options = {}) {
 }
 }
 
+/**
+ * Deterministic content digest of a workspace tree (issue #16): hashes every
+ * source file (sorted, path + content hash chain), excluding volatile state
+ * directories. This is a REAL measurement of the produced tree — verifiable
+ * by anyone re-running the same walk — never a synthetic placeholder.
+ *
+ * @param {string} workspaceDir
+ * @returns {string} hex sha256
+ */
+function measureTreeDigest(workspaceDir) {
+  // Skip volatile state wherever the mirql dir sits — mirql state may live in
+  // .mirql/ OR (flat layouts) as sibling ledger/ and state/ directories.
+  const skip = new Set([".git", ".mirql", "ledger", "state", "node_modules", "coverage", ".mutant-sandbox"]);
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (skip.has(entry.name)) continue;
+      const abs = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(abs);
+      } else if (entry.isFile() && /\.(mjs|json|yaml|toml|md|lock)$/.test(entry.name)) {
+        files.push(abs);
+      }
+    }
+  };
+  walk(workspaceDir);
+  files.sort();
+  let chain = "mirql-tree-v1";
+  for (const abs of files) {
+    const rel = relative(workspaceDir, abs).replaceAll("\\", "/");
+    try {
+      chain = `${chain}\n${rel}:${sha256(readFileSync(abs, "utf8"))}`;
+    } catch {
+      // Unreadable file: contribute the path only — never fail open to a guess
+      chain = `${chain}\n${rel}:<unreadable>`;
+    }
+  }
+  // core sha256() already returns the canonical "sha256:<hex>" form
+  return sha256(chain).replace(/^sha256:/, "");
+}
+
+/** Real git HEAD of the workspace, or null when not a git repo. */
+function measureGitHead(workspaceDir) {
+  try {
+    const res = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: workspaceDir,
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    if (res.status === 0 && /^[0-9a-f]{40,64}\n?$/.test(res.stdout || "")) {
+      return res.stdout.trim();
+    }
+  } catch {}
+  return null;
+}
+
+/** Real change surface (files/lines) from `git diff --numstat HEAD`, or null off-repo. */
+function measureSurface(workspaceDir) {
+  try {
+    const res = spawnSync("git", ["diff", "--numstat", "HEAD"], {
+      cwd: workspaceDir,
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    if (res.status !== 0) return null;
+    let filesChanged = 0;
+    let linesAdded = 0;
+    let linesRemoved = 0;
+    for (const line of String(res.stdout || "").split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const [add, del] = line.split("\t");
+      filesChanged += 1;
+      if (/^\d+$/.test(add)) linesAdded += parseInt(add, 10);
+      if (/^\d+$/.test(del)) linesRemoved += parseInt(del, 10);
+    }
+    return { files_changed: filesChanged, lines_added: linesAdded, lines_removed: linesRemoved };
+  } catch {}
+  return null;
+}
+
 function finalizeSupervisor(
   options,
   mirqlDir,
@@ -213,26 +300,51 @@ function finalizeSupervisor(
     options.phiAfter ?? (verifyResult.verified ? realPhi : realPhi);
   const deltaPhi = phiAfter - phiBefore;
 
-  // Compute real SHA-256 values
-  const baseSha =
-    options.baseSha && /^sha256:[0-9a-f]{64}$/.test(options.baseSha)
-      ? options.baseSha
-      : sha256(`base:${warrant.semantic_fingerprint}:${warrant.id}`);
-
-  const headSha =
-    options.headSha && /^sha256:[0-9a-f]{64}$/.test(options.headSha)
-      ? options.headSha
-      : sha256(`head:${warrant.id}:${nowMs}:${realPhi}`);
-
+  // Measured-or-flagged digests (issue #16): every SHA below is a REAL
+  // measurement — a content digest of the produced tree, or a digest of the
+  // workspace's actual git HEAD — so Law-5 base-pinning can be cross-checked
+  // against git later. No synthetic "sha256 of a prose string" placeholders.
   const treeHash =
     options.treeHash && /^sha256:[0-9a-f]{64}$/.test(options.treeHash)
       ? options.treeHash
-      : sha256(`tree:${workspaceDir}:${realPhi}:${phiMetrics.loc}`);
+      : `sha256:${measureTreeDigest(workspaceDir)}`;
 
-  // Real cost computation based on duration and calls
+  const gitHead = measureGitHead(workspaceDir);
+  const headSha =
+    options.headSha && /^sha256:[0-9a-f]{64}$/.test(options.headSha)
+      ? options.headSha
+      : gitHead
+        ? sha256(`git-head:${gitHead}`) // core sha256() returns the prefixed form
+        : treeHash; // no git: the measured tree digest is the honest head witness
+  // The attempt's true base (lease-start HEAD) is not captured by this layer;
+  // absent an explicit base we record the same measured witness rather than
+  // inventing one. Callers with a leased base pass options.baseSha.
+  const baseSha =
+    options.baseSha && /^sha256:[0-9a-f]{64}$/.test(options.baseSha)
+      ? options.baseSha
+      : headSha;
+
+  // Measured-or-flagged telemetry (issue #16): the supervisor has no real
+  // usage counter of its own, so it NEVER invents thrift/cost numbers. Real
+  // measurements arrive via options (gateway-backed runners) and are flagged
+  // measured:1; everything else is flagged measured:0 and the ledger payload
+  // carries null — downstream budget/thrift folds treat unmeasured as 0 and
+  // can distinguish it via the flag. The old defaults (500/250/750 tokens,
+  // cost = duration x 10) are gone.
+  const thriftInput = options.thrift;
+  const thriftMeasured =
+    thriftInput &&
+    Number.isSafeInteger(thriftInput.model_calls) &&
+    Number.isSafeInteger(thriftInput.tokens_in) &&
+    Number.isSafeInteger(thriftInput.tokens_out) &&
+    Number.isSafeInteger(thriftInput.cache_hits);
+
   const costMicroUsd = Number.isSafeInteger(options.costMicroUsd)
     ? options.costMicroUsd
-    : Math.max(0, agentDuration * 10);
+    : null;
+  const tokensConsumed = thriftMeasured
+    ? thriftInput.tokens_in + thriftInput.tokens_out
+    : null;
 
   // If the agent command fails (non-zero exit or killed by signal),
   // outcome status must be "fail" and verdict: "reject" (B3)
@@ -273,24 +385,26 @@ function finalizeSupervisor(
       phi_after: phiAfter,
       delta_phi: deltaPhi,
     },
-    surface: {
-      files_changed: options.surface?.files_changed ?? 2,
-      lines_added: options.surface?.lines_added ?? 15,
-      lines_removed: options.surface?.lines_removed ?? 5,
-    },
-    thrift: {
-      model_calls: 1,
-      tokens_in: 500,
-      tokens_out: 250,
-      cache_hits: 0,
-    },
+    surface: (() => {
+      if (
+        options.surface &&
+        Number.isSafeInteger(options.surface.files_changed) &&
+        Number.isSafeInteger(options.surface.lines_added) &&
+        Number.isSafeInteger(options.surface.lines_removed)
+      ) {
+        return { measured: 1, ...options.surface };
+      }
+      const measured = measureSurface(workspaceDir);
+      return measured ? { measured: 1, ...measured } : { measured: 0 };
+    })(),
+    thrift: thriftMeasured
+      ? { measured: 1, ...thriftInput }
+      : { measured: 0 },
     reconciliation: {
       entries_counted: 1,
       balanced: 1,
     },
-    cost: {
-      micro_usd: costMicroUsd,
-    },
+    cost: costMicroUsd !== null ? { measured: 1, micro_usd: costMicroUsd } : { measured: 0 },
   };
 
   const validation = validateDocument("outcome", outcome);
@@ -317,7 +431,7 @@ function finalizeSupervisor(
         status: isOverallPass ? "completed" : "failed",
         verdict: outcomeVerdict,
         head_commit: headSha,
-        tokens_consumed: 750,
+        tokens_consumed: tokensConsumed,
         cost_micro_usd: costMicroUsd,
         phi_before: phiBefore,
         phi_after: phiAfter,
