@@ -2,8 +2,8 @@
 // Enforces Law 2 (unblockable kill authority) and Law 14 (quiescence / fail-safe convergence).
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, statSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 
 /** Default probation window: 30 minutes in milliseconds (1,800,000 ms). */
 export const DEFAULT_PROBATION_TIMEOUT_MS = 30 * 60 * 1000;
@@ -44,14 +44,97 @@ export function checkProbationStatus({ startTimeMs, nowMs = Date.now(), timeoutM
 }
 
 /**
+ * Lists the worktree paths that a rollback (`git reset --hard` + `git clean -fd`)
+ * would destroy: modified/deleted tracked files plus untracked non-ignored files.
+ * Honors .gitignore exactly like `git clean -fd` (ignored files are never listed).
+ *
+ * Fail-closed (Law 14): a git failure returns ok:false — the caller must NOT
+ * proceed with destructive operations on an unmeasurable worktree.
+ *
+ * @param {string} repoDir
+ * @returns {{ ok: boolean, paths: string[], error?: string }}
+ */
+export function listDestructiblePaths(repoDir) {
+  const git = (args) => {
+    const res = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", timeout: 15_000 });
+    if (res.status !== 0) {
+      return { ok: false, error: (res.stderr || res.stdout || `git ${args[0]} exit ${res.status}`).trim() };
+    }
+    return { ok: true, out: String(res.stdout || "") };
+  };
+
+  // Tracked files whose worktree copy differs from the index (includes deletions).
+  const modified = git(["ls-files", "-m"]);
+  if (!modified.ok) return { ok: false, paths: [], error: modified.error };
+  // Untracked, non-ignored files/dirs (exactly what `git clean -fd` removes).
+  const untracked = git(["ls-files", "--others", "--exclude-standard"]);
+  if (!untracked.ok) return { ok: false, paths: [], error: untracked.error };
+
+  const paths = [
+    ...new Set([
+      ...modified.out.split(/\r?\n/).filter(Boolean),
+      ...untracked.out.split(/\r?\n/).filter(Boolean),
+    ]),
+  ].sort();
+  return { ok: true, paths };
+}
+
+/**
+ * Copies the given worktree-relative paths into a quarantine directory,
+ * preserving relative structure, so destructive rollback stays recoverable.
+ *
+ * @param {string} repoDir
+ * @param {string[]} paths
+ * @param {string} quarantineDir
+ * @returns {{ ok: boolean, dir: string, copied: string[], skipped: string[], error?: string }}
+ */
+function quarantinePaths(repoDir, paths, quarantineDir) {
+  const copied = [];
+  const skipped = [];
+  try {
+    for (const relPath of paths) {
+      const src = join(repoDir, relPath);
+      if (!existsSync(src)) {
+        // Already absent from the worktree (e.g. tracked file deleted by hand):
+        // nothing to preserve — reset --hard restores it from the target commit.
+        skipped.push(relPath);
+        continue;
+      }
+      const dest = join(quarantineDir, relPath);
+      mkdirSync(dirname(dest), { recursive: true });
+      copyFileSync(src, dest);
+      copied.push(relPath);
+    }
+    return { ok: true, dir: quarantineDir, copied, skipped };
+  } catch (err) {
+    return {
+      ok: false,
+      dir: quarantineDir,
+      copied,
+      skipped,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
  * Executes an automated clean rollback to an authoritative target SHA in a repository.
- * Uses `git reset --hard` followed by `git clean -fd` to eliminate dirty/uncommitted files.
+ *
+ * Quarantine-first (Law 14, fail-safe): every path that `git reset --hard` +
+ * `git clean -fd` would destroy is FIRST copied to
+ * `<repoDir>/.mirql/quarantine/rollback-<epochMs>-<pid>/` so concurrent agents'
+ * uncommitted work is recoverable, never silently lost. If the quarantine copy
+ * fails and `allowDataLoss` is false (default), the rollback ABORTS — the
+ * factory converges to a safe state instead of destroying unmeasured work.
  *
  * @param {string} repoDir
  * @param {string} targetSha
- * @returns {{ ok: boolean, targetSha: string, output: string, error?: string }}
+ * @param {object} [options]
+ * @param {string} [options.quarantineRoot] - override quarantine parent dir
+ * @param {boolean} [options.allowDataLoss=false] - proceed even if quarantine fails
+ * @returns {{ ok: boolean, targetSha: string, output: string, error?: string, quarantine?: object }}
  */
-export function executeRollback(repoDir, targetSha) {
+export function executeRollback(repoDir, targetSha, { quarantineRoot, allowDataLoss = false } = {}) {
   if (!repoDir || !existsSync(join(repoDir, ".git"))) {
     return { ok: false, targetSha, output: "", error: `Directory ${repoDir} is not a git repository` };
   }
@@ -60,6 +143,36 @@ export function executeRollback(repoDir, targetSha) {
   }
 
   try {
+    // 1. Measure what the destructive ops would destroy (fail-closed).
+    const destructible = listDestructiblePaths(repoDir);
+    if (!destructible.ok) {
+      return {
+        ok: false,
+        targetSha,
+        output: "",
+        error: `Refusing rollback — cannot measure dirty worktree: ${destructible.error}`,
+      };
+    }
+
+    // 2. Quarantine those paths before touching anything.
+    let quarantine = null;
+    if (destructible.paths.length > 0) {
+      const root = quarantineRoot ?? join(repoDir, ".mirql", "quarantine");
+      const quarantineDir = join(root, `rollback-${Date.now()}-${process.pid}`);
+      quarantine = quarantinePaths(repoDir, destructible.paths, quarantineDir);
+      if (!quarantine.ok && !allowDataLoss) {
+        return {
+          ok: false,
+          targetSha,
+          output: "",
+          error: `Quarantine failed, refusing destructive rollback: ${quarantine.error} ` +
+            `(re-run with allowDataLoss to override; worktree left untouched)`,
+          quarantine,
+        };
+      }
+    }
+
+    // 3. Restore the authoritative state.
     const resetRes = spawnSync("git", ["reset", "--hard", targetSha], {
       cwd: repoDir,
       encoding: "utf8",
@@ -71,20 +184,35 @@ export function executeRollback(repoDir, targetSha) {
         targetSha,
         output: resetRes.stdout || "",
         error: resetRes.stderr?.trim() || `git reset --hard failed with exit code ${resetRes.status}`,
+        quarantine,
       };
     }
 
-    // Clean untracked artifacts created during failed run
-    const cleanRes = spawnSync("git", ["clean", "-fd"], {
+    // Clean untracked artifacts created during failed run. The quarantine tree
+    // itself is excluded so it always survives the clean (it is normally
+    // covered by .gitignore's `.mirql/`; the explicit exclusion keeps it safe
+    // in repositories whose .gitignore differs).
+    const cleanArgs = ["clean", "-fd"];
+    if (quarantine) {
+      const rel = relative(repoDir, quarantine.dir).replaceAll("\\", "/");
+      if (rel && !rel.startsWith("..")) {
+        cleanArgs.push("-e", rel);
+      }
+    }
+    const cleanRes = spawnSync("git", cleanArgs, {
       cwd: repoDir,
       encoding: "utf8",
       timeout: 15_000,
     });
 
+    const quarantineNote = quarantine
+      ? ` Quarantined ${quarantine.copied.length} file(s) to ${quarantine.dir}.`
+      : "";
     return {
       ok: true,
       targetSha,
-      output: `Rolled back to ${targetSha}. ${cleanRes.stdout?.trim() || ""}`,
+      output: `Rolled back to ${targetSha}.${quarantineNote} ${cleanRes.stdout?.trim() || ""}`.trim(),
+      quarantine,
     };
   } catch (err) {
     return {
@@ -166,6 +294,7 @@ export class LifeguardWatchdog {
     this.killServices = Array.isArray(options.killServices) ? [...options.killServices] : [];
     this.killPidFiles = Array.isArray(options.killPidFiles) ? [...options.killPidFiles] : [];
     this.disarmFile = options.disarmFile ?? null;
+    this.allowDataLoss = options.allowDataLoss === true;
     this.disarmed = false;
     this.rolledBack = false;
     this.intervalId = null;
@@ -275,7 +404,7 @@ export class LifeguardWatchdog {
       const targetSha = this.resolveTargetSha();
       let rollback = null;
       if (targetSha) {
-        rollback = executeRollback(this.repoDir, targetSha);
+        rollback = executeRollback(this.repoDir, targetSha, { allowDataLoss: this.allowDataLoss });
         this.rolledBack = true;
       }
 
@@ -340,6 +469,7 @@ if (process.argv[1] && process.argv[1].endsWith("lifeguard.mjs")) {
   let disarmFile = null;
   let repoDir = process.cwd();
   let watchMode = false;
+  let allowDataLoss = false;
   const killPids = [];
   const killServices = [];
   const killPidFiles = [];
@@ -366,6 +496,8 @@ if (process.argv[1] && process.argv[1].endsWith("lifeguard.mjs")) {
       killServices.push(process.argv[++i]);
     } else if (arg === "--kill-pid-file" && process.argv[i + 1]) {
       killPidFiles.push(process.argv[++i]);
+    } else if (arg === "--allow-data-loss") {
+      allowDataLoss = true;
     } else if (arg === "--watch") {
       watchMode = true;
     }
@@ -382,6 +514,7 @@ if (process.argv[1] && process.argv[1].endsWith("lifeguard.mjs")) {
     killPidFiles,
     timeoutMs: timeoutSec * 1000,
     heartbeatTimeoutMs: heartbeatTimeoutSec * 1000,
+    allowDataLoss,
   });
 
   if (watchMode) {
