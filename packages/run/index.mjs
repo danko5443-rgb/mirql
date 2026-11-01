@@ -26,7 +26,12 @@ import {
 } from "./anti-cheat.mjs";
 import { verifyAttempt } from "./verify.mjs";
 import { runAgent, sanitizeAgentEnv, SAFE_ENV_ALLOWLIST } from "./agent.mjs";
-import { runSupervisor, touchHeartbeat, startHeartbeatTicker } from "./supervisor.mjs";
+import {
+  runSupervisor,
+  runSupervisorReactive,
+  touchHeartbeat,
+  startHeartbeatTicker,
+} from "./supervisor.mjs";
 import { runProbe, KNOWN_PROBES } from "./probe.mjs";
 import { runBingBong, extractModelFamily } from "./bing-bong.mjs";
 import { appendSupervisorEvent, getOrGenerateSupervisorKey } from "./ledger.mjs";
@@ -391,6 +396,7 @@ export {
   checkPhiReduction,
   verifyAttempt,
   runSupervisor,
+  runSupervisorReactive,
   runAgent,
   sanitizeAgentEnv,
   SAFE_ENV_ALLOWLIST,

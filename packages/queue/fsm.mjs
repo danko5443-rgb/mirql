@@ -14,7 +14,42 @@ export const DEFAULT_POLICY = Object.freeze({
   refactor_cooldown_ms: 172800000,
   macro_states: ["BUILD", "HARDEN", "PATROL", "QUIESCENT"],
   quiescent_max_budget_bp: 500,
+  max_build_concurrency: 1,
 });
+
+/**
+ * Checks whether a lease is currently active and unexpired.
+ *
+ * @param {object} lease
+ * @param {number} [nowMs=Date.now()]
+ * @returns {boolean}
+ */
+export function isLeaseLive(lease, nowMs = Date.now()) {
+  if (!lease) return false;
+  const expiry = lease.expires_at_ms ?? (lease.leased_at_ms + (lease.ttl_ms ?? 0));
+  return nowMs <= expiry;
+}
+
+/**
+ * Validates and normalizes max_build_concurrency limit.
+ *
+ * @param {any} limit
+ * @returns {{ valid: boolean, limit: number, error?: string }}
+ */
+export function validateConcurrencyLimit(limit) {
+  if (limit === undefined || limit === null) {
+    return { valid: true, limit: 1 };
+  }
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    return {
+      valid: false,
+      limit: 0,
+      error: `Invalid max_build_concurrency: expected positive safe integer >= 1, got ${JSON.stringify(limit)}`,
+    };
+  }
+  return { valid: true, limit };
+}
+
 
 /**
  * Pure deterministic tick reducer for the mirql macro state machine.
@@ -60,7 +95,7 @@ export function tick(state, policy = DEFAULT_POLICY, nowMs = Date.now(), options
 
   // 3. Fix B2: Reap expired leases
   const expiredLeases = Object.values(state.active_leases || {}).filter(
-    (l) => nowMs > (l.expires_at_ms ?? (l.leased_at_ms + l.ttl_ms)),
+    (l) => !isLeaseLive(l, nowMs),
   );
   if (expiredLeases.length > 0) {
     return {
@@ -96,7 +131,7 @@ export function tick(state, policy = DEFAULT_POLICY, nowMs = Date.now(), options
   // Fix B1: Helper to check if a warrant is currently leased
   function isWarrantActiveLeased(wId) {
     return Object.values(state.active_leases || {}).some(
-      (l) => l.warrant_id === wId && nowMs <= (l.expires_at_ms ?? (l.leased_at_ms + l.ttl_ms)),
+      (l) => l.warrant_id === wId && isLeaseLive(l, nowMs),
     );
   }
 
@@ -118,20 +153,28 @@ export function tick(state, policy = DEFAULT_POLICY, nowMs = Date.now(), options
 
   switch (currentMode) {
     case "BUILD": {
-      // Law 14 & Milestone M1: Concurrency enforcement for BUILD mode when configured
-      const maxBuildConcurrency = options.concurrency ?? options.max_build_concurrency ?? mergedPolicy.max_build_concurrency ?? mergedPolicy.concurrency;
-      if (maxBuildConcurrency !== undefined && maxBuildConcurrency !== null) {
-        const activeUnexpiredLeases = Object.values(state.active_leases || {}).filter(
-          (l) => nowMs <= (l.expires_at_ms ?? (l.leased_at_ms + l.ttl_ms)),
-        );
-        if (activeUnexpiredLeases.length >= maxBuildConcurrency) {
-          return {
-            action: "WAIT_IN_PROGRESS",
-            next_mode: "BUILD",
-            active_lease_count: activeUnexpiredLeases.length,
-            reason: "build_concurrency_limit_active_lease",
-          };
-        }
+      // Law 14 & Milestone M1: Concurrency enforcement for BUILD mode
+      const rawLimit = options.concurrency ?? options.max_build_concurrency ?? mergedPolicy.max_build_concurrency ?? mergedPolicy.concurrency;
+      const limitValidation = validateConcurrencyLimit(rawLimit);
+      if (!limitValidation.valid) {
+        return {
+          action: "REJECTED",
+          next_mode: state.mode || "BUILD",
+          exit_code: EXIT_CODES.USAGE_ERROR,
+          error: limitValidation.error,
+        };
+      }
+
+      const activeUnexpiredLeases = Object.values(state.active_leases || {}).filter(
+        (l) => isLeaseLive(l, nowMs),
+      );
+      if (activeUnexpiredLeases.length >= limitValidation.limit) {
+        return {
+          action: "WAIT_IN_PROGRESS",
+          next_mode: "BUILD",
+          active_lease_count: activeUnexpiredLeases.length,
+          reason: "build_concurrency_limit_active_lease",
+        };
       }
 
       if (availableOpenWarrants.length > 0 || availableQueuedJobs.length > 0) {

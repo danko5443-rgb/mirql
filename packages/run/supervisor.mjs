@@ -7,6 +7,7 @@ import {
   jcs,
   EXIT_CODES,
   validateDocument,
+  createLedgerWatcher,
 } from "../core/index.mjs";
 import { runAgent } from "./agent.mjs";
 import { verifyAttempt } from "./verify.mjs";
@@ -365,3 +366,55 @@ export function startHeartbeatTicker(heartbeatPath, intervalMs = 2000) {
     return null;
   }
 }
+
+/**
+ * Law 14 & Milestone M1: Event-Driven Reactive Supervisor Loop.
+ * Listens for new events on the ledger (job.enqueued, job.leased, warrant.minted, human.intent)
+ * via zero-polling LedgerWatcher, automatically executing supervisor steps on demand.
+ *
+ * @param {object} options
+ * @param {string} [options.mirqlDir]
+ * @param {boolean} [options.initialRun=false]
+ * @returns {Promise<{ watcher: import("../core/watcher.mjs").LedgerWatcher, getStepsExecuted: () => number, close: () => void }>}
+ */
+export async function runSupervisorReactive(options = {}) {
+  const mirqlDir = options.mirqlDir ?? options.dir ?? join(process.cwd(), ".mirql");
+  const ledgerPath = join(mirqlDir, "ledger", "events.jsonl");
+
+  let stepsExecuted = 0;
+  const watcher = createLedgerWatcher(ledgerPath, {
+    debounceMs: options.debounceMs ?? 25,
+    fromBeginning: false,
+  });
+
+  const runStep = async (triggerEvent) => {
+    try {
+      stepsExecuted++;
+      return await runSupervisor({ ...options, triggerEvent });
+    } catch (err) {
+      if (process.env.MIRQL_DEBUG) {
+        process.stderr.write(`[mirql-supervisor-reactive] Step error: ${err.message}\n`);
+      }
+      return null;
+    }
+  };
+
+  const reactiveEvents = ["job.enqueued", "job.leased", "warrant.minted", "human.intent"];
+
+  for (const evtType of reactiveEvents) {
+    watcher.on(evtType, (evt) => {
+      runStep(evt);
+    });
+  }
+
+  if (options.initialRun) {
+    await runStep(null);
+  }
+
+  return {
+    watcher,
+    getStepsExecuted: () => stepsExecuted,
+    close: () => watcher.close(),
+  };
+}
+

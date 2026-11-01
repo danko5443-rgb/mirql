@@ -1030,9 +1030,18 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
         assert.equal(sub.ok, true);
       }
 
-      // Concurrently invoke `mirql q lease --dir <tempDir>` using 4 child processes
+      // Concurrently invoke `mirql q lease --dir <tempDir> --concurrency 4` using 4 child processes
       const mirqlBin = join(ROOT, "bin", "mirql.mjs");
-      const spawnLease = () => execFileAsync(process.execPath, [mirqlBin, "q", "lease", "--dir", tempDir]);
+      const spawnLease = () =>
+        execFileAsync(process.execPath, [
+          mirqlBin,
+          "q",
+          "lease",
+          "--dir",
+          tempDir,
+          "--concurrency",
+          "4",
+        ]);
 
       const runs = await Promise.all([
         spawnLease(),

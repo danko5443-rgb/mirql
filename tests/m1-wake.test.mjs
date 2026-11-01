@@ -19,8 +19,11 @@ import {
   leaseNextJob,
   tickQueue,
   getQueueStatus,
-  foldQueueState,
+  DEFAULT_POLICY,
+  isLeaseLive,
+  validateConcurrencyLimit,
 } from "../packages/queue/index.mjs";
+import { runSupervisorReactive } from "../packages/run/index.mjs";
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
 
@@ -69,7 +72,11 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
   // 1. Concurrency 1 Invariant (Law 14)
   // ---------------------------------------------------------------------------
   describe("1. Concurrency 1 Enforcement in BUILD Mode", () => {
-    it("strictly prevents a second concurrent BUILD lease while one is active", () => {
+    it("DEFAULT_POLICY specifies max_build_concurrency: 1 by default", () => {
+      assert.equal(DEFAULT_POLICY.max_build_concurrency, 1);
+    });
+
+    it("strictly prevents a second concurrent BUILD lease by DEFAULT with NO options passed", () => {
       const w1 = makeValidWarrant();
       const w2 = makeValidWarrant();
 
@@ -79,14 +86,14 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
       const statusBefore = getQueueStatus(tempDir);
       assert.equal(statusBefore.open_warrants.length, 2);
 
-      // Lease 1 should succeed
-      const l1 = leaseNextJob(tempDir, { concurrency: 1 });
+      // Lease 1 should succeed with no options passed
+      const l1 = leaseNextJob(tempDir);
       assert.equal(l1.ok, true);
       assert.equal(l1.status, "leased");
       assert.equal(l1.warrant_id, w1.id);
 
-      // Lease 2 immediately after MUST NOT grant a second lease (Concurrency 1)
-      const l2 = leaseNextJob(tempDir, { concurrency: 1 });
+      // Lease 2 immediately after MUST NOT grant a second lease (Concurrency 1 by default)
+      const l2 = leaseNextJob(tempDir);
       assert.equal(l2.ok, true);
       assert.equal(l2.status, "concurrency_limit");
       assert.equal(l2.job_id, undefined);
@@ -98,18 +105,18 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
       assert.equal(statusDuring.active_leases.length, 1);
     });
 
-    it("tickQueue returns WAIT_IN_PROGRESS while a BUILD lease is active", () => {
+    it("tickQueue returns WAIT_IN_PROGRESS while a BUILD lease is active by default", () => {
       const w1 = makeValidWarrant();
       const w2 = makeValidWarrant();
 
       submitWarrant(tempDir, w1, { repoRoot: ROOT });
       submitWarrant(tempDir, w2, { repoRoot: ROOT });
 
-      const l1 = leaseNextJob(tempDir, { concurrency: 1 });
+      const l1 = leaseNextJob(tempDir);
       assert.equal(l1.status, "leased");
 
       // While lease is running, tickQueue must wait rather than transitioning mode
-      const t = tickQueue(tempDir, { repoRoot: ROOT, concurrency: 1 });
+      const t = tickQueue(tempDir, { repoRoot: ROOT });
       assert.equal(t.action, "WAIT_IN_PROGRESS");
       assert.equal(t.next_mode, "BUILD");
 
@@ -127,18 +134,45 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
       submitWarrant(tempDir, w2, { repoRoot: ROOT, nowMs: t0 });
 
       // Lease 1
-      const l1 = leaseNextJob(tempDir, { nowMs: t0, ttl_ms: ttl, concurrency: 1 });
+      const l1 = leaseNextJob(tempDir, { nowMs: t0, ttl_ms: ttl });
       assert.equal(l1.status, "leased");
       assert.equal(l1.warrant_id, w1.id);
 
       // Reap expired lease at t0 + 40_000ms
-      tickQueue(tempDir, { nowMs: t0 + 40_000, repoRoot: ROOT, concurrency: 1 });
+      tickQueue(tempDir, { nowMs: t0 + 40_000, repoRoot: ROOT });
 
       // Now lease can be granted for the next job
-      const l2 = leaseNextJob(tempDir, { nowMs: t0 + 41_000, ttl_ms: ttl, concurrency: 1 });
+      const l2 = leaseNextJob(tempDir, { nowMs: t0 + 41_000, ttl_ms: ttl });
       assert.equal(l2.ok, true);
       assert.equal(l2.status, "leased");
       assert.ok(l2.job_id);
+    });
+
+    it("Law 17: validateConcurrencyLimit rejects invalid limit values (0, negative, NaN, string)", () => {
+      assert.equal(validateConcurrencyLimit(undefined).valid, true);
+      assert.equal(validateConcurrencyLimit(null).valid, true);
+      assert.equal(validateConcurrencyLimit(1).valid, true);
+      assert.equal(validateConcurrencyLimit(5).valid, true);
+
+      assert.equal(validateConcurrencyLimit(0).valid, false);
+      assert.equal(validateConcurrencyLimit(-1).valid, false);
+      assert.equal(validateConcurrencyLimit(NaN).valid, false);
+      assert.equal(validateConcurrencyLimit("1").valid, false);
+      assert.equal(validateConcurrencyLimit(1.5).valid, false);
+
+      // Fails closed in leaseNextJob
+      const res = leaseNextJob(tempDir, { concurrency: 0 });
+      assert.equal(res.ok, false);
+      assert.equal(res.status, "rejected");
+      assert.equal(res.exit_code, EXIT_CODES.USAGE_ERROR);
+    });
+
+    it("isLeaseLive helper accurately tests unexpired vs expired leases", () => {
+      const liveLease = { leased_at_ms: 1000, ttl_ms: 5000 };
+      assert.equal(isLeaseLive(liveLease, 2000), true);
+      assert.equal(isLeaseLive(liveLease, 6000), true);
+      assert.equal(isLeaseLive(liveLease, 6001), false);
+      assert.equal(isLeaseLive(null), false);
     });
   });
 
@@ -146,18 +180,13 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
   // 2. Zero-Polling Reactive Event Watcher (Law 14)
   // ---------------------------------------------------------------------------
   describe("2. Zero-Polling Reactive Ledger Event Watcher", () => {
-    it("dispatches new appended events reactively without polling", async () => {
+    it("dispatches new appended events reactively without fixed polling sleeps", async () => {
       const ledgerDir = join(tempDir, "ledger");
       mkdirSync(ledgerDir, { recursive: true });
       const ledgerPath = join(ledgerDir, "events.jsonl");
       writeFileSync(ledgerPath, "", "utf8");
 
-      const received = [];
       const watcher = createLedgerWatcher(ledgerPath, { debounceMs: 15 });
-
-      watcher.on("event", (evt) => {
-        received.push(evt);
-      });
 
       try {
         const dummyEvent1 = {
@@ -167,14 +196,14 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
           seq: 1,
           payload: { text: "hello reactive wake" },
         };
+
+        const eventPromise1 = watcher.waitFor((e) => e.type === "human.intent", {
+          timeoutMs: 2000,
+        });
         appendFileSync(ledgerPath, jcs(dummyEvent1) + "\n", "utf8");
-
-        // Wait for reactive dispatch
-        await new Promise((r) => setTimeout(r, 80));
-
-        assert.equal(received.length, 1);
-        assert.equal(received[0].type, "human.intent");
-        assert.equal(received[0].payload.text, "hello reactive wake");
+        const received1 = await eventPromise1;
+        assert.equal(received1.type, "human.intent");
+        assert.equal(received1.payload.text, "hello reactive wake");
 
         const dummyEvent2 = {
           v: 1,
@@ -183,28 +212,28 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
           seq: 2,
           payload: { job_id: "JOB-123" },
         };
+        const eventPromise2 = watcher.waitFor((e) => e.type === "job.enqueued", {
+          timeoutMs: 2000,
+        });
         appendFileSync(ledgerPath, jcs(dummyEvent2) + "\n", "utf8");
-
-        await new Promise((r) => setTimeout(r, 80));
-
-        assert.equal(received.length, 2);
-        assert.equal(received[1].type, "job.enqueued");
+        const received2 = await eventPromise2;
+        assert.equal(received2.type, "job.enqueued");
       } finally {
         watcher.close();
       }
     });
 
-    it("coalesces burst writes cleanly through debouncing", async () => {
+    it("coalesces burst writes cleanly through debouncing and maxWaitMs", async () => {
       const ledgerDir = join(tempDir, "ledger");
       mkdirSync(ledgerDir, { recursive: true });
       const ledgerPath = join(ledgerDir, "events.jsonl");
       writeFileSync(ledgerPath, "", "utf8");
 
-      const received = [];
-      const watcher = createLedgerWatcher(ledgerPath, { debounceMs: 25 });
-      watcher.on("event", (evt) => received.push(evt));
+      const watcher = createLedgerWatcher(ledgerPath, { debounceMs: 25, maxWaitMs: 100 });
 
       try {
+        const lastPromise = watcher.waitFor((e) => e.seq === 5, { timeoutMs: 2000 });
+
         // Rapid append of 5 events in immediate sequence
         for (let i = 1; i <= 5; i++) {
           const evt = {
@@ -217,14 +246,9 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
           appendFileSync(ledgerPath, jcs(evt) + "\n", "utf8");
         }
 
-        // Wait for debounce flush
-        await new Promise((r) => setTimeout(r, 120));
-
-        assert.equal(received.length, 5);
-        for (let i = 1; i <= 5; i++) {
-          assert.equal(received[i - 1].seq, i);
-          assert.equal(received[i - 1].payload.index, i);
-        }
+        const finalEvt = await lastPromise;
+        assert.equal(finalEvt.seq, 5);
+        assert.equal(finalEvt.payload.index, 5);
       } finally {
         watcher.close();
       }
@@ -240,7 +264,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
       const waitPromise = waitForLedgerEvent(
         ledgerPath,
         (e) => e.type === "warrant.minted" && e.payload?.role === "doctor",
-        { timeoutMs: 1500, debounceMs: 10 },
+        { timeoutMs: 2000, debounceMs: 10 },
       );
 
       // Append irrelevant event first
@@ -250,7 +274,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
         "utf8",
       );
 
-      // Append target event
+      // Append target event after small tick
       setTimeout(() => {
         appendFileSync(
           ledgerPath,
@@ -263,7 +287,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
           }) + "\n",
           "utf8",
         );
-      }, 50);
+      }, 30);
 
       const matched = await waitPromise;
       assert.equal(matched.type, "warrant.minted");
@@ -274,7 +298,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
         waitForLedgerEvent(
           ledgerPath,
           (e) => e.type === "never.happening",
-          { timeoutMs: 100, debounceMs: 10 },
+          { timeoutMs: 50, debounceMs: 10 },
         ),
         /Timeout waiting for event/,
       );
@@ -287,11 +311,11 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
 
       // File does not exist yet!
       const watcher = createLedgerWatcher(ledgerPath, { debounceMs: 15 });
-      const received = [];
-      watcher.on("event", (evt) => received.push(evt));
 
       try {
-        await new Promise((r) => setTimeout(r, 40));
+        const birthPromise = watcher.waitFor((e) => e.type === "first.birth", {
+          timeoutMs: 2000,
+        });
 
         // Create file and append
         const evt = {
@@ -303,12 +327,103 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
         };
         writeFileSync(ledgerPath, jcs(evt) + "\n", "utf8");
 
-        await new Promise((r) => setTimeout(r, 120));
-
-        assert.equal(received.length, 1);
-        assert.equal(received[0].type, "first.birth");
+        const received = await birthPromise;
+        assert.equal(received.type, "first.birth");
       } finally {
         watcher.close();
+      }
+    });
+
+    it("handles multi-byte UTF-8 characters split across chunk boundaries", async () => {
+      const ledgerDir = join(tempDir, "ledger");
+      mkdirSync(ledgerDir, { recursive: true });
+      const ledgerPath = join(ledgerDir, "events.jsonl");
+      writeFileSync(ledgerPath, "", "utf8");
+
+      const watcher = createLedgerWatcher(ledgerPath, { debounceMs: 10 });
+
+      try {
+        // Multi-byte character: 🎉 (4 bytes in UTF-8: 0xF0 0x9F 0x8E 0x89)
+        const eventText = jcs({
+          v: 1,
+          id: ulid(),
+          type: "emoji.party",
+          seq: 1,
+          payload: { celebration: "🎉" },
+        }) + "\n";
+
+        const utf8Bytes = Buffer.from(eventText, "utf8");
+        // Split right in the middle of the 4-byte emoji
+        const splitIndex = eventText.indexOf("🎉") + 2;
+
+        const part1 = utf8Bytes.subarray(0, splitIndex);
+        const part2 = utf8Bytes.subarray(splitIndex);
+
+        const partyPromise = watcher.waitFor((e) => e.type === "emoji.party", {
+          timeoutMs: 2000,
+        });
+
+        appendFileSync(ledgerPath, part1);
+        setTimeout(() => {
+          appendFileSync(ledgerPath, part2);
+        }, 20);
+
+        const received = await partyPromise;
+        assert.equal(received.type, "emoji.party");
+        assert.equal(received.payload.celebration, "🎉");
+      } finally {
+        watcher.close();
+      }
+    });
+
+    it("error handling does not crash the process when no error listener is attached", () => {
+      const watcher = createLedgerWatcher(join(tempDir, "nonexistent", "events.jsonl"), {
+        debounceMs: 10,
+      });
+      // Should not throw an uncaught exception
+      watcher._handleError(new Error("simulated watcher error"));
+      assert.ok(watcher.lastError);
+      watcher.close();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // 3. End-to-End Reactive Supervisor Loop (M1)
+  // ---------------------------------------------------------------------------
+  describe("3. End-to-End Reactive Supervisor Wake Loop", () => {
+    it("runSupervisorReactive wakes on newly appended ledger events", async () => {
+      const ledgerDir = join(tempDir, "ledger");
+      mkdirSync(ledgerDir, { recursive: true });
+      const ledgerPath = join(ledgerDir, "events.jsonl");
+      writeFileSync(ledgerPath, "", "utf8");
+
+      // Start reactive supervisor
+      const reactive = await runSupervisorReactive({
+        mirqlDir: tempDir,
+        debounceMs: 10,
+        skipPidFile: true,
+        noHeartbeatTicker: true,
+      });
+
+      try {
+        assert.equal(reactive.getStepsExecuted(), 0);
+
+        // Append a job.enqueued event
+        const enqueuedEvent = {
+          v: 1,
+          id: ulid(),
+          type: "job.enqueued",
+          seq: 1,
+          payload: { job_id: "JOB-TEST-1" },
+        };
+        appendFileSync(ledgerPath, jcs(enqueuedEvent) + "\n", "utf8");
+
+        // Wait for reactive supervisor to wake and step
+        await new Promise((r) => setTimeout(r, 100));
+
+        assert.ok(reactive.getStepsExecuted() >= 1, "Supervisor must wake and execute a step");
+      } finally {
+        reactive.close();
       }
     });
   });

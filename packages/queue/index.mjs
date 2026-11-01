@@ -20,7 +20,12 @@ import {
   withLedgerLock,
 } from "./ledger.mjs";
 import { checkNotRoadmapGate, findNotRoadmapPath } from "./gate.mjs";
-import { tick, DEFAULT_POLICY } from "./fsm.mjs";
+import {
+  tick,
+  DEFAULT_POLICY,
+  isLeaseLive,
+  validateConcurrencyLimit,
+} from "./fsm.mjs";
 
 export {
   foldLedger,
@@ -33,7 +38,12 @@ export {
   getOrCreateQueueKeypair,
 } from "./ledger.mjs";
 export { checkNotRoadmapGate } from "./gate.mjs";
-export { tick, DEFAULT_POLICY } from "./fsm.mjs";
+export {
+  tick,
+  DEFAULT_POLICY,
+  isLeaseLive,
+  validateConcurrencyLimit,
+} from "./fsm.mjs";
 export {
   LedgerWatcher,
   createLedgerWatcher,
@@ -94,7 +104,7 @@ export function getQueueStatus(mirqlDir, options = {}) {
     .map((j) => j.id);
 
   const activeLeases = Object.values(state.active_leases || {}).filter(
-    (l) => nowMs <= (l.expires_at_ms ?? (l.leased_at_ms + l.ttl_ms)),
+    (l) => isLeaseLive(l, nowMs),
   );
 
   return {
@@ -284,7 +294,7 @@ export function tickQueue(mirqlDir, options = {}) {
 
     // Fix B2: Reap expired leases
     const expiredLeases = Object.values(state.active_leases || {}).filter(
-      (l) => nowMs > (l.expires_at_ms ?? (l.leased_at_ms + l.ttl_ms)),
+      (l) => !isLeaseLive(l, nowMs),
     );
 
     if (expiredLeases.length > 0) {
@@ -397,7 +407,7 @@ export function leaseNextJob(mirqlDir, options = {}) {
     // Fix B1: Check whether a warrant is already in_progress with an active unexpired lease
     function isWarrantActiveLeased(wId) {
       return Object.values(state.active_leases || {}).some(
-        (l) => l.warrant_id === wId && nowMs <= (l.expires_at_ms ?? (l.leased_at_ms + l.ttl_ms)),
+        (l) => l.warrant_id === wId && isLeaseLive(l, nowMs),
       );
     }
 
@@ -417,21 +427,27 @@ export function leaseNextJob(mirqlDir, options = {}) {
         !isWarrantActiveLeased(j.warrant_id),
     );
 
-    // Law 14 & Milestone M1: Concurrency enforcement for BUILD mode when configured
-    const maxBuildConcurrency =
+    // Law 14 & Milestone M1: Concurrency enforcement for BUILD mode
+    const rawLimit =
       options.concurrency ??
       options.max_build_concurrency ??
       policy.max_build_concurrency ??
       policy.concurrency;
-    if (
-      maxBuildConcurrency !== undefined &&
-      maxBuildConcurrency !== null &&
-      state.mode === "BUILD"
-    ) {
+    const limitValidation = validateConcurrencyLimit(rawLimit);
+    if (!limitValidation.valid) {
+      return {
+        ok: false,
+        status: "rejected",
+        exit_code: EXIT_CODES.USAGE_ERROR,
+        error: limitValidation.error,
+      };
+    }
+
+    if (state.mode === "BUILD") {
       const activeUnexpiredLeases = Object.values(state.active_leases || {}).filter(
-        (l) => nowMs <= (l.expires_at_ms ?? (l.leased_at_ms + l.ttl_ms)),
+        (l) => isLeaseLive(l, nowMs),
       );
-      if (activeUnexpiredLeases.length >= maxBuildConcurrency) {
+      if (activeUnexpiredLeases.length >= limitValidation.limit) {
         if (availableQueuedJobs.length === 0 && availableOpenWarrants.length === 0) {
           return {
             ok: true,
@@ -442,7 +458,7 @@ export function leaseNextJob(mirqlDir, options = {}) {
         return {
           ok: true,
           status: "concurrency_limit",
-          message: `Concurrency limit (${maxBuildConcurrency}) reached for BUILD mode; lease already in progress`,
+          message: `Concurrency limit (${limitValidation.limit}) reached for BUILD mode; lease already in progress`,
           active_lease: activeUnexpiredLeases[0],
         };
       }
@@ -865,6 +881,10 @@ function parseArgv(argv) {
       flags.reason = argv[++i];
     } else if (arg.startsWith("--reason=")) {
       flags.reason = arg.slice("--reason=".length);
+    } else if (arg === "--concurrency" && i + 1 < argv.length) {
+      flags.concurrency = argv[++i];
+    } else if (arg.startsWith("--concurrency=")) {
+      flags.concurrency = arg.slice("--concurrency=".length);
     } else if (arg === "--help" || arg === "-h") {
       flags.help = true;
     } else if (!arg.startsWith("-")) {
@@ -899,6 +919,7 @@ export function main(argv = []) {
   const options = {
     keyFile: flags.keyFile,
     repoRoot: flags.repoRoot,
+    concurrency: flags.concurrency !== undefined ? Number(flags.concurrency) : undefined,
   };
 
   switch (subcommand) {
