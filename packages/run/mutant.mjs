@@ -2,13 +2,14 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { spawnSync } from "node:child_process";
+import { sanitizeAgentEnv } from "./agent.mjs";
 
 /**
  * Standard AST mutation operators supported by Scout (Mutants) per roles/scout-mutants.md:
  * - `invert-conditional`: swaps equality and relational conditionals (=== <-> !==, == <-> !=, < <-> >=, > <-> <=)
  * - `swap-arithmetic`: swaps binary arithmetic operators (+ <-> -, * <-> /)
  * - `mutate-boundary`: alters numerical bounds and booleans (true <-> false, 0 -> 1, >= -> >, <= -> <)
- * - `remove-call`: comments out or replaces void expression calls
+ * - `remove-call`: comments out or replaces standalone void expression calls
  */
 export const MUTATION_OPERATORS = Object.freeze([
   "invert-conditional",
@@ -18,13 +19,111 @@ export const MUTATION_OPERATORS = Object.freeze([
 ]);
 
 /**
+ * Masks string literals ("...", '...', `...`) and comments (//..., /*...*\/) with whitespace.
+ * Preserves character offsets so token search occurs only on genuine executable AST code.
+ *
+ * @param {string} line
+ * @returns {string}
+ */
+export function maskStringsAndComments(line) {
+  let masked = "";
+  let inDouble = false;
+  let inSingle = false;
+  let inBacktick = false;
+  let inComment = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    const prev = i > 0 ? line[i - 1] : "";
+    const isEscaped = prev === "\\";
+
+    if (inComment) {
+      masked += " ";
+      continue;
+    }
+
+    if (!inDouble && !inSingle && !inBacktick) {
+      if (char === "/" && line[i + 1] === "/") {
+        inComment = true;
+        masked += "  ";
+        i++;
+        continue;
+      }
+      if (char === '"') {
+        inDouble = true;
+        masked += " ";
+        continue;
+      }
+      if (char === "'") {
+        inSingle = true;
+        masked += " ";
+        continue;
+      }
+      if (char === "`") {
+        inBacktick = true;
+        masked += " ";
+        continue;
+      }
+      masked += char;
+    } else if (inDouble) {
+      masked += " ";
+      if (char === '"' && !isEscaped) inDouble = false;
+    } else if (inSingle) {
+      masked += " ";
+      if (char === "'" && !isEscaped) inSingle = false;
+    } else if (inBacktick) {
+      masked += " ";
+      if (char === "`" && !isEscaped) inBacktick = false;
+    }
+  }
+
+  return masked;
+}
+
+/**
+ * Extracts 1-based changed line numbers from unified git diff text.
+ *
+ * @param {string} diffText
+ * @returns {Set<number>}
+ */
+export function extractChangedLines(diffText) {
+  const lines = new Set();
+  const hunkRegex = /@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/g;
+  let match;
+  while ((match = hunkRegex.exec(diffText)) !== null) {
+    const start = parseInt(match[1], 10);
+    const count = match[2] !== undefined ? parseInt(match[2], 10) : 1;
+    for (let i = 0; i < count; i++) {
+      lines.add(start + i);
+    }
+  }
+  return lines;
+}
+
+/**
+ * Checks if JavaScript code is syntactically valid ECMAScript module code.
+ *
+ * @param {string} code
+ * @returns {boolean}
+ */
+export function isValidModuleSyntax(code) {
+  const res = spawnSync(process.execPath, ["--input-type=module", "--check"], {
+    input: code,
+    encoding: "utf8",
+    timeout: 5000,
+  });
+  return res.status === 0;
+}
+
+/**
  * Generates semantic mutation candidates for a given source string.
  * Supports incremental mutation restricted to `changedLines`.
+ * Skips string literals, comments, and verifies ECMAScript syntax validity.
  *
  * @param {string} sourceCode
  * @param {object} [options]
  * @param {string[]} [options.operators]
- * @param {number[] | Set<number>} [options.changedLines] - 1-based line numbers to mutate (incremental mode)
+ * @param {number[] | Set<number>} [options.changedLines] - 1-based line numbers to mutate
  * @returns {Array<{
  *   id: string,
  *   operator: string,
@@ -46,7 +145,7 @@ export function generateMutants(sourceCode, options = {}) {
   for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
     const lineNum = lineIdx + 1;
 
-    // Incremental filter: skip lines not in changedLines if provided
+    // Incremental filter: skip lines not in changedLines if specified
     if (changedSet && !changedSet.has(lineNum)) {
       continue;
     }
@@ -54,45 +153,47 @@ export function generateMutants(sourceCode, options = {}) {
     const line = lines[lineIdx];
     const trimmed = line.trim();
 
-    // Skip empty lines and comment lines
+    // Skip blank and pure comment lines
     if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*")) {
       continue;
     }
 
+    const masked = maskStringsAndComments(line);
+
     // 1. invert-conditional
     if (allowedOps.includes("invert-conditional")) {
-      if (line.includes("===")) {
-        mutants.push(createMutant(lines, lineIdx, lineNum, "invert-conditional", "===", "!==", "Invert strict equality to strict inequality"));
-      } else if (line.includes("!==")) {
-        mutants.push(createMutant(lines, lineIdx, lineNum, "invert-conditional", "!==", "===", "Invert strict inequality to strict equality"));
-      } else if (line.includes("<=")) {
-        mutants.push(createMutant(lines, lineIdx, lineNum, "invert-conditional", "<=", ">", "Invert less-than-or-equal to greater-than"));
-      } else if (line.includes(">=")) {
-        mutants.push(createMutant(lines, lineIdx, lineNum, "invert-conditional", ">=", "<", "Invert greater-than-or-equal to less-than"));
-      } else if (line.includes(" < ")) {
-        mutants.push(createMutant(lines, lineIdx, lineNum, "invert-conditional", " < ", " >= ", "Invert less-than to greater-than-or-equal"));
-      } else if (line.includes(" > ")) {
-        mutants.push(createMutant(lines, lineIdx, lineNum, "invert-conditional", " > ", " <= ", "Invert greater-than to less-than-or-equal"));
+      if (masked.includes("===")) {
+        addCandidate(mutants, lines, lineIdx, lineNum, "invert-conditional", "===", "!==", "Invert strict equality to strict inequality");
+      } else if (masked.includes("!==")) {
+        addCandidate(mutants, lines, lineIdx, lineNum, "invert-conditional", "!==", "===", "Invert strict inequality to strict equality");
+      } else if (masked.includes("<=")) {
+        addCandidate(mutants, lines, lineIdx, lineNum, "invert-conditional", "<=", ">", "Invert less-than-or-equal to greater-than");
+      } else if (masked.includes(">=")) {
+        addCandidate(mutants, lines, lineIdx, lineNum, "invert-conditional", ">=", "<", "Invert greater-than-or-equal to less-than");
+      } else if (masked.includes(" < ")) {
+        addCandidate(mutants, lines, lineIdx, lineNum, "invert-conditional", " < ", " >= ", "Invert less-than to greater-than-or-equal");
+      } else if (masked.includes(" > ")) {
+        addCandidate(mutants, lines, lineIdx, lineNum, "invert-conditional", " > ", " <= ", "Invert greater-than to less-than-or-equal");
       }
     }
 
     // 2. swap-arithmetic
     if (allowedOps.includes("swap-arithmetic")) {
-      if (line.includes(" + ")) {
-        mutants.push(createMutant(lines, lineIdx, lineNum, "swap-arithmetic", " + ", " - ", "Swap addition with subtraction"));
-      } else if (line.includes(" - ")) {
-        mutants.push(createMutant(lines, lineIdx, lineNum, "swap-arithmetic", " - ", " + ", "Swap subtraction with addition"));
-      } else if (line.includes(" * ")) {
-        mutants.push(createMutant(lines, lineIdx, lineNum, "swap-arithmetic", " * ", " / ", "Swap multiplication with division"));
+      if (masked.includes(" + ")) {
+        addCandidate(mutants, lines, lineIdx, lineNum, "swap-arithmetic", " + ", " - ", "Swap addition with subtraction");
+      } else if (masked.includes(" - ")) {
+        addCandidate(mutants, lines, lineIdx, lineNum, "swap-arithmetic", " - ", " + ", "Swap subtraction with addition");
+      } else if (masked.includes(" * ")) {
+        addCandidate(mutants, lines, lineIdx, lineNum, "swap-arithmetic", " * ", " / ", "Swap multiplication with division");
       }
     }
 
     // 3. mutate-boundary
     if (allowedOps.includes("mutate-boundary")) {
-      if (line.includes("true")) {
-        mutants.push(createMutant(lines, lineIdx, lineNum, "mutate-boundary", "true", "false", "Mutate boolean true to false"));
-      } else if (line.includes("false")) {
-        mutants.push(createMutant(lines, lineIdx, lineNum, "mutate-boundary", "false", "true", "Mutate boolean false to true"));
+      if (/\btrue\b/.test(masked)) {
+        addCandidate(mutants, lines, lineIdx, lineNum, "mutate-boundary", "true", "false", "Mutate boolean true to false");
+      } else if (/\bfalse\b/.test(masked)) {
+        addCandidate(mutants, lines, lineIdx, lineNum, "mutate-boundary", "false", "true", "Mutate boolean false to true");
       }
     }
 
@@ -100,21 +201,23 @@ export function generateMutants(sourceCode, options = {}) {
     if (allowedOps.includes("remove-call")) {
       const trimmedClean = trimmed.split("//")[0].trim();
       const isReserved = /^(?:return|throw|import|export|const|let|var|if|while|for|yield|await)\b/.test(trimmedClean);
+      const isStandaloneCall = /^\s*(?:await\s+)?[a-zA-Z_$][a-zA-Z0-9_$.]*\s*\([^;]*\)\s*;\s*$/.test(trimmedClean);
+
       if (
-        trimmedClean.endsWith(";") &&
+        isStandaloneCall &&
         !isReserved &&
-        /\b[a-zA-Z_$][a-zA-Z0-9_$.]*\s*\(.*\)\s*;?$/.test(trimmedClean)
+        !trimmedClean.includes("=") &&
+        !trimmedClean.includes("*/")
       ) {
-        mutants.push(
-          createMutant(
-            lines,
-            lineIdx,
-            lineNum,
-            "remove-call",
-            line,
-            line.replace(trimmedClean, `/* ${trimmedClean} */`),
-            "Remove call statement",
-          ),
+        addCandidate(
+          mutants,
+          lines,
+          lineIdx,
+          lineNum,
+          "remove-call",
+          trimmedClean,
+          `/* ${trimmedClean} */`,
+          "Remove standalone call statement",
         );
       }
     }
@@ -123,23 +226,37 @@ export function generateMutants(sourceCode, options = {}) {
   return mutants;
 }
 
-/** Helper to construct mutant record */
-function createMutant(lines, lineIdx, lineNum, operator, original, replacement, description) {
-  const mutatedLines = [...lines];
-  if (original === lines[lineIdx]) {
-    mutatedLines[lineIdx] = replacement;
+/** Helper to construct and syntax-validate mutant candidate */
+function addCandidate(mutants, lines, lineIdx, lineNum, operator, original, replacement, description) {
+  const line = lines[lineIdx];
+  let mutatedLine = "";
+
+  if (operator === "remove-call") {
+    mutatedLine = line.replace(original, replacement);
+  } else if (operator === "mutate-boundary" && (original === "true" || original === "false")) {
+    mutatedLine = line.replace(new RegExp(`\\b${original}\\b`), replacement);
   } else {
-    mutatedLines[lineIdx] = mutatedLines[lineIdx].replace(original, replacement);
+    mutatedLine = line.replace(original, replacement);
   }
-  return {
+
+  const mutatedLines = [...lines];
+  mutatedLines[lineIdx] = mutatedLine;
+  const mutatedCode = mutatedLines.join("\n");
+
+  // Validate syntax: discard if the mutant produces invalid syntax
+  if (!isValidModuleSyntax(mutatedCode)) {
+    return;
+  }
+
+  mutants.push({
     id: `mutant-${operator}-${lineNum}-${Math.abs(hashString(original + lineIdx))}`,
     operator,
     line: lineNum,
     original,
     mutated: replacement,
-    mutatedCode: mutatedLines.join("\n"),
+    mutatedCode,
     description: `${description} at line ${lineNum}`,
-  };
+  });
 }
 
 /** Quick safe integer hash for mutant ID generation */
@@ -153,13 +270,14 @@ function hashString(str) {
 
 /**
  * Runs mutation testing against a source file and a test suite.
- * Enforces pre-flight baseline test verification and the M4 invariant: >= 8000 bp (80%) kill rate.
+ * Enforces pre-flight baseline test verification, crash-safe restoration, and the M4 invariant:
+ * kill rate must achieve at least 8000 bp (80%) floor.
  *
  * @param {object} options
  * @param {string} options.sourcePath - Path to source file being evaluated
  * @param {string} [options.testPath] - Path to test file covering the source
- * @param {number} [options.maxMutants=20] - Maximum mutants to evaluate
- * @param {number} [options.killThresholdBp=8000] - Required kill rate (default 8000 bp = 80%)
+ * @param {number} [options.maxMutants=20] - Maximum mutants to evaluate (> 0)
+ * @param {number} [options.killThresholdBp=8000] - Required kill rate (inviolable floor 8000 bp)
  * @param {Function} [options.testRunner] - Custom test runner for sandboxing
  * @param {number[] | Set<number>} [options.changedLines] - Line filter for incremental mutation
  * @returns {{
@@ -179,8 +297,6 @@ export function runMutationTesting(options = {}) {
   const {
     sourcePath,
     testPath,
-    maxMutants = 20,
-    killThresholdBp = 8000,
     testRunner,
   } = options;
 
@@ -192,34 +308,56 @@ export function runMutationTesting(options = {}) {
     throw new Error(`testPath not found or missing: ${testPath}`);
   }
 
-  const originalContent = readFileSync(sourcePath, "utf8");
+  // Validate and enforce inviolable 8000 bp threshold floor
+  const rawThreshold = Number.isSafeInteger(options.killThresholdBp) ? options.killThresholdBp : 8000;
+  const killThresholdBp = Math.max(8000, rawThreshold);
 
-  // Pre-flight baseline verification: tests must pass on unmutated code
-  let baselinePassed = false;
-  if (typeof testRunner === "function") {
-    baselinePassed = Boolean(testRunner({ id: "baseline", original: "", mutated: "", isBaseline: true }));
-  } else {
-    const baselineResult = spawnSync(process.execPath, ["--test", testPath], {
-      encoding: "utf8",
-      timeout: 15000,
-      env: { ...process.env, NODE_ENV: "test" },
-    });
-    baselinePassed = baselineResult.status === 0;
+  // Validate maxMutants
+  const maxMutants = Number.isSafeInteger(options.maxMutants) && options.maxMutants > 0
+    ? options.maxMutants
+    : 20;
+
+  const backupPath = `${sourcePath}.mutant-bak`;
+
+  // Fail-safe crash recovery: if previous run died ungracefully, restore from backup immediately
+  if (existsSync(backupPath)) {
+    try {
+      writeFileSync(sourcePath, readFileSync(backupPath, "utf8"), "utf8");
+      unlinkSync(backupPath);
+    } catch {}
   }
 
-  if (!baselinePassed) {
-    return {
-      ok: false,
-      error: "BASELINE_TEST_FAILED",
-      source_path: sourcePath,
-      kill_rate_bp: 0,
-      kill_threshold_bp: killThresholdBp,
-      mutants_total: 0,
-      mutants_killed: 0,
-      mutants_survived: 0,
-      survived_mutants: [],
-      summary: "Baseline test failed on unmutated source; mutation testing aborted",
-    };
+  const originalContent = readFileSync(sourcePath, "utf8");
+
+  // Multi-run pre-flight baseline stability verification
+  const { env: cleanEnv } = sanitizeAgentEnv(process.env);
+  for (let b = 0; b < 2; b++) {
+    let baselinePassed = false;
+    if (typeof testRunner === "function") {
+      baselinePassed = Boolean(testRunner({ id: "baseline", original: "", mutated: "", isBaseline: true }));
+    } else {
+      const baselineResult = spawnSync(process.execPath, ["--test", testPath], {
+        encoding: "utf8",
+        timeout: 15000,
+        env: { ...cleanEnv, NODE_ENV: "test" },
+      });
+      baselinePassed = baselineResult.status === 0;
+    }
+
+    if (!baselinePassed) {
+      return {
+        ok: false,
+        error: "BASELINE_TEST_FAILED",
+        source_path: sourcePath,
+        kill_rate_bp: 0,
+        kill_threshold_bp: killThresholdBp,
+        mutants_total: 0,
+        mutants_killed: 0,
+        mutants_survived: 0,
+        survived_mutants: [],
+        summary: "Baseline test failed or was non-deterministic on unmutated source; mutation testing aborted",
+      };
+    }
   }
 
   const allMutants = generateMutants(originalContent, options);
@@ -227,15 +365,16 @@ export function runMutationTesting(options = {}) {
 
   if (mutantsToTest.length === 0) {
     return {
-      ok: true,
+      ok: false,
+      error: "NO_MUTATION_POINTS",
       source_path: sourcePath,
-      kill_rate_bp: 10000,
+      kill_rate_bp: 0,
       kill_threshold_bp: killThresholdBp,
       mutants_total: 0,
       mutants_killed: 0,
       mutants_survived: 0,
       survived_mutants: [],
-      summary: "No mutation points found in target source",
+      summary: "No valid AST mutation points found in target source",
     };
   }
 
@@ -243,8 +382,19 @@ export function runMutationTesting(options = {}) {
   const survivedMutants = [];
 
   // Write safe backup file for crash recovery
-  const backupPath = `${sourcePath}.mutant-bak`;
   writeFileSync(backupPath, originalContent, "utf8");
+
+  // Signal traps for abort safety
+  const restoreOnAbort = () => {
+    try {
+      if (existsSync(backupPath)) {
+        writeFileSync(sourcePath, readFileSync(backupPath, "utf8"), "utf8");
+        unlinkSync(backupPath);
+      }
+    } catch {}
+  };
+  process.once("SIGINT", restoreOnAbort);
+  process.once("SIGTERM", restoreOnAbort);
 
   try {
     for (const mutant of mutantsToTest) {
@@ -258,7 +408,7 @@ export function runMutationTesting(options = {}) {
         const result = spawnSync(process.execPath, ["--test", testPath], {
           encoding: "utf8",
           timeout: 15000,
-          env: { ...process.env, NODE_ENV: "test" },
+          env: { ...cleanEnv, NODE_ENV: "test" },
         });
         testPassed = result.status === 0;
       }
@@ -280,6 +430,8 @@ export function runMutationTesting(options = {}) {
       }
     }
   } finally {
+    process.removeListener("SIGINT", restoreOnAbort);
+    process.removeListener("SIGTERM", restoreOnAbort);
     // ALWAYS restore original source file and clean backup
     writeFileSync(sourcePath, originalContent, "utf8");
     if (existsSync(backupPath)) {
@@ -330,6 +482,7 @@ export function detectFlakes(testPath, options = {}) {
   const history = [];
   let passedCount = 0;
   let failedCount = 0;
+  const { env: cleanEnv } = sanitizeAgentEnv(process.env);
 
   for (let i = 0; i < iterations; i++) {
     let passed = false;
@@ -339,6 +492,7 @@ export function detectFlakes(testPath, options = {}) {
       const res = spawnSync(process.execPath, ["--test", testPath], {
         encoding: "utf8",
         timeout: 15000,
+        env: { ...cleanEnv, NODE_ENV: "test" },
       });
       passed = res.status === 0;
     }
@@ -362,6 +516,7 @@ export function detectFlakes(testPath, options = {}) {
 
 /**
  * Quarantines a flaky test file into a quarantine directory away from the critical path.
+ * Enforces path confinement and prevents accidental file overwrite collisions.
  *
  * @param {string} testFilePath
  * @param {string} quarantineDir
@@ -388,7 +543,19 @@ export function quarantineTest(testFilePath, quarantineDir, options = {}) {
   }
 
   const fileName = basename(fullTestPath);
-  const quarantinedPath = join(targetDir, fileName);
+  let quarantinedPath = join(targetDir, fileName);
+
+  // Avoid overwrite collision
+  if (existsSync(quarantinedPath)) {
+    const ext = fileName.endsWith(".test.mjs") ? ".test.mjs" : ".mjs";
+    const nameWithoutExt = fileName.slice(0, -ext.length);
+    quarantinedPath = join(targetDir, `${nameWithoutExt}-${Date.now()}-${Math.floor(Math.random() * 1000)}${ext}`);
+  }
+
+  // Enforce quarantine path confinement
+  if (!quarantinedPath.startsWith(targetDir)) {
+    throw new Error("Quarantine path escape attempt detected");
+  }
 
   renameSync(fullTestPath, quarantinedPath);
 

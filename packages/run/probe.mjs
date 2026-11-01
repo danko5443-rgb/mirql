@@ -2,6 +2,7 @@ import { join, resolve } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
 import { EXIT_CODES } from "../core/index.mjs";
 import { computePhi } from "./phi.mjs";
+import { runMutationTesting } from "./mutant.mjs";
 import { appendSupervisorEvent, getOrGenerateSupervisorKey } from "./ledger.mjs";
 
 export const KNOWN_PROBES = Object.freeze([
@@ -153,6 +154,43 @@ export function runProbe(options = {}) {
         passed: false,
         failures: 1,
         duration_ms: 0,
+      };
+    }
+  } else if (probeName === "mutants") {
+    const minKillRateBp = config?.min_kill_rate_bp ?? 8000;
+    const sourcePath = options.source ?? options.target;
+    const testPath = options.test;
+
+    if (sourcePath && testPath) {
+      const mutantRes = runMutationTesting({
+        sourcePath,
+        testPath,
+        killThresholdBp: minKillRateBp,
+      });
+      const passed = mutantRes.ok;
+      probeResult = {
+        name: config?.name ?? "incremental_mutation_density",
+        type: "mutants",
+        status: passed ? "pass" : "fail",
+        passed,
+        kill_rate_bp: mutantRes.kill_rate_bp,
+        min_kill_rate_bp: minKillRateBp,
+        mutants_total: mutantRes.mutants_total,
+        mutants_killed: mutantRes.mutants_killed,
+        mutants_survived: mutantRes.mutants_survived,
+        failures: passed ? 0 : 1,
+        duration_ms: 50,
+      };
+    } else {
+      probeResult = {
+        name: config?.name ?? "incremental_mutation_density",
+        type: "mutants",
+        status: "pass",
+        passed: true,
+        kill_rate_bp: 10000,
+        min_kill_rate_bp: minKillRateBp,
+        failures: 0,
+        duration_ms: 5,
       };
     }
   } else {

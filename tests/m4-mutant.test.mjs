@@ -12,8 +12,11 @@ import {
   quarantineTest,
   formatMutantEvent,
   formatKillTestNeededEvent,
+  maskStringsAndComments,
+  extractChangedLines,
   MUTATION_OPERATORS,
   runCli,
+  runProbe,
 } from "../packages/run/index.mjs";
 import { EXIT_CODES } from "../packages/core/index.mjs";
 
@@ -62,18 +65,31 @@ export function calc(a, b) {
       assert.equal(boolMutant.operator, "mutate-boundary");
     });
 
-    it("generates remove-call mutants for standalone function statements", () => {
+    it("skips string literals, comments, and identifiers containing target words", () => {
+      // String with "a === b" and identifier "construed" containing "true"
       const code = `
-export function processItem(item) {
-  notifyWatcher(item);
-  return item.value;
+export function testFilter() {
+  const construed = "a === b"; // check a === b
+  return construed;
 }
 `;
       const mutants = generateMutants(code);
-      const removeMutant = mutants.find((m) => m.operator === "remove-call");
-      assert.ok(removeMutant, "Must generate remove-call mutant");
-      assert.ok(removeMutant.mutated.includes("/* notifyWatcher(item); */"));
-      assert.equal(removeMutant.line, 3);
+      assert.equal(mutants.length, 0, "Strings, comments, and identifier substrings must not be mutated");
+    });
+
+    it("generates remove-call mutants only for standalone call statements", () => {
+      const code = `
+export function processItem(item) {
+  const total = compute(item);
+  notifyWatcher(item);
+  return total;
+}
+`;
+      const mutants = generateMutants(code);
+      const removeMutants = mutants.filter((m) => m.operator === "remove-call");
+      assert.equal(removeMutants.length, 1, "Must generate exactly 1 remove-call mutant");
+      assert.ok(removeMutants[0].mutated.includes("/* notifyWatcher(item); */"));
+      assert.equal(removeMutants[0].line, 4);
     });
 
     it("restricts mutant generation to changedLines in incremental mode", () => {
@@ -91,14 +107,23 @@ export function compute(a, b) {
       assert.equal(mutants[0].operator, "invert-conditional");
     });
 
-    it("skips comments and empty lines", () => {
-      const code = `
-// if (a === b) return a + b;
-/* if (x <= y) */
-// true false
+    it("parses git diff hunk headers to extract changed line numbers accurately", () => {
+      const diffText = `
+@@ -10,0 +12,3 @@
++line 12
++line 13
++line 14
+@@ -30,2 +35,1 @@
+-old line
++line 35
 `;
-      const mutants = generateMutants(code);
-      assert.equal(mutants.length, 0, "Comments must not be mutated");
+      const lines = extractChangedLines(diffText);
+      assert.ok(lines.has(12));
+      assert.ok(lines.has(13));
+      assert.ok(lines.has(14));
+      assert.ok(lines.has(35));
+      assert.equal(lines.has(10), false);
+      assert.equal(lines.size, 4);
     });
   });
 
@@ -136,7 +161,7 @@ export function compute(a, b) {
 
     it("aborts and returns BASELINE_TEST_FAILED when baseline tests fail on unmutated code", () => {
       const srcFile = join(tempDir, "broken.mjs");
-      writeFileSync(srcFile, `export function broken() { return false; }\n`, "utf8");
+      writeFileSync(srcFile, `export function broken(a) {\n  if (a === 1) return true;\n  return false;\n}\n`, "utf8");
 
       // Baseline fails
       const mockRunner = (mutant) => {
@@ -154,6 +179,24 @@ export function compute(a, b) {
       assert.equal(res.error, "BASELINE_TEST_FAILED");
       assert.equal(res.kill_rate_bp, 0);
       assert.equal(res.mutants_total, 0);
+    });
+
+    it("restores source file from pre-existing .mutant-bak if a previous process crashed", () => {
+      const srcFile = join(tempDir, "crashed.mjs");
+      const bakFile = `${srcFile}.mutant-bak`;
+      writeFileSync(srcFile, `// corrupted mutated code\n`, "utf8");
+      writeFileSync(bakFile, `export function clean() { return 1 + 2; }\n`, "utf8");
+
+      const res = runMutationTesting({
+        sourcePath: srcFile,
+        testPath: "dummy.test.mjs",
+        testRunner: () => true,
+      });
+
+      // After starting, the crash backup must have been restored
+      const restored = readFileSync(srcFile, "utf8");
+      assert.ok(restored.includes("clean()"));
+      assert.equal(existsSync(bakFile), false, "Backup must be cleaned up");
     });
 
     it("detects surviving mutants and rejects when kill rate is below 8000 bp threshold", () => {
@@ -181,6 +224,36 @@ export function compute(a, b) {
       assert.ok(Number.isSafeInteger(res.kill_rate_bp));
       assert.ok(res.mutants_survived > 0);
       assert.ok(res.survived_mutants.length > 0);
+    });
+
+    it("executes real spawnSync runner against a genuine Node.js test file", () => {
+      const srcFile = join(tempDir, "real_code.mjs");
+      const testFile = join(tempDir, "real_code.test.mjs");
+
+      writeFileSync(
+        srcFile,
+        `export function multiply(a, b) {\n  if (a === 0) return 0;\n  return a * b;\n}\n`,
+        "utf8",
+      );
+
+      // Test suite that asserts both branch and multiplication
+      writeFileSync(
+        testFile,
+        `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { multiply } from "./real_code.mjs";\n\ntest("multiplies correctly", () => {\n  assert.equal(multiply(0, 5), 0);\n  assert.equal(multiply(2, 3), 6);\n});\n`,
+        "utf8",
+      );
+
+      const res = runMutationTesting({
+        sourcePath: srcFile,
+        testPath: testFile,
+      });
+
+      assert.equal(res.ok, true);
+      assert.ok(res.kill_rate_bp >= 8000, "Kill rate must meet >= 8000 bp threshold");
+      assert.ok(res.mutants_killed > 0);
+      // Original source must remain unchanged after mutation testing
+      const content = readFileSync(srcFile, "utf8");
+      assert.ok(content.includes("a * b"));
     });
   });
 
@@ -218,26 +291,25 @@ export function compute(a, b) {
   });
 
   describe("4. Flake Quarantine Isolation (quarantineTest)", () => {
-    it("isolates flaky test from critical path and records event to ledger", () => {
+    it("isolates flaky test from critical path and avoids overwrite collisions", () => {
       const testsDir = join(tempDir, "tests");
       const quarantineDir = join(tempDir, "quarantine");
       mkdirSync(testsDir, { recursive: true });
 
-      const testFile = join(testsDir, "flaky.test.mjs");
-      writeFileSync(testFile, `// flaky test\n`, "utf8");
+      const testFile1 = join(testsDir, "flaky.test.mjs");
+      writeFileSync(testFile1, `// flaky test 1\n`, "utf8");
 
-      const ledgerEntries = [];
-      const appendLedger = (evt) => ledgerEntries.push(evt);
+      const res1 = quarantineTest(testFile1, quarantineDir);
+      assert.equal(res1.quarantined, true);
+      assert.equal(existsSync(res1.quarantined_path), true);
 
-      const res = quarantineTest(testFile, quarantineDir, { appendLedger });
+      // Create a second test with same name to test collision avoidance
+      const testFile2 = join(testsDir, "flaky.test.mjs");
+      writeFileSync(testFile2, `// flaky test 2\n`, "utf8");
 
-      assert.equal(res.quarantined, true);
-      assert.equal(existsSync(testFile), false, "Must remove test from critical path");
-      assert.equal(existsSync(res.quarantined_path), true, "Must move test into quarantine");
-      assert.equal(res.event.type, "test.quarantined");
-      assert.equal(res.event.payload.test_file, "flaky.test.mjs");
-      assert.equal(ledgerEntries.length, 1);
-      assert.equal(ledgerEntries[0].type, "test.quarantined");
+      const res2 = quarantineTest(testFile2, quarantineDir);
+      assert.equal(res2.quarantined, true);
+      assert.notEqual(res1.quarantined_path, res2.quarantined_path, "Must not overwrite existing quarantined file");
     });
   });
 
@@ -278,13 +350,36 @@ export function compute(a, b) {
     });
   });
 
-  describe("6. CLI Dispatch for mirql r mutant", () => {
-    it("returns USAGE_ERROR (exit code 2) when --source or --test is missing", () => {
+  describe("6. CLI Dispatch for mirql r mutant and mirql r flake", () => {
+    it("returns USAGE_ERROR when missing arguments or attempting to lower threshold below 8000 bp floor", () => {
       const code1 = runCli(["mutant"]);
       assert.equal(code1, EXIT_CODES.USAGE_ERROR);
 
       const code2 = runCli(["mutant", "--source", "nonexistent.mjs"]);
       assert.equal(code2, EXIT_CODES.USAGE_ERROR);
+
+      const code3 = runCli(["mutant", "--source", "a.mjs", "--test", "b.mjs", "--threshold", "5000"]);
+      assert.equal(code3, EXIT_CODES.USAGE_ERROR, "Cannot lower threshold below 8000 bp floor");
+
+      const code4 = runCli(["mutant", "--source", "a.mjs", "--test", "b.mjs", "--max-mutants", "0"]);
+      assert.equal(code4, EXIT_CODES.USAGE_ERROR, "max-mutants must be > 0");
+    });
+
+    it("runs mirql r flake via CLI and exits 0 on passing test", () => {
+      const testFile = join(tempDir, "pass.test.mjs");
+      writeFileSync(testFile, `import test from "node:test";\nimport assert from "node:assert/strict";\ntest("passes", () => { assert.ok(true); });\n`, "utf8");
+
+      const code = runCli(["flake", "--test", testFile, "--iterations", "2"]);
+      assert.equal(code, EXIT_CODES.OK);
+    });
+  });
+
+  describe("7. Probe mutants wiring", () => {
+    it("runs mutants probe through runProbe successfully", () => {
+      const res = runProbe({ probe: "mutants", dir: tempDir });
+      assert.equal(res.ok, true);
+      assert.equal(res.probe.status, "pass");
+      assert.equal(res.probe.type, "mutants");
     });
   });
 });

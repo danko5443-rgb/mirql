@@ -386,6 +386,23 @@ function verifyGitRepository(options) {
       };
     }
 
+    // 2b. Flake Sentinel: repeat head test to guarantee determinism (M4 Invariant)
+    const flakeRep = runCmd(fullTestCmd, worktreeDir);
+    if (!Number.isInteger(flakeRep.exitCode) || flakeRep.exitCode !== 0) {
+      return {
+        verified: false,
+        verdict: "reject",
+        rule: "NON_DETERMINISTIC_TEST",
+        violation: "NON_DETERMINISTIC_TEST",
+        detail: "Flake sentinel: test passed initially on head but failed on repetition (non-deterministic outcome).",
+        checks: {
+          red_on_base: { passed: true, exitCode: 1 },
+          green_on_head: { passed: true, exitCode: 0 },
+          flake_sentinel: { passed: false, exitCode: flakeRep.exitCode },
+        },
+      };
+    }
+
     // 3. Re-Red: revert every non-test change (base code + head tests). A
     // full base checkout handles added AND deleted non-test files correctly.
     gitWt(["checkout", baseSha, "--force"]);
