@@ -2,7 +2,7 @@
 // Enforces Law 2 (unblockable kill authority) and Law 14 (quiescence / fail-safe convergence).
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
 /** Default probation window: 30 minutes in milliseconds (1,800,000 ms). */
@@ -54,56 +54,102 @@ export function checkProbationStatus({ startTimeMs, nowMs = Date.now(), timeoutM
  * @param {string} repoDir
  * @returns {{ ok: boolean, paths: string[], error?: string }}
  */
-export function listDestructiblePaths(repoDir) {
-  const git = (args) => {
+export function listDestructiblePaths(repoDir, targetSha = null) {
+  const gitZ = (args) => {
     const res = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", timeout: 15_000 });
     if (res.status !== 0) {
       return { ok: false, error: (res.stderr || res.stdout || `git ${args[0]} exit ${res.status}`).trim() };
     }
-    return { ok: true, out: String(res.stdout || "") };
+    const raw = String(res.stdout || "");
+    const items = raw.split("\0").filter(Boolean);
+    return { ok: true, items };
   };
 
-  // Tracked files whose worktree copy differs from the index (includes deletions).
-  const modified = git(["ls-files", "-m"]);
-  if (!modified.ok) return { ok: false, paths: [], error: modified.error };
-  // Untracked, non-ignored files/dirs (exactly what `git clean -fd` removes).
-  const untracked = git(["ls-files", "--others", "--exclude-standard"]);
+  let tracked;
+  if (typeof targetSha === "string" && targetSha.trim().length > 0) {
+    tracked = gitZ(["diff", "--name-only", "-z", targetSha.trim()]);
+  } else {
+    tracked = gitZ(["diff", "--name-only", "-z", "HEAD"]);
+    if (!tracked.ok) {
+      const mod = gitZ(["ls-files", "-m", "-z"]);
+      if (!mod.ok) return { ok: false, paths: [], error: mod.error };
+      const cached = gitZ(["diff", "--cached", "--name-only", "-z"]);
+      if (!cached.ok) return { ok: false, paths: [], error: cached.error };
+      tracked = { ok: true, items: [...mod.items, ...cached.items] };
+    }
+  }
+
+  if (!tracked.ok) return { ok: false, paths: [], error: tracked.error };
+
+  const untracked = gitZ(["ls-files", "--others", "-z", "--exclude-standard"]);
   if (!untracked.ok) return { ok: false, paths: [], error: untracked.error };
 
-  const paths = [
-    ...new Set([
-      ...modified.out.split(/\r?\n/).filter(Boolean),
-      ...untracked.out.split(/\r?\n/).filter(Boolean),
-    ]),
-  ].sort();
+  const paths = [...new Set([...tracked.items, ...untracked.items])].sort();
   return { ok: true, paths };
 }
 
 /**
  * Copies the given worktree-relative paths into a quarantine directory,
  * preserving relative structure, so destructive rollback stays recoverable.
+ * Uses lstat to handle symlinks and skip directories safely without throwing EPERM.
+ * Also writes binary diff snapshot against targetSha if provided.
  *
  * @param {string} repoDir
  * @param {string[]} paths
  * @param {string} quarantineDir
- * @returns {{ ok: boolean, dir: string, copied: string[], skipped: string[], error?: string }}
+ * @param {string} [targetSha]
+ * @returns {{ ok: boolean, dir: string, copied: string[], skipped: Array<{ path: string, reason: string }>, error?: string }}
  */
-function quarantinePaths(repoDir, paths, quarantineDir) {
+function quarantinePaths(repoDir, paths, quarantineDir, targetSha = null) {
   const copied = [];
   const skipped = [];
   try {
+    mkdirSync(quarantineDir, { recursive: true });
+
+    if (typeof targetSha === "string" && targetSha.trim().length > 0) {
+      const diffRes = spawnSync("git", ["diff", "--binary", targetSha.trim()], {
+        cwd: repoDir,
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      if (diffRes.status === 0 && diffRes.stdout) {
+        writeFileSync(join(quarantineDir, "staged-worktree.diff"), diffRes.stdout, "utf8");
+      }
+    }
+
     for (const relPath of paths) {
       const src = join(repoDir, relPath);
-      if (!existsSync(src)) {
-        // Already absent from the worktree (e.g. tracked file deleted by hand):
-        // nothing to preserve — reset --hard restores it from the target commit.
-        skipped.push(relPath);
-        continue;
+      let stat;
+      try {
+        stat = lstatSync(src);
+      } catch (err) {
+        if (err && (err.code === "ENOENT" || err.code === "ENOTDIR")) {
+          skipped.push({ path: relPath, reason: "already_absent", toString() { return this.path; } });
+          continue;
+        }
+        throw err;
       }
+
       const dest = join(quarantineDir, relPath);
       mkdirSync(dirname(dest), { recursive: true });
-      copyFileSync(src, dest);
-      copied.push(relPath);
+
+      if (stat.isSymbolicLink()) {
+        const linkTarget = readlinkSync(src);
+        try {
+          symlinkSync(linkTarget, dest);
+          copied.push(relPath);
+        } catch {
+          writeFileSync(dest, linkTarget, "utf8");
+          copied.push(relPath);
+        }
+      } else if (stat.isDirectory()) {
+        skipped.push({ path: relPath, reason: "directory_skipped", toString() { return this.path; } });
+      } else if (stat.isFile()) {
+        copyFileSync(src, dest);
+        copied.push(relPath);
+      } else {
+        skipped.push({ path: relPath, reason: "unsupported_type", toString() { return this.path; } });
+      }
     }
     return { ok: true, dir: quarantineDir, copied, skipped };
   } catch (err) {
@@ -143,8 +189,7 @@ export function executeRollback(repoDir, targetSha, { quarantineRoot, allowDataL
   }
 
   try {
-    // 1. Measure what the destructive ops would destroy (fail-closed).
-    const destructible = listDestructiblePaths(repoDir);
+    const destructible = listDestructiblePaths(repoDir, targetSha);
     if (!destructible.ok) {
       return {
         ok: false,
@@ -154,25 +199,23 @@ export function executeRollback(repoDir, targetSha, { quarantineRoot, allowDataL
       };
     }
 
-    // 2. Quarantine those paths before touching anything.
     let quarantine = null;
+    const root = quarantineRoot ?? join(repoDir, ".mirql", "quarantine");
     if (destructible.paths.length > 0) {
-      const root = quarantineRoot ?? join(repoDir, ".mirql", "quarantine");
       const quarantineDir = join(root, `rollback-${Date.now()}-${process.pid}`);
-      quarantine = quarantinePaths(repoDir, destructible.paths, quarantineDir);
+      quarantine = quarantinePaths(repoDir, destructible.paths, quarantineDir, targetSha);
       if (!quarantine.ok && !allowDataLoss) {
         return {
           ok: false,
           targetSha,
           output: "",
           error: `Quarantine failed, refusing destructive rollback: ${quarantine.error} ` +
-            `(re-run with allowDataLoss to override; worktree left untouched)`,
+            "(re-run with allowDataLoss to override; worktree left untouched)",
           quarantine,
         };
       }
     }
 
-    // 3. Restore the authoritative state.
     const resetRes = spawnSync("git", ["reset", "--hard", targetSha], {
       cwd: repoDir,
       encoding: "utf8",
@@ -188,26 +231,34 @@ export function executeRollback(repoDir, targetSha, { quarantineRoot, allowDataL
       };
     }
 
-    // Clean untracked artifacts created during failed run. The quarantine tree
-    // itself is excluded so it always survives the clean (it is normally
-    // covered by .gitignore's `.mirql/`; the explicit exclusion keeps it safe
-    // in repositories whose .gitignore differs).
     const cleanArgs = ["clean", "-fd"];
-    if (quarantine) {
-      const rel = relative(repoDir, quarantine.dir).replaceAll("\\", "/");
-      if (rel && !rel.startsWith("..")) {
-        cleanArgs.push("-e", rel);
-      }
+    const relRoot = relative(repoDir, root).replaceAll("\\", "/");
+    if (relRoot && !relRoot.startsWith("..")) {
+      cleanArgs.push("-e", relRoot);
     }
     const cleanRes = spawnSync("git", cleanArgs, {
       cwd: repoDir,
       encoding: "utf8",
       timeout: 15_000,
     });
+    if (cleanRes.status !== 0) {
+      return {
+        ok: false,
+        targetSha,
+        output: cleanRes.stdout || "",
+        error: cleanRes.stderr?.trim() || `git clean -fd failed with exit code ${cleanRes.status}`,
+        quarantine,
+      };
+    }
 
-    const quarantineNote = quarantine
-      ? ` Quarantined ${quarantine.copied.length} file(s) to ${quarantine.dir}.`
-      : "";
+    let quarantineNote = "";
+    if (quarantine) {
+      if (quarantine.ok) {
+        quarantineNote = ` Quarantined ${quarantine.copied.length} file(s) to ${quarantine.dir}.`;
+      } else {
+        quarantineNote = ` Quarantine incomplete (${quarantine.error}), data loss allowed by operator.`;
+      }
+    }
     return {
       ok: true,
       targetSha,

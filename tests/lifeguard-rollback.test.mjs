@@ -164,6 +164,121 @@ describe("lifeguard rollback: quarantine-first data safety (issue #11)", () => {
     }
   });
 
+  it("quarantines non-ASCII and special filenames without C-quote loss (B1)", () => {
+    const { repo, baseSha } = makeRepo(false);
+    try {
+      const nonAsciiName = "caf\u00e9-uni-\u7b46\u8a18.txt";
+      writeFileSync(join(repo, nonAsciiName), "precious unicode notes\n", "utf8");
+
+      const destructible = listDestructiblePaths(repo, baseSha);
+      assert.equal(destructible.ok, true, destructible.error);
+      assert.ok(destructible.paths.includes(nonAsciiName), `Expected ${nonAsciiName} in destructible paths`);
+
+      const res = executeRollback(repo, baseSha);
+      assert.equal(res.ok, true, res.error);
+      assert.equal(existsSync(join(repo, nonAsciiName)), false);
+
+      const q = res.quarantine;
+      assert.ok(q, "quarantine metadata must exist");
+      assert.ok(q.copied.includes(nonAsciiName), "non-ASCII file must be copied to quarantine");
+      assert.equal(readFileSync(join(q.dir, nonAsciiName), "utf8"), "precious unicode notes\n");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("quarantines staged modifications and staged new files (B2)", () => {
+    const { repo, baseSha } = makeRepo(false);
+    try {
+      writeFileSync(join(repo, "src", "app.mjs"), "export const version = 42; // staged mod\n");
+      git(repo, "add", "src/app.mjs");
+
+      writeFileSync(join(repo, "staged-new.txt"), "staged new content\n");
+      git(repo, "add", "staged-new.txt");
+
+      const destructible = listDestructiblePaths(repo, baseSha);
+      assert.equal(destructible.ok, true, destructible.error);
+      assert.ok(destructible.paths.includes("src/app.mjs"));
+      assert.ok(destructible.paths.includes("staged-new.txt"));
+
+      const res = executeRollback(repo, baseSha);
+      assert.equal(res.ok, true, res.error);
+
+      assert.equal(readFileSync(join(repo, "src", "app.mjs"), "utf8"), "export const version = 1;\n");
+      assert.equal(existsSync(join(repo, "staged-new.txt")), false);
+
+      const q = res.quarantine;
+      assert.ok(q, "quarantine metadata must exist");
+      assert.ok(q.copied.includes("src/app.mjs"));
+      assert.ok(q.copied.includes("staged-new.txt"));
+      assert.equal(readFileSync(join(q.dir, "src", "app.mjs"), "utf8"), "export const version = 42; // staged mod\n");
+      assert.equal(readFileSync(join(q.dir, "staged-new.txt"), "utf8"), "staged new content\n");
+
+      const diffPatchPath = join(q.dir, "staged-worktree.diff");
+      assert.equal(existsSync(diffPatchPath), true);
+      const diffContent = readFileSync(diffPatchPath, "utf8");
+      assert.match(diffContent, /diff --git a\/src\/app\.mjs/);
+      assert.match(diffContent, /diff --git a\/staged-new\.txt/);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("safely handles untracked directories and nested files (M1)", () => {
+    const { repo, baseSha } = makeRepo(false);
+    try {
+      const nestedDir = join(repo, "nested-pkg");
+      mkdirSync(nestedDir, { recursive: true });
+      writeFileSync(join(nestedDir, "inner.txt"), "inner content\n");
+
+      const res = executeRollback(repo, baseSha);
+      assert.equal(res.ok, true, res.error);
+      assert.equal(existsSync(nestedDir), false);
+
+      const q = res.quarantine;
+      assert.ok(q, "quarantine metadata must exist");
+      assert.ok(q.copied.includes("nested-pkg/inner.txt"));
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves prior quarantine directory when rolling back again with custom root (M3)", () => {
+    const { repo, baseSha } = makeRepo(false);
+    try {
+      const customRoot = join(repo, "custom-quarantine");
+
+      writeFileSync(join(repo, "file1.txt"), "content 1\n");
+      const res1 = executeRollback(repo, baseSha, { quarantineRoot: customRoot });
+      assert.equal(res1.ok, true, res1.error);
+      assert.equal(existsSync(res1.quarantine.dir), true);
+      assert.equal(readFileSync(join(res1.quarantine.dir, "file1.txt"), "utf8"), "content 1\n");
+
+      writeFileSync(join(repo, "file2.txt"), "content 2\n");
+      const res2 = executeRollback(repo, baseSha, { quarantineRoot: customRoot });
+      assert.equal(res2.ok, true, res2.error);
+      assert.equal(existsSync(res2.quarantine.dir), true);
+      assert.equal(readFileSync(join(res2.quarantine.dir, "file2.txt"), "utf8"), "content 2\n");
+
+      assert.equal(existsSync(res1.quarantine.dir), true, "First quarantine directory must survive second rollback");
+      assert.equal(readFileSync(join(res1.quarantine.dir, "file1.txt"), "utf8"), "content 1\n");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to roll back when repo measurement fails closed on corrupted git repo (m4)", () => {
+    const corruptRepo = mkdtempSync(join(tmpdir(), "mirql-lgrb-corrupt-"));
+    mkdirSync(join(corruptRepo, ".git"));
+    try {
+      const res = executeRollback(corruptRepo, "a".repeat(40));
+      assert.equal(res.ok, false);
+      assert.match(res.error, /Refusing rollback — cannot measure dirty worktree/);
+    } finally {
+      rmSync(corruptRepo, { recursive: true, force: true });
+    }
+  });
+
   it("LifeguardWatchdog trip runs the quarantine-first rollback (integration)", () => {
     const { repo, baseSha } = makeRepo(true);
     const controlDir = mkdtempSync(join(tmpdir(), "mirql-lgrb-ctl-"));
