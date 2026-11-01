@@ -16,6 +16,7 @@ export {
   LifeguardWatchdog,
   checkProbationStatus,
   executeRollback,
+  listDestructiblePaths,
   killProcesses,
   killServices,
   DEFAULT_PROBATION_TIMEOUT_MS,
