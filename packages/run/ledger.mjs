@@ -146,7 +146,9 @@ export function updateKeyring(mirqlDir, kp) {
  */
 export function getOrGenerateSupervisorKey(mirqlDir, options = {}) {
   const keysDir = options.keysDir ?? join(mirqlDir, "keys");
-  const keyPath = join(keysDir, "run_supervisor.json");
+  const primaryPath = join(keysDir, "run_supervisor.key.json");
+  const fallbackPath = join(keysDir, "run_supervisor.json");
+  const keyPath = existsSync(primaryPath) ? primaryPath : (existsSync(fallbackPath) ? fallbackPath : primaryPath);
   if (existsSync(keyPath)) {
     try {
       const parsed = JSON.parse(readFileSync(keyPath, "utf8"));

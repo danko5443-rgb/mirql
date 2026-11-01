@@ -1,4 +1,4 @@
-// packages/inbox/index.mjs — Cryptographic Human Sovereignty Portal (Law 6).
+// packages/inbox/index.mjs — Cryptographic Human Sovereignty Portal (Law 6, Milestone M6).
 import { resolve as resolvePath, join } from "node:path";
 import { EXIT_CODES, WRITER_ACL } from "../core/index.mjs";
 
@@ -6,7 +6,14 @@ import { runGenesis } from "./genesis.mjs";
 import { sendIntent } from "./send.mjs";
 import { renderDigest, formatMicroUsd } from "./digest.mjs";
 import { actOnItem } from "./act.mjs";
-import { createProposal } from "./propose.mjs";
+import {
+  createProposal,
+  create1TapProposal,
+  distillIntent,
+  formatIntentDistilledEvent,
+  formatProposalCreatedEvent,
+  INTENT_CATEGORIES,
+} from "./propose.mjs";
 import {
   generateFactoryKeypairs,
   loadKeyring,
@@ -39,6 +46,11 @@ export {
   formatMicroUsd,
   actOnItem,
   createProposal,
+  create1TapProposal,
+  distillIntent,
+  formatIntentDistilledEvent,
+  formatProposalCreatedEvent,
+  INTENT_CATEGORIES,
   generateFactoryKeypairs,
   loadKeyring,
   loadWriterKey,
@@ -193,12 +205,32 @@ export function runCli(argv = []) {
         return EXIT_CODES.OK;
       }
       case "act": {
-        const result = actOnItem(mirqlDir, options, options);
+        const actInput = { ...options };
+        if (options.approve === true) {
+          actInput.decision = "approve";
+        } else if (options.reject === true) {
+          actInput.decision = "reject";
+        } else if (options.kill === true) {
+          actInput.decision = "kill";
+        } else if (options.resume === true) {
+          actInput.decision = "resume";
+        }
+        const remainingPositional = positional.slice(1);
+        if (!actInput.target_id && !actInput["target-id"] && !actInput.targetId && remainingPositional[0]) {
+          actInput.target_id = remainingPositional[0];
+          actInput["target-id"] = remainingPositional[0];
+        }
+        const result = actOnItem(mirqlDir, actInput, actInput);
         process.stdout.write(JSON.stringify(result) + "\n");
         return EXIT_CODES.OK;
       }
       case "propose": {
-        const result = createProposal(mirqlDir, options, options);
+        const propInput = { ...options };
+        const remainingPositional = positional.slice(1);
+        if (!propInput.text && !propInput["from-text"] && remainingPositional.length > 0) {
+          propInput.text = remainingPositional.join(" ");
+        }
+        const result = createProposal(mirqlDir, propInput, propInput);
         process.stdout.write(JSON.stringify(result) + "\n");
         return EXIT_CODES.OK;
       }

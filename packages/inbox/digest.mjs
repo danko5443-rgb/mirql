@@ -1,4 +1,4 @@
-// packages/inbox/digest.mjs — Keyless, read-only factory digest renderer (Law 6).
+// packages/inbox/digest.mjs — Keyless, read-only factory digest renderer (Law 6, Milestone M6).
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { readEvents, foldState } from "./ledger.mjs";
@@ -96,6 +96,7 @@ export function renderDigest(mirqlDir, options = {}) {
             title: prop.title,
             status,
             action_type: prop.action_type || "1_tap_approve",
+            action_hint: `mirql i act ${prop.id} --approve --key <human_key_path>`,
             created_at: prop.created_at,
           });
         }
@@ -161,6 +162,9 @@ function formatMarkdownDigest(digest) {
   } else {
     for (const prop of digest.pending_proposals) {
       lines.push(`- **[${prop.roadmap_ref || "PROPOSAL"}]** \`${prop.id}\`: ${prop.title} (${prop.action_type})`);
+      if (prop.action_hint) {
+        lines.push(`  - 1-tap sign-off: \`${prop.action_hint}\``);
+      }
     }
   }
 

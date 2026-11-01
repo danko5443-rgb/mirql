@@ -69,6 +69,13 @@ import {
 } from "./doctor.mjs";
 import { runBingBong, extractModelFamily } from "./bing-bong.mjs";
 import { appendSupervisorEvent, getOrGenerateSupervisorKey } from "./ledger.mjs";
+import {
+  runJourney,
+  runAllJourneys,
+  JOURNEY_SCENARIOS,
+  formatJourneyGapEvent,
+  formatRegressionReportedEvent,
+} from "./journey.mjs";
 
 /** Tool name reported by this package. */
 export const TOOL = "run";
@@ -85,6 +92,7 @@ export const SUBCOMMANDS = Object.freeze([
   "mutant",
   "flake",
   "doctor",
+  "journey",
   "help",
 ]);
 
@@ -167,6 +175,7 @@ export function runCli(argv = []) {
           probe: "declarative 0-token probe runner (--probe <name>)",
           "bing-bong": "multi-agent cross-family consensus loop (alias bb)",
           phi: "compute complexity potential phi",
+          journey: "simulate end-to-end user journeys (--scenario <name> | all)",
         },
       }),
     );
@@ -600,6 +609,35 @@ export function runCli(argv = []) {
       }
     }
 
+    case "journey": {
+      const scenario = flags.scenario || flags.s || positional[1];
+      const repoRoot = flags.repoRoot || flags.root || process.cwd();
+      const keepSandbox = Boolean(flags.keepSandbox || flags["keep-sandbox"]);
+
+      try {
+        let result;
+        if (scenario && scenario !== "all") {
+          result = runJourney(scenario, { repoRoot, keepSandbox });
+        } else {
+          result = runAllJourneys({ repoRoot, keepSandbox });
+        }
+
+        if (flags.json) {
+          process.stdout.write(JSON.stringify(result) + "\n");
+        } else {
+          process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+        }
+
+        return result.ok ? EXIT_CODES.OK : EXIT_CODES.DOMAIN_NEGATIVE;
+      } catch (err) {
+        emitError({
+          error: "USAGE_ERROR",
+          reason: err instanceof Error ? err.message : String(err),
+        });
+        return EXIT_CODES.USAGE_ERROR;
+      }
+    }
+
     default: {
       emitError({
         error: "USAGE_ERROR",
@@ -634,11 +672,11 @@ export function main(argv = []) {
 
   const result = runCli(argv);
   if (result && typeof result.then === "function") {
-    result
+    return result
       .then((code) => {
-        if (typeof code === "number") {
-          process.exitCode = code;
-        }
+        const exitCode = typeof code === "number" ? code : EXIT_CODES.OK;
+        process.exitCode = exitCode;
+        return exitCode;
       })
       .catch((err) => {
         emitError({
@@ -646,8 +684,8 @@ export function main(argv = []) {
           reason: err instanceof Error ? err.message : String(err),
         });
         process.exitCode = 1;
+        return 1;
       });
-    return EXIT_CODES.OK;
   }
 
   return typeof result === "number" ? result : EXIT_CODES.OK;
@@ -712,4 +750,9 @@ export {
   SUBSYSTEMS,
   CIRCUIT_ACTIONS,
   MACRO_STATES,
+  runJourney,
+  runAllJourneys,
+  JOURNEY_SCENARIOS,
+  formatJourneyGapEvent,
+  formatRegressionReportedEvent,
 };
