@@ -1,11 +1,13 @@
-// packages/queue/canary.mjs — Keyless Canary Promotion Gauntlet & Provenance Engine (Milestone M7).
+// packages/queue/canary.mjs — Canary Promotion and Ledger-Anchored Provenance (Milestone M7).
 //
 // Invariants enforced:
 // - Law 9: Strict unidirectional N-1 supervisor evaluates, gates, and promotes version N (SemVer candidate > supervisor).
 // - Law 4: One durable ledger; all canary state transitions fold purely from cryptographically verified ledger events.
 // - Law 6: Silence is never consent; absent metrics/signatures fail closed; no synthetic telemetry.
 // - Law 17: Integer-only metrics (basis points, safe non-negative integers, zero floats, RFC 8785 JCS).
-// - SLSA v1.0 / Sigstore keyless cryptographic provenance envelope with artifact binding and active verification.
+// - A queue-signed job.canary_staged event records the statement hash and subject digest.
+//   Promotion checks both against the envelope. Its embedded public key verifies the
+//   ephemeral signature but supplies no independent signer identity or Sigstore certificate.
 // - Automated promotion on clean probation window; instant rollback on statistical anomaly.
 // - Idempotent fail-closed rollback with single-writer constant event types (mirql.rollback).
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
@@ -105,7 +107,7 @@ export function compareSemver(aStr, bStr) {
 }
 
 /**
- * Generates a SLSA v1.0 / in-toto compliant provenance statement with keyless ephemeral signing.
+ * Generates an in-toto provenance statement and self-signs it with a fresh local key.
  *
  * @param {object} params
  * @param {string} [params.subjectName]
@@ -166,6 +168,7 @@ export function generateSLSAProvenance(params = {}) {
       },
       runDetails: {
         builder: {
+          // Historical builder label carried in signed statements. It has no identity attestation.
           id: "keyless:sigstore:mirql-factory",
           version: supervisorVersion,
         },
@@ -187,7 +190,7 @@ export function generateSLSAProvenance(params = {}) {
   const canonicalStatement = jcs(statement);
   const statementHash = sha256(canonicalStatement);
 
-  // Keyless ephemeral signing ceremony (Sigstore/SLSA model)
+  // Sign with a local ephemeral key. The verifier reads its public key from the envelope.
   const ephemeralKp = generateEd25519Keypair();
   const envelopeToSign = {
     payloadType: "application/vnd.in-toto+json",
@@ -231,7 +234,8 @@ export function generateSLSAProvenance(params = {}) {
 }
 
 /**
- * Verifies a SLSA v1.0 provenance attestation envelope.
+ * Checks the envelope signature and expected subject. Promotion separately authenticates
+ * the statement hash against the signed staging event.
  * Strictly fails closed on missing signatures, invalid public keys, or missing attestation (B1 hardening).
  *
  * @param {object} envelope
