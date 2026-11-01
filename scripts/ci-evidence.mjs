@@ -105,9 +105,10 @@ export function collectDiff(baseSha, headSha, repoDir) {
  * @param {{ passed: boolean, evidence?: object, reasons?: string[] }} [input.thrift]
  *        - MEASURED thrift test verdict (issue #13). Only ever true when a
  *          real thrift test ran; absent for non-consolidation PRs.
+ * @param {object} [input.reproducer] - measured reproducer evidence (see verifyCausalReproducer)
  * @returns {object} pr-doc consumable by `mirql m check`
  */
-export function buildPrDoc({ pr, diff, suite, phi, causalCompleted = false, thrift }) {
+export function buildPrDoc({ pr, diff, suite, phi, causalCompleted = false, thrift, reproducer }) {
   const phiBlock = { delta_phi: phi.delta_phi };
   if (thrift) {
     phiBlock.thrift_test_passed = thrift.passed === true;
@@ -116,7 +117,7 @@ export function buildPrDoc({ pr, diff, suite, phi, causalCompleted = false, thri
       phiBlock.thrift_reasons = thrift.reasons;
     }
   }
-  return {
+  const doc = {
     pr: {
       number: pr.number,
       base_sha: pr.base_sha,
@@ -136,6 +137,121 @@ export function buildPrDoc({ pr, diff, suite, phi, causalCompleted = false, thri
       suite_pass_head: suite.pass_head === true,
     },
     phi: phiBlock,
+  };
+  if (reproducer) {
+    doc.proof.reproducer = reproducer;
+  }
+  return doc;
+}
+
+/**
+ * Loads and validates a candidate's `reproducer/manifest.json` (Law 16
+ * verified-reproducer contract). The only meaningful causal shape is
+ * red-on-base → green-on-head: a reproducer that already passes on base
+ * proves nothing, so anything else is rejected fail-closed.
+ *
+ * Manifest shape:
+ *   { "description": "...", "entry": "reproducer/x.mjs",
+ *     "expect_base": "fail", "expect_head": "pass" }
+ *
+ * The entry script is spawned by ci-evidence itself (no shell) TWICE — once
+ * against the base-notary checkout and once against the candidate — with
+ * process.env.MIRQL_TARGET_ROOT set to the checkout under test. The script
+ * must exercise the code under test via that root and exit non-zero when the
+ * defect reproduces, zero when it is fixed.
+ *
+ * @param {string} candidateDir
+ * @returns {{ ok: boolean, manifest?: object, error?: string }}
+ */
+export function loadReproducerManifest(candidateDir) {
+  const manifestPath = join(resolve(candidateDir), "reproducer", "manifest.json");
+  if (!existsSync(manifestPath)) {
+    return { ok: false, error: "no reproducer manifest" };
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  } catch (err) {
+    return { ok: false, error: `corrupt manifest: ${err.message}` };
+  }
+  if (typeof manifest.entry !== "string" || !manifest.entry.startsWith("reproducer/")) {
+    return { ok: false, error: 'manifest.entry must be a path under reproducer/' };
+  }
+  if (manifest.entry.includes("..")) {
+    return { ok: false, error: "manifest.entry must not escape the candidate root" };
+  }
+  if (manifest.expect_base !== "fail" || manifest.expect_head !== "pass") {
+    return { ok: false, error: 'manifest must declare expect_base:"fail" and expect_head:"pass"' };
+  }
+  return { ok: true, manifest };
+}
+
+/**
+ * Runs one reproducer script against a target checkout. Fail-closed: spawn
+ * errors and timeouts yield exit_code null and never verify anything.
+ *
+ * @param {object} options
+ * @param {string} options.entryAbs - absolute path to the reproducer script
+ * @param {string} options.targetRoot - checkout under test (cwd + MIRQL_TARGET_ROOT)
+ * @param {number} [options.timeoutMs=120000]
+ * @returns {{ exit_code: number | null, timed_out: boolean, error?: string }}
+ */
+export function runReproducerScript({ entryAbs, targetRoot, timeoutMs = 120000 }) {
+  const res = spawnSync(process.execPath, [entryAbs], {
+    cwd: resolve(targetRoot),
+    env: { ...process.env, MIRQL_TARGET_ROOT: resolve(targetRoot) },
+    timeout: timeoutMs,
+    encoding: "utf8",
+  });
+  if (res.error) {
+    return { exit_code: null, timed_out: false, error: res.error.message };
+  }
+  if (res.signal || !Number.isSafeInteger(res.status)) {
+    return { exit_code: null, timed_out: true, error: `terminated by signal ${res.signal ?? "unknown"}` };
+  }
+  return { exit_code: res.status, timed_out: false };
+}
+
+/**
+ * Verifies the causal red→green reproducer cycle against the two real
+ * checkouts (Law 16: measured, never attested). causal is true ONLY when the
+ * base run genuinely exits non-zero AND the head run genuinely exits zero.
+ *
+ * @param {object} options
+ * @param {string} options.candidateDir
+ * @param {string} options.baseDir
+ * @param {number} [options.timeoutMs=120000]
+ * @returns {{ present: boolean, causal: boolean, entry?: string, description?: string,
+ *            base_exit_code: number | null, head_exit_code: number | null, error?: string }}
+ */
+export function verifyCausalReproducer({ candidateDir, baseDir, timeoutMs = 120000 }) {
+  const loaded = loadReproducerManifest(candidateDir);
+  if (!loaded.ok) {
+    return { present: false, causal: false, base_exit_code: null, head_exit_code: null };
+  }
+  const manifest = loaded.manifest;
+  const entryAbs = join(resolve(candidateDir), ...manifest.entry.split("/"));
+  if (!existsSync(entryAbs)) {
+    return {
+      present: true, causal: false, entry: manifest.entry,
+      base_exit_code: null, head_exit_code: null,
+      error: `entry script not found: ${manifest.entry}`,
+    };
+  }
+  const baseRun = runReproducerScript({ entryAbs, targetRoot: baseDir, timeoutMs });
+  const headRun = runReproducerScript({ entryAbs, targetRoot: candidateDir, timeoutMs });
+  const causal =
+    baseRun.exit_code !== null && baseRun.exit_code !== 0 &&
+    headRun.exit_code !== null && headRun.exit_code === 0;
+  const error = baseRun.error ?? headRun.error;
+  return {
+    present: true,
+    causal,
+    entry: manifest.entry,
+    description: typeof manifest.description === "string" ? manifest.description : "",
+    base_exit_code: baseRun.exit_code,
+    head_exit_code: headRun.exit_code,
+    ...(error ? { error } : {}),
   };
 }
 
@@ -320,7 +436,13 @@ export async function main(env = process.env) {
     }
   }
 
-  // 3. Honest suite outcomes (measured by the CI steps, never assumed)
+  // 3. Law 16 verified-reproducer cycle: when the candidate carries a
+  // reproducer/manifest.json, run its entry against BOTH real checkouts and
+  // measure the red→green cycle. causal is true ONLY on a genuinely observed
+  // non-zero-on-base + zero-on-head outcome pair — never attested (Law 6).
+  const reproducer = verifyCausalReproducer({ candidateDir, baseDir });
+
+  // 4. Honest suite outcomes (measured by the CI steps, never assumed)
   const prDoc = buildPrDoc({
     pr: { number: prNumber, base_sha: baseSha, head_sha: headSha, author: env.PR_AUTHOR },
     diff: { files_changed: diff.files, tests_deleted: diff.deletedTests },
@@ -329,14 +451,15 @@ export async function main(env = process.env) {
       pass_head: parseBoolEnv(env.SUITE_PASS_HEAD),
     },
     phi: { delta_phi: deltaPhi },
-    causalCompleted: false, // Law 16: no verified reproducer artifact in this pipeline yet
+    causalCompleted: reproducer.causal,
     thrift,
+    ...(reproducer.present ? { reproducer } : {}),
   });
 
   const outPath = resolve(env.PR_DOC_PATH ?? join(candidateDir, "pr-doc.json"));
   writeFileSync(outPath, JSON.stringify(prDoc), "utf8");
   process.stdout.write(
-    `ci-evidence: wrote ${outPath} (suite base=${prDoc.proof.suite_pass_base} head=${prDoc.proof.suite_pass_head} delta_phi=${deltaPhi} causal=false${thrift ? ` thrift=${prDoc.phi.thrift_test_passed}` : ""})\n`,
+    `ci-evidence: wrote ${outPath} (suite base=${prDoc.proof.suite_pass_base} head=${prDoc.proof.suite_pass_head} delta_phi=${deltaPhi} causal=${reproducer.causal}${reproducer.present ? ` reproducer_base=${reproducer.base_exit_code} reproducer_head=${reproducer.head_exit_code}` : ""}${thrift ? ` thrift=${prDoc.phi.thrift_test_passed}` : ""})\n`,
   );
 }
 
