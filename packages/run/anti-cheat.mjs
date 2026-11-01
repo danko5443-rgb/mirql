@@ -259,16 +259,12 @@ export function checkSwallowedExceptions(sourceCode, filename) {
     return cleaned.length === 0;
   }
 
-  // 1. Standard catch blocks: parse with balanced braces (ignoring strings and comments)
-  const catchStartRegex = /catch\s*(?:\([^)]*\))?\s*\{/g;
-  let match;
-  while ((match = catchStartRegex.exec(sourceCode)) !== null) {
+  function extractBalancedBlock(startIdx) {
     let braceCount = 1;
-    let idx = match.index + match[0].length;
+    let idx = startIdx;
     let body = "";
     while (idx < sourceCode.length && braceCount > 0) {
       const ch = sourceCode[idx];
-      // Strings: skip characters until matching quote
       if (ch === '"' || ch === "'" || ch === "`") {
         const quote = ch;
         body += ch;
@@ -285,14 +281,12 @@ export function checkSwallowedExceptions(sourceCode, filename) {
           idx++;
         }
       } else if (ch === "/" && sourceCode[idx + 1] === "/") {
-        // Line comment: skip to newline
         while (idx < sourceCode.length && sourceCode[idx] !== "\n") {
           body += sourceCode[idx];
           idx++;
         }
         if (idx < sourceCode.length) body += sourceCode[idx];
       } else if (ch === "/" && sourceCode[idx + 1] === "*") {
-        // Block comment: skip to end
         body += "/*";
         idx += 2;
         while (idx < sourceCode.length - 1 && !(sourceCode[idx] === "*" && sourceCode[idx + 1] === "/")) {
@@ -311,13 +305,20 @@ export function checkSwallowedExceptions(sourceCode, filename) {
       }
       idx++;
     }
+    return { body, endIdx: idx };
+  }
 
+  // 1. Standard catch blocks: parse with balanced braces (ignoring strings and comments)
+  const catchStartRegex = /catch\s*(?:\([^)]*\))?\s*\{/g;
+  let match;
+  while ((match = catchStartRegex.exec(sourceCode)) !== null) {
+    const { body, endIdx: catchEnd } = extractBalancedBlock(match.index + match[0].length);
     if (isEffectivelyEmpty(body)) {
       const upToMatch = sourceCode.slice(0, match.index);
       const line = upToMatch.split("\n").length;
       violations.push({
         file: filename,
-        pattern: sourceCode.slice(match.index, idx),
+        pattern: sourceCode.slice(match.index, catchEnd),
         line,
       });
     }
@@ -344,15 +345,37 @@ export function checkSwallowedExceptions(sourceCode, filename) {
   }
 
   // 3. Global uncaughtException / unhandledRejection swallowing
-  const uncaughtRegex = /process\.(?:on|addListener)\s*\(\s*['"](?:uncaughtException|unhandledRejection)['"]\s*,\s*(?:async\s*)?(?:(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>\s*\{([^}]*)\}|(?:function\s*\([^)]*\)\s*\{([^}]*)\}))/g;
-  while ((match = uncaughtRegex.exec(sourceCode)) !== null) {
-    const handlerBody = match[1] ?? match[2] ?? "";
+  // Captures on, once, addListener, prependListener with block or concise arrow handlers
+  const uncaughtHeaderRegex =
+    /process\s*\.\s*(?:on|once|addListener|prependListener)\s*\(\s*['"](?:uncaughtException|unhandledRejection)['"]\s*,\s*(?:async\s*)?(?:(?:(?:(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>|function\s*(?:[a-zA-Z0-9_$]+\s*)?\([^)]*\))\s*(\{)?)|([a-zA-Z0-9_$.]+))/g;
+
+  while ((match = uncaughtHeaderRegex.exec(sourceCode)) !== null) {
+    const hasBrace = match[1] === "{";
+    let handlerBody = "";
+    let uncaughtEnd = match.index + match[0].length;
+
+    if (hasBrace) {
+      const res = extractBalancedBlock(match.index + match[0].length);
+      handlerBody = res.body;
+      uncaughtEnd = res.endIdx;
+    } else {
+      let pCount = 1;
+      let idx = match.index + match[0].length;
+      while (idx < sourceCode.length && pCount > 0) {
+        if (sourceCode[idx] === "(") pCount++;
+        else if (sourceCode[idx] === ")") pCount--;
+        if (pCount > 0) handlerBody += sourceCode[idx];
+        idx++;
+      }
+      uncaughtEnd = idx;
+    }
+
     if (isEffectivelyEmpty(handlerBody) || !/(?:process\.exit|throw\b)/.test(handlerBody)) {
       const upToMatch = sourceCode.slice(0, match.index);
       const line = upToMatch.split("\n").length;
       violations.push({
         file: filename,
-        pattern: match[0],
+        pattern: sourceCode.slice(match.index, uncaughtEnd),
         line,
         detail: "Empty or non-rethrowing uncaughtException / unhandledRejection handler",
       });

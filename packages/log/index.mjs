@@ -1050,8 +1050,20 @@ export function verifyLedger(mirqlDir, options = {}) {
     ? eventHashOf(events.at(-1), rawLines.at(-1), isConformance)
     : GENESIS_PREV_HASH;
   const expectedHead = options.expectHead ?? options["expect-head"];
-  if (typeof expectedHead === "string" && expectedHead.length > 0) {
-    if (headHash !== expectedHead) {
+  if (expectedHead !== undefined) {
+    if (
+      typeof expectedHead !== "string" ||
+      expectedHead.trim().length === 0 ||
+      !/^(?:sha256:)?[a-f0-9]{64}$/.test(expectedHead)
+    ) {
+      throw new LedgerError(
+        "USAGE_ERROR",
+        `expectHead must be a valid 64-hex SHA-256 hash, got ${JSON.stringify(expectedHead)}`,
+      );
+    }
+    const normHead = headHash.startsWith("sha256:") ? headHash : `sha256:${headHash}`;
+    const normExpected = expectedHead.startsWith("sha256:") ? expectedHead : `sha256:${expectedHead}`;
+    if (normHead !== normExpected) {
       return {
         valid: false,
         error: "head_hash_mismatch",
@@ -1313,9 +1325,25 @@ export function runCli(argv = []) {
       case "append":
         return cliAppend(dir, flags);
       case "verify": {
+        const hasExpectHead = "expect-head" in flags || "expectHead" in flags;
+        let expectHead = undefined;
+        if (hasExpectHead) {
+          const raw = flags["expect-head"] ?? flags.expectHead;
+          if (
+            typeof raw !== "string" ||
+            raw.trim().length === 0 ||
+            !/^(?:sha256:)?[a-f0-9]{64}$/.test(raw)
+          ) {
+            throw new LedgerError(
+              "USAGE_ERROR",
+              `--expect-head requires a valid 64-hex SHA-256 hash, got ${JSON.stringify(raw)}`,
+            );
+          }
+          expectHead = raw;
+        }
         const result = verifyLedger(dir, {
           conformance: flags.conformance === true,
-          expectHead: flags["expect-head"] ?? flags.expectHead,
+          expectHead,
         });
         emitLine(jcs(result));
         return result.valid ? EXIT_CODES.OK : EXIT_CODES.INTEGRITY_VIOLATION;

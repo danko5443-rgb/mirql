@@ -140,6 +140,7 @@ function formatMarkdownDigest(digest) {
     `- **Macro Mode:** \`${digest.mode}\``,
     `- **Epoch:** \`${digest.epoch}\``,
     `- **Sequence:** \`${digest.seq}\``,
+    `- **Head Hash:** \`${digest.head_hash}\``,
     `- **Halted:** \`${digest.halted}\``,
     `- **Budget Spent:** \`${formatMicroUsd(digest.budget_spent_micro_usd)}\` (${digest.budget_spent_micro_usd} micro-USD)`,
     ``,

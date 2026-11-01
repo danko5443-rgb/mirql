@@ -44,6 +44,17 @@ export function acquireLock(lockPath, timeoutMs = 10000) {
         const metadata = JSON.stringify({ pid: process.pid, ts: Date.now() });
         writeFileSync(fd, metadata, "utf8");
       } catch {}
+
+      // Verify that our PID was successfully recorded
+      try {
+        const raw = readFileSync(lockPath, "utf8");
+        const parsed = JSON.parse(raw);
+        if (parsed.pid !== process.pid) {
+          try { closeSync(fd); } catch {}
+          continue;
+        }
+      } catch {}
+
       return fd;
     } catch (err) {
       if (err.code !== "EEXIST") throw err;
@@ -83,7 +94,7 @@ export function acquireLock(lockPath, timeoutMs = 10000) {
 }
 
 /**
- * Release exclusive lockfile.
+ * Release exclusive lockfile, verifying process ownership before unlinking.
  * @param {number} fd
  * @param {string} lockPath
  */
@@ -92,8 +103,14 @@ export function releaseLock(fd, lockPath) {
     if (fd !== null) closeSync(fd);
   } catch {}
   try {
-    unlinkSync(lockPath);
-  } catch {}
+    const raw = readFileSync(lockPath, "utf8");
+    const meta = JSON.parse(raw);
+    if (meta && meta.pid === process.pid) {
+      unlinkSync(lockPath);
+    }
+  } catch {
+    // If lockfile is missing or already unlinked, safe no-op
+  }
 }
 
 /**
