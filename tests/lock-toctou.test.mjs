@@ -6,7 +6,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -153,6 +153,62 @@ describe("ledger lock: verified stale-breaking (issue #12)", () => {
       }
       assert.deepEqual(seen, [process.pid, process.pid, process.pid]);
       assert.equal(existsSync(join(dir, "ledger.lock")), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("claimStaleLock successfully breaks empty lockfiles and legacy locks without livelock (B1)", () => {
+    const dir = tmp();
+    try {
+      const lockPath = join(dir, "ledger.lock");
+      writeFileSync(lockPath, "", "utf8");
+      const past = new Date(Date.now() - 30_000);
+      utimesSync(lockPath, past, past);
+      const res1 = claimStaleLock(lockPath, null);
+      assert.equal(res1.claimed, true, "empty stale lock must be claimed, never livelocked");
+      assert.equal(existsSync(lockPath), false);
+
+      writeFileSync(lockPath, JSON.stringify({ pid: DEAD_PID, ts: Date.now() - 30_000 }), "utf8");
+      utimesSync(lockPath, past, past);
+      const res2 = claimStaleLock(lockPath, null);
+      assert.equal(res2.claimed, true, "legacy stale lock must be claimed, never livelocked");
+      assert.equal(existsSync(lockPath), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("releaseLock never unlinks a lock with a foreign nonce even if PID matches (M2)", () => {
+    const dir = tmp();
+    try {
+      const lockPath = join(dir, "ledger.lock");
+      const fd = acquireLock(lockPath, 1000);
+      try {
+        writeFileSync(lockPath, JSON.stringify({ pid: process.pid, ts: Date.now(), nonce: "foreign-nonce-diff" }), "utf8");
+        releaseLock(fd, lockPath);
+        assert.equal(existsSync(lockPath), true, "foreign-nonce lock must NOT be unlinked by prior releaser");
+        const meta = JSON.parse(readFileSync(lockPath, "utf8"));
+        assert.equal(meta.nonce, "foreign-nonce-diff");
+      } finally {
+        try { unlinkSync(lockPath); } catch {}
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("withLedgerLock fails closed if lock is displaced during execution (B2)", () => {
+    const dir = tmp();
+    try {
+      assert.throws(
+        () => {
+          withLedgerLock(dir, () => {
+            const lockPath = join(dir, "ledger.lock");
+            writeFileSync(lockPath, JSON.stringify({ pid: DEAD_PID, ts: Date.now(), nonce: "displacing-nonce" }), "utf8");
+          });
+        },
+        /Ledger lock was displaced during execution/
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
