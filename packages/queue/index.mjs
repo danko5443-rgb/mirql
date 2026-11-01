@@ -8,6 +8,7 @@ import {
   LedgerWatcher,
   createLedgerWatcher,
   waitForLedgerEvent,
+  getActiveTrippedBreakers,
 } from "../core/index.mjs";
 import {
   getOrCreateQueueKeypair,
@@ -387,6 +388,24 @@ export function leaseNextJob(mirqlDir, options = {}) {
         action: "HALTED",
         exit_code: EXIT_CODES.HALTED,
         error: "Queue is halted",
+      };
+    }
+
+    // 1b. Circuit breakers are binding (issue #15): while any subsystem's
+    // breaker is actively TRIPPED, no new work may start. The queue refuses
+    // to lease (fail-closed, Law 14) until the cooldown expires or a human
+    // resets the breaker via the doctor. Throttle does NOT block — only trips.
+    const trippedBreakers = getActiveTrippedBreakers(mirqlDir, nowMs);
+    if (trippedBreakers.length > 0) {
+      return {
+        ok: false,
+        status: "breaker_tripped",
+        action: "BREAKER_TRIPPED",
+        exit_code: EXIT_CODES.BREAKER_OPEN,
+        error: `Circuit breaker(s) tripped: ${trippedBreakers
+          .map((b) => `${b.subsystem} (${b.reason}, expires in ${Math.max(0, b.expires_at_ms - nowMs)}ms)`)
+          .join("; ")}`,
+        breakers: trippedBreakers,
       };
     }
 

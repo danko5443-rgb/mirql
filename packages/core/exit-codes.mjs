@@ -22,6 +22,8 @@ export const EXIT_CODES = Object.freeze({
   HALTED: 6,
   /** Budget exhausted; the action would exceed its micro-USD ceiling. */
   BUDGET_EXHAUSTED: 7,
+  /** A circuit breaker is tripped; new work is refused until cooldown or reset. */
+  BREAKER_OPEN: 8,
   /** The situation requires a human decision. */
   NEEDS_HUMAN: 10,
   /** Temporary failure; safe to retry with backoff (EX_TEMPFAIL). */
