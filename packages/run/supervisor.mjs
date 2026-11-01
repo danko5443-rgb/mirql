@@ -368,6 +368,39 @@ export function startHeartbeatTicker(heartbeatPath, intervalMs = 2000) {
 }
 
 /**
+ * Emits a failure attempt.outcome to the ledger to release a job lease
+ * when a supervisor step fails to retrieve the warrant or throws an unhandled error.
+ */
+function recordFailureOutcome(mirqlDir, jobId, warrantId, epoch, reason = "execution_failure") {
+  try {
+    const keypair = getOrGenerateSupervisorKey(mirqlDir);
+    appendSupervisorEvent(
+      mirqlDir,
+      {
+        type: "attempt.outcome",
+        epoch,
+        payload: {
+          job_id: jobId,
+          warrant_id: warrantId,
+          epoch,
+          status: "failed",
+          verdict: "reject",
+          cost_micro_usd: 0,
+          tokens_consumed: 0,
+          error: reason,
+        },
+        nowMs: Date.now(),
+      },
+      keypair,
+    );
+  } catch (err) {
+    if (process.env.MIRQL_DEBUG) {
+      process.stderr.write(`[mirql-supervisor-reactive] recordFailureOutcome error: ${err.message}\n`);
+    }
+  }
+}
+
+/**
  * Law 14 & Milestone M1: Event-Driven Reactive Supervisor Loop.
  * Listens for new events on the ledger (job.enqueued, warrant.minted, human.intent)
  * via zero-polling LedgerWatcher, automatically executing supervisor steps on demand.
@@ -386,6 +419,8 @@ export async function runSupervisorReactive(options = {}) {
   let stepsExecuted = 0;
   let inFlight = false;
   let queuedRerun = false;
+  const pendingEvents = [];
+  let expiryTimer = null;
 
   const watcher = createLedgerWatcher(ledgerPath, {
     debounceMs: options.debounceMs ?? 25,
@@ -398,9 +433,24 @@ export async function runSupervisorReactive(options = {}) {
     }
   });
 
+  const scheduleExpiryWake = (expiresAtMs) => {
+    if (expiryTimer || watcher.closed) return;
+    const now = Date.now();
+    const delay = Math.max(50, (expiresAtMs - now) + 50);
+    expiryTimer = setTimeout(() => {
+      expiryTimer = null;
+      if (!watcher.closed) {
+        runStep(null).catch(() => {});
+      }
+    }, delay);
+  };
+
   const runStep = async (triggerEvent) => {
     if (inFlight) {
       queuedRerun = true;
+      if (triggerEvent && typeof options.leaseJob !== "function") {
+        pendingEvents.push(triggerEvent);
+      }
       return null;
     }
 
@@ -412,36 +462,82 @@ export async function runSupervisorReactive(options = {}) {
         queuedRerun = false;
         leasedThisPass = false;
 
+        let currentEvt = triggerEvent;
+        if (typeof options.leaseJob !== "function") {
+          currentEvt = pendingEvents.shift() ?? triggerEvent;
+        }
+
         let warrant = options.warrant;
         let epoch = options.epoch ?? 1;
         let jobId = options.jobId;
+        let leasedWarrantId = null;
 
         if (typeof options.leaseJob === "function") {
-          const leaseRes = await options.leaseJob(mirqlDir);
-          if (!leaseRes || !leaseRes.ok || leaseRes.status !== "leased") {
-            continue;
+          let leaseRes = null;
+          try {
+            leaseRes = await options.leaseJob(mirqlDir);
+          } catch (leaseErr) {
+            if (process.env.MIRQL_DEBUG) {
+              process.stderr.write(`[mirql-supervisor-reactive] leaseJob error: ${leaseErr.message}\n`);
+            }
+            break;
           }
+
+          if (!leaseRes || !leaseRes.ok) {
+            break;
+          }
+
+          if (leaseRes.status === "concurrency_limit") {
+            if (leaseRes.active_lease?.expires_at_ms) {
+              scheduleExpiryWake(leaseRes.active_lease.expires_at_ms);
+            }
+            break;
+          }
+
+          if (leaseRes.status !== "leased") {
+            break;
+          }
+
           leasedThisPass = true;
           epoch = leaseRes.epoch ?? epoch;
           jobId = leaseRes.job_id ?? jobId;
+          leasedWarrantId = leaseRes.warrant_id;
+
           if (leaseRes.warrant) {
             warrant = leaseRes.warrant;
           } else if (typeof options.getWarrant === "function") {
-            warrant = options.getWarrant(leaseRes.warrant_id);
+            try {
+              warrant = options.getWarrant(leaseRes.warrant_id);
+            } catch (wErr) {
+              warrant = null;
+            }
           } else {
             warrant = { id: leaseRes.warrant_id };
           }
-        } else if (triggerEvent?.payload?.warrant) {
-          warrant = triggerEvent.payload.warrant;
-          jobId = triggerEvent.payload.job_id ?? jobId;
-          epoch = triggerEvent.epoch ?? triggerEvent.payload.epoch ?? epoch;
-        } else if (triggerEvent?.payload?.warrant_id) {
-          warrant = { id: triggerEvent.payload.warrant_id };
-          jobId = triggerEvent.payload.job_id ?? jobId;
-          epoch = triggerEvent.epoch ?? triggerEvent.payload.epoch ?? epoch;
+
+          // If job was leased but warrant could not be resolved, fail closed & release lease!
+          if (!warrant) {
+            recordFailureOutcome(
+              mirqlDir,
+              jobId,
+              leasedWarrantId,
+              epoch,
+              `Warrant ${leasedWarrantId} not found or resolution failed`,
+            );
+            continue;
+          }
+        } else if (currentEvt?.payload?.warrant) {
+          warrant = currentEvt.payload.warrant;
+          jobId = currentEvt.payload.job_id ?? jobId;
+          epoch = currentEvt.epoch ?? currentEvt.payload.epoch ?? epoch;
+        } else if (currentEvt?.payload?.warrant_id) {
+          warrant = { id: currentEvt.payload.warrant_id };
+          jobId = currentEvt.payload.job_id ?? jobId;
+          epoch = currentEvt.epoch ?? currentEvt.payload.epoch ?? epoch;
         }
 
         if (!warrant && !options.warrantId) {
+          if (typeof options.leaseJob === "function") break;
           continue;
         }
 
@@ -452,7 +548,7 @@ export async function runSupervisorReactive(options = {}) {
             warrantId: warrant?.id ?? options.warrantId,
             epoch,
             jobId,
-            triggerEvent,
+            triggerEvent: currentEvt,
           });
           if (stepResult) {
             stepsExecuted++;
@@ -463,8 +559,21 @@ export async function runSupervisorReactive(options = {}) {
           if (process.env.MIRQL_DEBUG) {
             process.stderr.write(`[mirql-supervisor-reactive] Execution error: ${stepErr.message}\n`);
           }
+          // If a leased job failed execution, record failure to release lease from the queue fold
+          if (leasedThisPass && jobId && (leasedWarrantId || warrant?.id)) {
+            recordFailureOutcome(
+              mirqlDir,
+              jobId,
+              leasedWarrantId ?? warrant?.id,
+              epoch,
+              stepErr.message,
+            );
+          }
         }
-      } while ((queuedRerun || leasedThisPass) && !watcher.closed);
+      } while (
+        ((typeof options.leaseJob === "function" ? (queuedRerun || leasedThisPass) : (queuedRerun || pendingEvents.length > 0))) &&
+        !watcher.closed
+      );
     } finally {
       inFlight = false;
     }
@@ -475,18 +584,28 @@ export async function runSupervisorReactive(options = {}) {
 
   for (const evtType of reactiveEvents) {
     watcher.on(evtType, (evt) => {
-      runStep(evt);
+      runStep(evt).catch((err) => {
+        if (process.env.MIRQL_DEBUG) {
+          process.stderr.write(`[mirql-supervisor-reactive] listener error: ${err.message}\n`);
+        }
+      });
     });
   }
 
   if (options.initialRun) {
-    await runStep(null);
+    await runStep(null).catch(() => {});
   }
 
   return {
     watcher,
     getStepsExecuted: () => stepsExecuted,
-    close: () => watcher.close(),
+    close: () => {
+      if (expiryTimer) {
+        clearTimeout(expiryTimer);
+        expiryTimer = null;
+      }
+      watcher.close();
+    },
   };
 }
 

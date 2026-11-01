@@ -504,5 +504,124 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
         reactive.close();
       }
     });
+
+    it("releases lease on unresolvable warrant so subsequent jobs in the queue are not blocked", async () => {
+      const ledgerDir = join(tempDir, "ledger");
+      mkdirSync(ledgerDir, { recursive: true });
+      const ledgerPath = join(ledgerDir, "events.jsonl");
+      writeFileSync(ledgerPath, "", "utf8");
+
+      const wBad = makeValidWarrant();
+      const wGood = makeValidWarrant();
+
+      // Only wGood is registered in warrant lookup: wBad returns null
+      const reactive = await runSupervisorReactive({
+        mirqlDir: tempDir,
+        debounceMs: 10,
+        skipPidFile: true,
+        noHeartbeatTicker: true,
+        leaseJob: () => leaseNextJob(tempDir),
+        getWarrant: (wId) => (wId === wGood.id ? wGood : null),
+        builderCommand: "exit 0",
+        verifyOptions: {
+          runCheck: ({ stage }) => ({
+            exitCode: stage === "red_on_base" || stage === "re_red_on_revert" ? 1 : 0,
+          }),
+        },
+      });
+
+      try {
+        const outcomesReceived = [];
+        const outcomePromise = new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error(`Timeout: received ${outcomesReceived.length} of 4 outcomes`));
+          }, 6000);
+          reactive.watcher.on("event", (evt) => {
+            if (evt.type === "attempt.outcome") {
+              outcomesReceived.push(evt);
+              if (outcomesReceived.length === 4) {
+                clearTimeout(timeout);
+                resolve(outcomesReceived);
+              }
+            }
+          });
+        });
+
+        // Submit bad warrant, then good warrant
+        submitWarrant(tempDir, wBad, { repoRoot: ROOT });
+        submitWarrant(tempDir, wGood, { repoRoot: ROOT });
+
+        const outcomes = await outcomePromise;
+        assert.equal(outcomes.length, 4);
+
+        // First 3 outcomes must be failed attempts for wBad (capped at max_attempts)
+        const badOutcomes = outcomes.filter((o) => o.payload.warrant_id === wBad.id);
+        assert.equal(badOutcomes.length, 3);
+        for (const bo of badOutcomes) {
+          assert.equal(bo.payload.status, "failed");
+          assert.equal(bo.payload.verdict, "reject");
+        }
+
+        // Final outcome must be completed for wGood (not blocked by bad warrant lease!)
+        const goodOutcome = outcomes.find((o) => o.payload.warrant_id === wGood.id);
+        assert.ok(goodOutcome);
+        assert.equal(goodOutcome.payload.status, "completed");
+        assert.equal(goodOutcome.payload.verdict, "auto_merge");
+      } finally {
+        reactive.close();
+      }
+    });
+
+    it("handles leaseJob exception without crashing the watcher or throwing unhandled rejection", async () => {
+      const ledgerDir = join(tempDir, "ledger");
+      mkdirSync(ledgerDir, { recursive: true });
+      const ledgerPath = join(ledgerDir, "events.jsonl");
+      writeFileSync(ledgerPath, "", "utf8");
+
+      let leaseCallCount = 0;
+      const wGood = makeValidWarrant();
+
+      const reactive = await runSupervisorReactive({
+        mirqlDir: tempDir,
+        debounceMs: 10,
+        skipPidFile: true,
+        noHeartbeatTicker: true,
+        leaseJob: async (dir) => {
+          leaseCallCount++;
+          if (leaseCallCount === 1) {
+            throw new Error("Simulated transient filesystem or lock error");
+          }
+          return leaseNextJob(dir);
+        },
+        getWarrant: (wId) => (wId === wGood.id ? wGood : null),
+        builderCommand: "exit 0",
+        verifyOptions: {
+          runCheck: ({ stage }) => ({
+            exitCode: stage === "red_on_base" || stage === "re_red_on_revert" ? 1 : 0,
+          }),
+        },
+      });
+
+      try {
+        const outcomePromise = waitForLedgerEvent(
+          ledgerPath,
+          (e) => e.type === "attempt.outcome" && e.payload?.warrant_id === wGood.id,
+          { timeoutMs: 4000, debounceMs: 10 },
+        );
+
+        submitWarrant(tempDir, wGood, { repoRoot: ROOT });
+
+        // Submit another trigger to recover from transient lease error
+        setTimeout(() => {
+          submitWarrant(tempDir, makeValidWarrant(), { repoRoot: ROOT });
+        }, 50);
+
+        const outcome = await outcomePromise;
+        assert.equal(outcome.type, "attempt.outcome");
+        assert.equal(outcome.payload.warrant_id, wGood.id);
+      } finally {
+        reactive.close();
+      }
+    });
   });
 });
