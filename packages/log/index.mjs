@@ -229,6 +229,11 @@ function loadKeyring(mirqlDir) {
  * options.publicKey, then keyring[event.writer.key_id], then the raw key
  * embedded in an `ed25519:<43-char-base64url>` writer key id.
  *
+ * Phase 0.4: the embedded key is self-certifying — anyone can mint a key and
+ * claim any namespace with it — so it is used only in conformance mode, or
+ * by appendEvent for an event it has just signed itself
+ * (`allowEmbeddedKey`). Without a keyring, `l verify` trusts no key.
+ *
  * Keyring entries may be plain public-key strings (legacy) or namespace-
  * bound objects `{ ns, publicKey }` (canonical since W5b). When the entry is
  * bound to a namespace that differs from `event.writer.ns`, resolution fails
@@ -237,7 +242,7 @@ function loadKeyring(mirqlDir) {
  *
  * @param {object} event
  * @param {string} mirqlDir
- * @param {{ publicKey?: string, keyring?: Record<string, unknown> }} [options]
+ * @param {{ publicKey?: string, keyring?: Record<string, unknown>, conformance?: boolean, allowEmbeddedKey?: boolean }} [options]
  * @returns {string | null} base64url raw public key, or null when unresolvable
  */
 function resolvePublicKey(event, mirqlDir, options = {}) {
@@ -277,7 +282,9 @@ function resolvePublicKey(event, mirqlDir, options = {}) {
   if (typeof options.publicKey === "string" && options.publicKey.length > 0) {
     return options.publicKey;
   }
-  if (keyId.startsWith("ed25519:")) {
+  const embeddedAllowed =
+    options.conformance === true || options.allowEmbeddedKey === true;
+  if (embeddedAllowed && keyId.startsWith("ed25519:")) {
     const embedded = keyId.slice("ed25519:".length);
     if (/^[A-Za-z0-9_-]{43}$/.test(embedded)) return embedded;
   }
@@ -842,7 +849,12 @@ export function appendEvent(mirqlDir, eventInput, options = {}) {
       "missing signature or unresolvable public key",
     );
   }
-  const publicKey = resolvePublicKey(event, dir, options);
+  // The signing path built and signed this event with the caller's private
+  // key, so its embedded key id is the key it was signed with.
+  const publicKey = resolvePublicKey(event, dir, {
+    ...options,
+    allowEmbeddedKey: signingKey !== null,
+  });
   if (publicKey === null) {
     throw new LedgerError(
       "INTEGRITY_VIOLATION",

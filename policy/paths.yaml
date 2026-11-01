@@ -8,6 +8,8 @@ humanOnly:
   - "policy/**"
   - "conformance/**"
   - ".github/**"
+  - "scripts/**"
+  - "bin/**"
 
 humanApprove:
   - "schemas/**"

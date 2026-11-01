@@ -55,6 +55,8 @@ export const VERDICT_EVENT_TYPES = Object.freeze({
   auto_merge: "verdict.issued",
   reject: "verdict.rejected",
   needs_human: "verdict.needs_human",
+  // Phase 0.2: a doc-only pass is not a merge; it still needs a human.
+  conformance_pass: "verdict.needs_human",
   accepted: "verdict.accepted",
 });
 

@@ -249,7 +249,8 @@ export function getGitDiffFiles(baseSha, headSha, repoDir = process.cwd()) {
  * - `rootDir`        — repo root for policy/paths.yaml (default: cwd)
  * - `targetTipSha`   — authoritative target tip SHA for MP-004 (CLI --base)
  * - `expectedHeadSha`— authoritative head SHA for MP-004 (CLI --head)
- * - `humanApproved`  — explicit affirmative human sign-off from verified source (unlocks MP-005)
+ * - `humanApproved`  — ignored since Phase 0.3: no boolean unlocks MP-005;
+ *                      signed approvals arrive in Phase 2
  * - `repoDir`        — directory of git repository to cross-check diffs against reality (Law 7)
  *
  * @param {object} prDoc PR fixture or outcome document
@@ -311,10 +312,6 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
   }
 
   const policies = loadPathPolicies(options.rootDir);
-
-  // Law 3 & 6: A PR document CANNOT self-approve via inline json flags!
-  // humanApproved is ONLY valid if supplied through options from an external signed event or verified caller.
-  const humanApproved = options.humanApproved === true;
 
   // --- MP-001: TOUCH_HUMAN_ONLY -------------------------------------------
   const forbidden = filesChanged.filter((f) =>
@@ -488,14 +485,15 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
   const approvePaths = filesChanged.filter((f) =>
     isHumanApprovePath(f, policies.humanApprove),
   );
-  const touchesHumanApproveWithoutApproval =
-    approvePaths.length > 0 && !hasCausalProof && !humanApproved;
+  // Phase 0.3: a self-reported proof or a caller boolean never unlocks a
+  // humanApprove path — touching one always escalates to a human.
+  const touchesHumanApprove = approvePaths.length > 0;
 
-  if (isUncitedSurface || touchesHumanApproveWithoutApproval) {
+  if (isUncitedSurface || touchesHumanApprove) {
     checks.surface = false;
     const detail = isUncitedSurface
       ? `PR modified public surface without cited roadmap reference: ${uncitedCommands.join(", ")}`
-      : `PR touched humanApprove path(s) [${approvePaths.join(", ")}] without causal proof or human sign-off.`;
+      : `PR touched humanApprove path(s) [${approvePaths.join(", ")}] ; human review required.`;
     return fail("MP-005", "UNCITED_SURFACE", "needs_human", detail, {
       checks,
       uncited_commands: uncitedCommands,
@@ -552,9 +550,9 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     }
   }
 
-  // --- MP-000: auto_merge ------------------------------------------------------
-  // Fail closed: clean causal proof requires proof.causal_cycle_completed === true
-  // OR a proven suite pass (suite_pass_base AND suite_pass_head).
+  // --- MP-000 ------------------------------------------------------------------
+  // Fail closed: a doc needs causal_cycle_completed === true or a proven suite
+  // pass (suite_pass_base AND suite_pass_head) to get past this point.
   const hasSuiteProof =
     proof.suite_pass_base === true && proof.suite_pass_head === true;
   if (!hasCausalProof && !hasSuiteProof) {
@@ -568,12 +566,27 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     );
   }
 
+  // Phase 0.0b / Law 16: a suite pass is not a causal proof.
+  if (!hasCausalProof) {
+    checks.proof = false;
+    return fail(
+      "LAW_16",
+      "NO_CAUSAL_PROOF",
+      "needs_human",
+      "Suite passes on base and head, but no causal proof (red-green-re-red) was measured; human review required.",
+      { checks },
+    );
+  }
+
+  // Phase 0.2: every proof field in a PR doc is self-reported, so the best a
+  // doc can earn is conformance_pass. auto_merge comes only from a measured
+  // causal cycle (run/verify.mjs git mode) or, from Phase 2, a notary-signed doc.
   return {
     ok: true,
     rule: "MP-000",
     violation: null,
-    verdict: "auto_merge",
-    detail: "Clean causal proof; all merge-proof rules satisfied.",
+    verdict: "conformance_pass",
+    detail: "All merge-proof rules satisfied by the self-reported proof; it would auto-merge if the proof were measured.",
     flags: [],
     checks,
   };

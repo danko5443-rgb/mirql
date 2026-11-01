@@ -13,6 +13,8 @@ export const DEFAULT_HUMAN_ONLY_PATTERNS = Object.freeze([
   "policy/**",
   "conformance/**",
   ".github/**",
+  "scripts/**",
+  "bin/**",
 ]);
 
 /**

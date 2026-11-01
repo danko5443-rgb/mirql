@@ -101,7 +101,9 @@ describe("mergeproof: conformance corpus — bad PRs", () => {
     { file: "02-delete-test.json", rule: "MP-002", violation: "TEST_DELETED", verdict: "reject" },
     { file: "03-swallow-exception.json", rule: "MP-003", violation: "ANTI_CHEAT_VIOLATION", verdict: "reject" },
     { file: "04-stale-base.json", rule: "MP-004", violation: "STALE_BASE", verdict: "reject" },
-    { file: "05-uncited-surface.json", rule: "MP-005", violation: "UNCITED_SURFACE", verdict: "needs_human" },
+    // Phase 0.0a: bin/** is humanOnly, so 05's bin/mirql.mjs edit trips MP-001
+    // before its uncited surface reaches MP-005.
+    { file: "05-uncited-surface.json", rule: "MP-001", violation: "TOUCH_HUMAN_ONLY", verdict: "reject" },
   ];
 
   for (const c of cases) {
@@ -141,26 +143,28 @@ describe("mergeproof: conformance corpus — bad PRs", () => {
 // 2. Conformance corpus: good PRs auto-merge
 // ---------------------------------------------------------------------------
 
+// Phase 0.3: a self-reported causal proof no longer unlocks humanApprove
+// paths, and both good fixtures touch packages/** — so they go to a human.
 describe("mergeproof: conformance corpus — good PRs", () => {
-  it("good PR 01 (causal repro fix) → auto_merge / MP-000 with exit 0", () => {
+  it("good PR 01 (causal repro fix on packages/core) → needs_human / MP-005", () => {
     const res = runMirql(["m", "check", "--pr", join("conformance", "good_prs", "01-valid-repro-fix.json")]);
     const doc = parseJcsStdout(res, "good-01");
-    assert.equal(res.status, EXIT_CODES.OK);
-    assert.equal(doc.ok, true);
-    assert.equal(doc.verdict, "auto_merge");
-    assert.equal(doc.rule, "MP-000");
-    assert.equal(doc.violation, null);
+    assert.equal(res.status, EXIT_CODES.DOMAIN_NEGATIVE);
+    assert.equal(doc.ok, false);
+    assert.equal(doc.verdict, "needs_human");
+    assert.equal(doc.rule, "MP-005");
+    assert.equal(doc.violation, "UNCITED_SURFACE");
     assert.equal(doc.job_id, "job_good_001");
     assert.equal(doc.pr.number, 201);
     assert.equal(doc.delta_phi, -5);
   });
 
-  it("good PR 02 (consolidation with ΔΦ drop + thrift) → auto_merge / MP-000", () => {
+  it("good PR 02 (consolidation on packages/queue) → needs_human / MP-005", () => {
     const res = runMirql(["m", "check", "--pr", join("conformance", "good_prs", "02-valid-consolidate-phi-drop.json")]);
     const doc = parseJcsStdout(res, "good-02");
-    assert.equal(res.status, EXIT_CODES.OK);
-    assert.equal(doc.verdict, "auto_merge");
-    assert.equal(doc.rule, "MP-000");
+    assert.equal(res.status, EXIT_CODES.DOMAIN_NEGATIVE);
+    assert.equal(doc.verdict, "needs_human");
+    assert.equal(doc.rule, "MP-005");
     assert.equal(doc.delta_phi, -85);
   });
 });
@@ -203,9 +207,9 @@ describe("mergeproof: CLI contract", () => {
     const fixture = loadFixture(CONFORMANCE_GOOD, "01-valid-repro-fix.json");
     const res = runMirql(["m", "check"], { input: JSON.stringify(fixture) });
     const doc = parseJcsStdout(res, "stdin");
-    assert.equal(res.status, EXIT_CODES.OK);
-    assert.equal(doc.verdict, "auto_merge");
-    assert.equal(doc.rule, "MP-000");
+    assert.equal(res.status, EXIT_CODES.DOMAIN_NEGATIVE);
+    assert.equal(doc.job_id, "job_good_001");
+    assert.equal(doc.verdict, "needs_human");
   });
 
   it("missing input (no --pr, empty stdin) → USAGE_ERROR 2 with JSON on stderr", () => {
@@ -258,11 +262,11 @@ describe("mergeproof: CLI contract", () => {
 describe("mergeproof: MP-004 stale base via --base / --head", () => {
   const goodPath = join("conformance", "good_prs", "01-valid-repro-fix.json");
 
-  it("--base matching the PR base_sha passes MP-004 and still auto-merges", () => {
+  it("--base matching the PR base_sha passes MP-004 (verdict decided by later gates)", () => {
     const res = runMirql(["m", "check", "--pr", goodPath, "--base", GOOD_01_BASE]);
     const doc = parseJcsStdout(res, "base-match");
-    assert.equal(res.status, EXIT_CODES.OK);
-    assert.equal(doc.rule, "MP-000");
+    assert.equal(res.status, EXIT_CODES.DOMAIN_NEGATIVE);
+    assert.equal(doc.rule, "MP-005");
     assert.equal(doc.checks.stale_base, true);
   });
 
@@ -342,7 +346,7 @@ describe("mergeproof: Law 13 phi gate", () => {
     assert.equal(result.violation, "THRIFT_TEST_FAILED");
   });
 
-  it("refactor with delta_phi < 0 and thrift_test_passed === true → auto_merge", () => {
+  it("refactor with delta_phi < 0 and thrift_test_passed === true → conformance_pass", () => {
     const pr = cleanPr({
       pr: { number: 304, head_sha: "e".repeat(40), base_sha: "b".repeat(40), author: "agent/consolidator", kind: "refactor" },
       phi: { phi_base: 100, phi_head: 60, delta_phi: -40, thrift_test_passed: true },
@@ -350,7 +354,7 @@ describe("mergeproof: Law 13 phi gate", () => {
     const result = evaluatePullRequest(pr, { rootDir: ROOT });
     assert.equal(result.ok, true);
     assert.equal(result.rule, "MP-000");
-    assert.equal(result.verdict, "auto_merge");
+    assert.equal(result.verdict, "conformance_pass");
   });
 
   it("missing proof fails closed with MISSING_PROOF (suite_pass_head alone is not causal)", () => {
@@ -363,12 +367,12 @@ describe("mergeproof: Law 13 phi gate", () => {
     assert.equal(result.checks.proof, false);
   });
 
-  it("a proven suite pass (base AND head) satisfies MP-000 for consolidations", () => {
+  it("a suite pass (base AND head) without a causal proof → needs_human (Phase 0.0b)", () => {
     const pr = cleanPr({ proof: { suite_pass_base: true, suite_pass_head: true } });
     const result = evaluatePullRequest(pr, { rootDir: ROOT });
-    assert.equal(result.ok, true);
-    assert.equal(result.rule, "MP-000");
-    assert.equal(result.verdict, "auto_merge");
+    assert.equal(result.ok, false);
+    assert.equal(result.violation, "NO_CAUSAL_PROOF");
+    assert.equal(result.verdict, "needs_human");
   });
 });
 
@@ -382,6 +386,7 @@ describe("mergeproof: notary signing & ledger append", () => {
       auto_merge: "verdict.issued",
       reject: "verdict.rejected",
       needs_human: "verdict.needs_human",
+      conformance_pass: "verdict.needs_human",
       accepted: "verdict.accepted",
     });
     assert.equal(NOTARY_WRITER_NS, "notary:mergeproof");
@@ -462,9 +467,10 @@ describe("mergeproof: notary signing & ledger append", () => {
   it("signAndAppendVerdict writes a schema-valid verdict.issued event anchored at genesis", () => {
     const tmp = mkdtempSync(join(tmpdir(), "mirql-mp-sign-"));
     try {
+      // The signer maps whatever verdict it is handed. No PR doc can reach
+      // auto_merge since Phase 0.2, so hand it one directly.
       const fixture = loadFixture(CONFORMANCE_GOOD, "01-valid-repro-fix.json");
-      const verdict = evaluatePullRequest(fixture, { rootDir: ROOT });
-      assert.equal(verdict.ok, true);
+      const verdict = { ok: true, rule: "MP-000", violation: null, verdict: "auto_merge", detail: "signer test" };
 
       const result = signAndAppendVerdict(tmp, {
         ...verdict,
@@ -587,10 +593,10 @@ describe("mergeproof: notary signing & ledger append", () => {
         "--sign", "--dir", tmp,
       ]);
       const doc = parseJcsStdout(res, "cli-sign");
-      assert.equal(res.status, EXIT_CODES.OK);
-      assert.equal(doc.verdict, "auto_merge");
+      assert.equal(res.status, EXIT_CODES.DOMAIN_NEGATIVE);
+      assert.equal(doc.verdict, "needs_human");
       assert.equal(doc.ledger.status, "appended");
-      assert.equal(doc.ledger.type, "verdict.issued");
+      assert.equal(doc.ledger.type, "verdict.needs_human");
       assert.equal(doc.ledger.seq, 1);
       assert.equal(doc.ledger.writer.ns, NOTARY_WRITER_NS);
       assert.match(doc.ledger.hash, /^sha256:[0-9a-f]{64}$/);
@@ -600,9 +606,9 @@ describe("mergeproof: notary signing & ledger append", () => {
       assert.equal(lines.length, 1);
       const event = JSON.parse(lines[0]);
       assert.equal(event.id, doc.ledger.event_id);
-      assert.equal(event.payload.verdict, "auto_merge");
+      assert.equal(event.payload.verdict, "needs_human");
 
-      // A needs_human verdict signs verdict.needs_human just the same.
+      // A reject verdict signs verdict.rejected just the same.
       const res2 = runMirql([
         "m", "check",
         "--pr", join("conformance", "bad_prs", "05-uncited-surface.json"),
@@ -610,7 +616,7 @@ describe("mergeproof: notary signing & ledger append", () => {
       ]);
       const doc2 = parseJcsStdout(res2, "cli-sign-2");
       assert.equal(res2.status, EXIT_CODES.DOMAIN_NEGATIVE);
-      assert.equal(doc2.ledger.type, "verdict.needs_human");
+      assert.equal(doc2.ledger.type, "verdict.rejected");
       assert.equal(doc2.ledger.seq, 2);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -660,7 +666,7 @@ describe("mergeproof: notary signing & ledger append", () => {
         spawnSigner(join(CONFORMANCE_GOOD, "02-valid-consolidate-phi-drop.json")),
       ]);
       for (const r of [a, b]) {
-        assert.equal(r.code, EXIT_CODES.OK, `racer exited ${r.code}: ${r.stdout}`);
+        assert.equal(r.code, EXIT_CODES.DOMAIN_NEGATIVE, `racer exited ${r.code}: ${r.stdout}`);
       }
 
       const events = readFileSync(join(tmp, "ledger", "events.jsonl"), "utf8")

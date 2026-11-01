@@ -177,10 +177,14 @@ function evaluateCheckResult(check, fixture = {}) {
       };
     }
 
+    // Phase 0.2: a fixture or doc carries a self-reported proof. It can pass
+    // conformance, never verification; auto_merge comes only from git mode.
     return {
-      verified: true,
-      verdict: "auto_merge",
+      verified: false,
+      verdict: "conformance_pass",
       rule: "MP-000",
+      violation: null,
+      detail: "Self-reported proof satisfies every rule; not measured, so not verified.",
       evidence: fixture.evidence ?? {},
       proof: fixture.proof,
       phi: fixture.phi ?? {},
@@ -221,8 +225,8 @@ function evaluateCheckResult(check, fixture = {}) {
  */
 function verifyGitRepository(options) {
   const repoDir = options.workspaceDir ?? options.repoDir ?? process.cwd();
-  const baseSha = options.baseCommit ?? options.baseSha ?? "HEAD~1";
-  const headSha = options.headCommit ?? options.headSha ?? "HEAD";
+  const baseRef = options.baseCommit ?? options.baseSha ?? "HEAD~1";
+  const headRef = options.headCommit ?? options.headSha ?? "HEAD";
   const reproducerCmd = options.reproducerCommand ?? options.reproducer ?? "npm test";
   const fullTestCmd = options.testCommand ?? reproducerCmd;
 
@@ -247,6 +251,26 @@ function verifyGitRepository(options) {
   }
 
   const isTestPath = (f) => /test|spec/i.test(f) || f.startsWith("tests/");
+
+  // Phase 0.5: resolve both refs to commit SHAs in repoDir, once. Inside the
+  // worktree HEAD moves with every checkout, so a symbolic ref like HEAD or
+  // HEAD~1 would point somewhere else on each step.
+  const resolveCommit = (ref) => {
+    const res = git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+    return res.error || res.status !== 0 ? null : res.stdout.trim();
+  };
+  const baseSha = resolveCommit(baseRef);
+  const headSha = resolveCommit(headRef);
+  if (baseSha === null || headSha === null) {
+    const bad = baseSha === null ? baseRef : headRef;
+    return {
+      verified: false,
+      verdict: "reject",
+      rule: "GIT_DIFF_FAILED",
+      violation: "GIT_DIFF_FAILED",
+      detail: `cannot resolve ${JSON.stringify(bad)} to a commit in ${repoDir}`,
+    };
+  }
 
   // Identify files changed between base and head, including change status
   // (H5: deletions of test files must be detectable for MP-002).
@@ -292,7 +316,6 @@ function verifyGitRepository(options) {
         ? { detail: `Git diff deletes test file(s): ${deletedTests.join(", ")}` }
         : {}),
     },
-    human_approved: options.humanApproved === true || options.human_approval === true,
   });
 
   if (!antiCheatCheck.ok) {
@@ -333,11 +356,30 @@ function verifyGitRepository(options) {
 
     const gitWt = (args) => git(args, worktreeDir);
 
+    // Phase 0.6: a checkout that fails leaves the worktree in an unknown
+    // state, so no test result after it can be trusted.
+    const checkout = (args) => {
+      const res = gitWt(["checkout", ...args]);
+      if (res.error || res.status !== 0) {
+        return {
+          verified: false,
+          verdict: "reject",
+          rule: "CHECKOUT_FAILED",
+          violation: "CHECKOUT_FAILED",
+          detail: `git checkout ${args.join(" ")} failed in the verification worktree: ${
+            res.stderr || res.error?.message || "unknown git error"
+          }`,
+        };
+      }
+      return null;
+    };
+    const checkoutBaseWithHeadTests = () =>
+      checkout([baseSha, "--force"]) ??
+      (testFiles.length > 0 ? checkout([headSha, "--", ...testFiles]) : null);
+
     // 1. Red on Base: base code with the head reproducer tests retained
-    gitWt(["checkout", baseSha, "--force"]);
-    if (testFiles.length > 0) {
-      gitWt(["checkout", headSha, "--", ...testFiles]);
-    }
+    const redCheckout = checkoutBaseWithHeadTests();
+    if (redCheckout !== null) return redCheckout;
     const redRes = runCmd(reproducerCmd, worktreeDir);
     if (!Number.isInteger(redRes.exitCode)) {
       return {
@@ -370,7 +412,8 @@ function verifyGitRepository(options) {
     }
 
     // 2. Green on Head: full head state
-    gitWt(["checkout", headSha, "--force"]);
+    const greenCheckout = checkout([headSha, "--force"]);
+    if (greenCheckout !== null) return greenCheckout;
     const greenRes = runCmd(fullTestCmd, worktreeDir);
     if (!Number.isInteger(greenRes.exitCode) || greenRes.exitCode !== 0) {
       return {
@@ -405,10 +448,8 @@ function verifyGitRepository(options) {
 
     // 3. Re-Red: revert every non-test change (base code + head tests). A
     // full base checkout handles added AND deleted non-test files correctly.
-    gitWt(["checkout", baseSha, "--force"]);
-    if (testFiles.length > 0) {
-      gitWt(["checkout", headSha, "--", ...testFiles]);
-    }
+    const reRedCheckout = checkoutBaseWithHeadTests();
+    if (reRedCheckout !== null) return reRedCheckout;
     const reRedRes = runCmd(reproducerCmd, worktreeDir);
     if (!Number.isInteger(reRedRes.exitCode)) {
       return {

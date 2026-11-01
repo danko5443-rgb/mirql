@@ -17,7 +17,7 @@
 //   verdict.issued / verdict.rejected / verdict.needs_human event to
 //   <mirqlDir>/ledger/events.jsonl (writer ns `notary:mergeproof`).
 // - Output is pure JCS JSON on stdout; exit codes are the canonical
-//   EXIT_CODES (0 auto_merge, 1 reject/needs_human, 2 usage error).
+//   EXIT_CODES (0 auto_merge, 1 reject/needs_human/conformance_pass, 2 usage error).
 //
 // Bare invocation, `--help`, `-h`, and `status` keep the W1 stub contract:
 //   { "tool": "mergeproof", "status": "stub" }
@@ -186,7 +186,7 @@ function emitUsage() {
       },
       exit_codes: {
         OK: "0 auto_merge",
-        DOMAIN_NEGATIVE: "1 reject / needs_human",
+        DOMAIN_NEGATIVE: "1 reject / needs_human / conformance_pass",
         USAGE_ERROR: "2 bad arguments or malformed input",
       },
     }),

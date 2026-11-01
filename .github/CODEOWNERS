@@ -1,0 +1,7 @@
+# Phase 0.0c: the referee and its inputs need the owner's review.
+# Enforced once the main ruleset requires code-owner review.
+/.github/      @ahmed-3m
+/policy/       @ahmed-3m
+/scripts/      @ahmed-3m
+/bin/          @ahmed-3m
+/conformance/  @ahmed-3m

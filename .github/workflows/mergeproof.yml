@@ -42,10 +42,20 @@ jobs:
             }
           "
 
-      - name: Run Candidate Test Suite
+      # Phase 0.0a: the candidate's tests run under the BASE notary's runner
+      # (MIRQL_TEST_ROOT points it at the candidate tree), so a PR cannot swap
+      # the runner that judges it. Falls back to the candidate's runner only
+      # during bootstrap, while base does not yet support MIRQL_TEST_ROOT.
+      - name: Run Candidate Test Suite (Base-Notary Runner)
         id: head_suite
         working-directory: candidate
-        run: node scripts/run-tests.mjs
+        run: |
+          if grep -q MIRQL_TEST_ROOT ../base-notary/scripts/run-tests.mjs 2>/dev/null; then
+            MIRQL_TEST_ROOT="$PWD" node ../base-notary/scripts/run-tests.mjs
+          else
+            echo "::warning::base-notary runner lacks MIRQL_TEST_ROOT; bootstrap fallback to the candidate runner"
+            node scripts/run-tests.mjs
+          fi
 
       # Law 7 & 16: measure the BASE suite too — its real outcome feeds
       # proof.suite_pass_base. Non-blocking on purpose: a red base is EVIDENCE
@@ -88,8 +98,28 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         working-directory: candidate
+        # Only auto_merge exits 0, and CI cannot reach auto_merge until a
+        # measured causal proof exists (Phase 3). needs_human and
+        # conformance_pass therefore pass this check with a notice: the main
+        # ruleset (Phase 0.0c) requires a human review on every PR. A reject or
+        # any other failure fails the check.
         run: |
+          set +e
           node ../base-notary/bin/mirql.mjs m check \
             --pr ./pr-doc.json \
             --base "$BASE_SHA" \
-            --head "$HEAD_SHA"
+            --head "$HEAD_SHA" > verdict.json
+          status=$?
+          set -e
+          cat verdict.json
+          verdict=$(node -e "try{const l=require('fs').readFileSync('verdict.json','utf8').trim().split(/\r?\n/).pop();process.stdout.write(JSON.parse(l).verdict??'')}catch{}")
+          case "$verdict" in
+            auto_merge)
+              exit 0 ;;
+            needs_human|conformance_pass)
+              echo "::notice::mergeproof verdict: $verdict - human review required"
+              exit 0 ;;
+            *)
+              echo "::error::mergeproof verdict: ${verdict:-none} (exit $status)"
+              exit 1 ;;
+          esac
