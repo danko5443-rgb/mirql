@@ -1,4 +1,4 @@
-// packages/inbox/index.mjs — Cryptographic Human Sovereignty Portal (Law 6).
+// packages/inbox/index.mjs — Cryptographic Human Sovereignty Portal (Law 6, Milestone M6).
 import { resolve as resolvePath, join } from "node:path";
 import { EXIT_CODES, WRITER_ACL } from "../core/index.mjs";
 
@@ -6,7 +6,14 @@ import { runGenesis } from "./genesis.mjs";
 import { sendIntent } from "./send.mjs";
 import { renderDigest, formatMicroUsd } from "./digest.mjs";
 import { actOnItem } from "./act.mjs";
-import { createProposal } from "./propose.mjs";
+import {
+  createProposal,
+  create1TapProposal,
+  distillIntent,
+  formatIntentDistilledEvent,
+  formatProposalCreatedEvent,
+  INTENT_CATEGORIES,
+} from "./propose.mjs";
 import {
   generateFactoryKeypairs,
   loadKeyring,
@@ -39,6 +46,11 @@ export {
   formatMicroUsd,
   actOnItem,
   createProposal,
+  create1TapProposal,
+  distillIntent,
+  formatIntentDistilledEvent,
+  formatProposalCreatedEvent,
+  INTENT_CATEGORIES,
   generateFactoryKeypairs,
   loadKeyring,
   loadWriterKey,
@@ -78,6 +90,16 @@ export function resolveMirqlDir(dirArg) {
   return resolvePath(raw);
 }
 
+const BOOLEAN_FLAGS = new Set([
+  "approve",
+  "reject",
+  "kill",
+  "resume",
+  "help",
+  "version",
+  "all",
+]);
+
 /**
  * CLI parser helper. Kebab-case flags (--signing-key, --target-id,
  * --idempotency-key, --human-key-out, ...) populate BOTH the kebab-case and
@@ -102,7 +124,9 @@ function parseArgs(args) {
         setOpt(arg.slice(2, eqIdx), arg.slice(eqIdx + 1));
       } else {
         const key = arg.slice(2);
-        if (i + 1 < args.length && !args[i + 1].startsWith("-")) {
+        if (BOOLEAN_FLAGS.has(key)) {
+          setOpt(key, true);
+        } else if (i + 1 < args.length && !args[i + 1].startsWith("-")) {
           setOpt(key, args[i + 1]);
           i += 1;
         } else {
@@ -111,7 +135,9 @@ function parseArgs(args) {
       }
     } else if (arg.startsWith("-")) {
       const key = arg.slice(1);
-      if (i + 1 < args.length && !args[i + 1].startsWith("-")) {
+      if (BOOLEAN_FLAGS.has(key)) {
+        setOpt(key, true);
+      } else if (i + 1 < args.length && !args[i + 1].startsWith("-")) {
         setOpt(key, args[i + 1]);
         i += 1;
       } else {
@@ -193,12 +219,32 @@ export function runCli(argv = []) {
         return EXIT_CODES.OK;
       }
       case "act": {
-        const result = actOnItem(mirqlDir, options, options);
+        const actInput = { ...options };
+        if (options.approve === true) {
+          actInput.decision = "approve";
+        } else if (options.reject === true) {
+          actInput.decision = "reject";
+        } else if (options.kill === true) {
+          actInput.decision = "kill";
+        } else if (options.resume === true) {
+          actInput.decision = "resume";
+        }
+        const remainingPositional = positional.slice(1);
+        if (!actInput.target_id && !actInput["target-id"] && !actInput.targetId && remainingPositional[0]) {
+          actInput.target_id = remainingPositional[0];
+          actInput["target-id"] = remainingPositional[0];
+        }
+        const result = actOnItem(mirqlDir, actInput, actInput);
         process.stdout.write(JSON.stringify(result) + "\n");
         return EXIT_CODES.OK;
       }
       case "propose": {
-        const result = createProposal(mirqlDir, options, options);
+        const propInput = { ...options };
+        const remainingPositional = positional.slice(1);
+        if (!propInput.text && !propInput["from-text"] && remainingPositional.length > 0) {
+          propInput.text = remainingPositional.join(" ");
+        }
+        const result = createProposal(mirqlDir, propInput, propInput);
         process.stdout.write(JSON.stringify(result) + "\n");
         return EXIT_CODES.OK;
       }

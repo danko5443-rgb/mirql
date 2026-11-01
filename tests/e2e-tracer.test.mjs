@@ -300,7 +300,7 @@ describe("End-to-End Self-Hosting Tracer Bullet (W5b hardened: full 5-binary aut
       const resumeDoc = JSON.parse(resumeRes.stdout);
       assert.equal(resumeDoc.status, "acted");
       assert.equal(resumeDoc.decision, "resume");
-      assert.equal(resumeDoc.seq, 7);
+      assert.equal(resumeDoc.seq, 8);
       assert.equal(resumeDoc.event.type, "mirql.resume");
       assert.equal(resumeDoc.event.writer.ns, "human:owner");
 
@@ -312,25 +312,25 @@ describe("End-to-End Self-Hosting Tracer Bullet (W5b hardened: full 5-binary aut
       const viewRes = runBin(BIN_MIRQL, ["l", "view", "state", "--dir", mirqlDir]);
       assert.equal(viewRes.status, 0, `View failed: ${viewRes.stderr}`);
       const stateDoc = JSON.parse(viewRes.stdout);
-      assert.equal(stateDoc.seq, 7);
+      assert.equal(stateDoc.seq, 8);
       assert.equal(stateDoc.halted, false);
 
       // The INBOX digest fold lifts the halt on mirql.resume.
       const digestResumed = JSON.parse(runBin(BIN_MIRQL, ["i", "digest", "--dir", mirqlDir]).stdout);
       assert.equal(digestResumed.halted, false);
-      assert.equal(digestResumed.seq, 7);
+      assert.equal(digestResumed.seq, 8);
 
       // =====================================================================
       // Step 8: Final full-ledger audit
       // =====================================================================
       events = readAllEvents(mirqlDir);
-      assert.equal(events.length, 7);
+      assert.equal(events.length, 8);
       const finalVerify = runBin(BIN_MIRQL, ["l", "verify", "--dir", mirqlDir]);
       assert.equal(finalVerify.status, 0, `Final verify failed: ${finalVerify.stderr}`);
       const finalAudit = JSON.parse(finalVerify.stdout);
       assert.equal(finalAudit.valid, true);
-      assert.equal(finalAudit.event_count, 7);
-      assert.equal(finalAudit.head_hash, events[6].hash);
+      assert.equal(finalAudit.event_count, 8);
+      assert.equal(finalAudit.head_hash, events[7].hash);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
