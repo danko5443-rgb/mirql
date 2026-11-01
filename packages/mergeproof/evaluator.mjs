@@ -337,17 +337,8 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     : [];
 
   // Check test deletions discovered directly via authoritative git diff (Point 3)
-  const isTestPath = (p) => {
-    const norm = normalizePath(p);
-    return (
-      norm.startsWith("tests/") ||
-      norm.startsWith("test/") ||
-      norm.includes(".test.") ||
-      norm.includes("_test.")
-    );
-  };
   for (const df of gitDeletedFiles) {
-    if (isTestPath(df)) {
+    if (isTestFilePath(df)) {
       const norm = normalizePath(df);
       if (!testsDeleted.includes(norm)) {
         testsDeleted.push(norm);

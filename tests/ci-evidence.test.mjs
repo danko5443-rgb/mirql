@@ -15,8 +15,10 @@ import {
   isTestFilePath,
   collectDiff,
   buildPrDoc,
+  measureThrift,
   main,
 } from "../scripts/ci-evidence.mjs";
+import { verifyThrift } from "../packages/run/index.mjs";
 
 function git(repoDir, ...args) {
   const res = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", timeout: 15000 });
@@ -91,6 +93,58 @@ describe("ci-evidence: honest notary evidence builder", () => {
       assert.deepEqual(doc.evidence.tests_deleted, ["tests/old.test.mjs"]);
       assert.equal(doc.phi.delta_phi, 0);
       assert.equal(doc.pr.kind, "pr");
+    });
+  });
+
+  describe("3b. Thrift Test producer (issue #13)", () => {
+    // The real criteria engine — exactly what the base notary will inject in CI.
+    // verifyThrift's own criteria internals are pinned by tests/m2-phi.test.mjs;
+    // these tests pin the MEASUREMENT COMPOSITION and the pr-doc propagation.
+    const input = {
+      phiBase: 1000,
+      phiHead: 900,
+      deletedTests: [],
+      filesChanged: ["packages/run/phi.mjs"],
+      depsBase: 0,
+      depsHead: 0,
+      verifyThriftFn: verifyThrift,
+    };
+    const prDocBase = {
+      pr: { number: 9, base_sha: "b".repeat(40), head_sha: "h".repeat(40), author: "agent" },
+      diff: { files_changed: input.filesChanged, tests_deleted: [] },
+      suite: { pass_base: true, pass_head: true },
+      phi: { delta_phi: -100 },
+    };
+
+    it("passes only when every thrift criterion genuinely holds", () => {
+      const res = measureThrift(input);
+      assert.equal(res.passed, true);
+      assert.deepEqual(res.reasons, []);
+      assert.equal(res.evidence.surface_changed, false);
+      assert.equal(res.evidence.deps_after, 0);
+    });
+
+    it("fails closed on any violated criterion (deleted tests shown; surface, deps, ΔΦ delegate to verifyThrift)", () => {
+      const res = measureThrift({ ...input, deletedTests: ["tests/x.test.mjs"] });
+      assert.equal(res.passed, false);
+      assert.ok(res.reasons.some((r) => r.includes("Test preservation")));
+    });
+
+    it("omits the dependency criterion when package.json is unmeasurable", () => {
+      const res = measureThrift({ ...input, depsBase: -1 });
+      assert.equal(res.passed, true, "unmeasurable deps must not fabricate a failure");
+      assert.equal(res.evidence.deps_before, -1);
+    });
+
+    it("flows the measured verdict into phi.thrift_test_passed (buildPrDoc)", () => {
+      const doc = buildPrDoc({ ...prDocBase, thrift: measureThrift(input) });
+      assert.equal(doc.phi.thrift_test_passed, true);
+      assert.equal(doc.phi.thrift_evidence.surface_changed, false);
+
+      const failed = measureThrift({ ...input, deletedTests: ["tests/x.test.mjs"] });
+      const docFail = buildPrDoc({ ...prDocBase, thrift: failed });
+      assert.equal(docFail.phi.thrift_test_passed, false);
+      assert.ok(docFail.phi.thrift_reasons.length > 0);
     });
   });
 
