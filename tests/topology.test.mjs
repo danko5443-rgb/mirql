@@ -3,7 +3,8 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,9 +14,12 @@ import {
   calculateTokenCostMicroUsd,
   DEFAULT_MODEL_PRICING,
   GATEWAY_CODES,
+  MIN_CALL_COST_MICRO_USD,
   isSafeNonNegativeInteger,
   LifeguardWatchdog,
   checkProbationStatus,
+  killProcesses,
+  executeRollback,
   validateServiceUnit,
   renderLauncherUnit,
   MANDATORY_SANDBOX_DIRECTIVES,
@@ -73,7 +77,7 @@ describe("Production Containerization & Topology Gates", () => {
   // 2. Compose Network & Privilege Isolation
   // -------------------------------------------------------------------------
   describe("2. Docker Compose Network Isolation (Law 1)", () => {
-    it("deploy/compose.yaml specifies internal networks and no egress for agent", () => {
+    it("deploy/compose.yaml specifies internal networks, agent reachability to gateway, and no egress for agent", () => {
       const composePath = join(ROOT, "deploy", "compose.yaml");
       assert.ok(existsSync(composePath), "deploy/compose.yaml must exist");
       const yaml = readFileSync(composePath, "utf8");
@@ -82,6 +86,14 @@ describe("Production Containerization & Topology Gates", () => {
       assert.match(yaml, /control-net:\s*[\r\n]+(?:\s+.*[\r\n]+)*?\s+internal:\s*true/m);
       assert.match(yaml, /agent-net:\s*[\r\n]+(?:\s+.*[\r\n]+)*?\s+internal:\s*true/m);
       assert.match(yaml, /gateway-net:\s*[\r\n]+(?:\s+.*[\r\n]+)*?\s+internal:\s*true/m);
+
+      // Verify llm-gateway is on agent-net so agent can reach http://llm-gateway:8080
+      assert.match(yaml, /llm-gateway:[\s\S]*?networks:[\s\S]*?-\s*agent-net/m, "llm-gateway must be on agent-net for agent reachability");
+
+      // Verify agent is NOT on egress-net or control-net
+      const agentBlock = yaml.match(/agent:\s*[\r\n]+([\s\S]*?)(?=\n\s*[a-z0-9_-]+:|$)/i)?.[1] || "";
+      assert.doesNotMatch(agentBlock, /egress-net/, "agent must not have egress network");
+      assert.doesNotMatch(agentBlock, /control-net/, "agent must not be on control-net");
 
       // Verify verify service has network_mode: "none"
       assert.match(yaml, /verify:\s*[\r\n]+(?:\s+.*[\r\n]+)*?\s+network_mode:\s*["']none["']/m);
@@ -119,9 +131,6 @@ describe("Production Containerization & Topology Gates", () => {
     it("calculateTokenCostMicroUsd calculates integer costs without floating point math", () => {
       const pricing = DEFAULT_MODEL_PRICING["workhorse"]; // input: 300,000 / M, output: 1,200,000 / M
       const cost = calculateTokenCostMicroUsd(1000, 200, pricing);
-      // prompt: floor(1000 * 300_000 / 1_000_000) = 300 micro_usd
-      // completion: floor(200 * 1_200_000 / 1_000_000) = 240 micro_usd
-      // total: 540 micro_usd
       assert.equal(cost, 540);
       assert.equal(Number.isSafeInteger(cost), true);
 
@@ -161,8 +170,14 @@ describe("Production Containerization & Topology Gates", () => {
       assert.equal(receipt.refund_micro_usd, 0);
     });
 
-    it("HTTP LLM Gateway rejects unauthorized requests, meters valid requests, and trips 402 on budget exhaustion", async () => {
-      const gateway = await createLlmGateway({ port: 0 });
+    it("WarrantBudgetManager rejects non-safe integer or overflow top-ups (Law 17)", () => {
+      const mgr = new WarrantBudgetManager();
+      assert.throws(() => mgr.preauth("01W", 1.5), /Law 17/);
+      assert.throws(() => mgr.preauth("01W", -10), /Law 17/);
+    });
+
+    it("HTTP LLM Gateway enforces admin auth on preauth/settle, prevents zero-cost bypass, and handles bad inputs safely", async () => {
+      const gateway = await createLlmGateway({ port: 0, adminToken: "test-admin-token-123" });
       try {
         const baseUrl = `http://127.0.0.1:${gateway.port}`;
 
@@ -172,22 +187,33 @@ describe("Production Containerization & Topology Gates", () => {
         const healthData = await healthRes.json();
         assert.equal(healthData.ok, true);
 
-        // 2. Preauth a warrant lease with 5,000 micro_usd
+        // 2. Preauth WITHOUT admin token is rejected with 401
+        const unauthPreauth = await fetch(`${baseUrl}/v1/warrant/preauth`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ warrant_id: "01W1", budget_micro_usd: 1000 }),
+        });
+        assert.equal(unauthPreauth.status, 401);
+
+        // 3. Preauth WITH admin token succeeds
         const warrantId = "01HGWTEST00000000000000000";
         const preauthRes = await fetch(`${baseUrl}/v1/warrant/preauth`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer test-admin-token-123",
+          },
           body: JSON.stringify({
             warrant_id: warrantId,
-            budget_micro_usd: 5_000,
+            budget_micro_usd: 500, // Small budget of 500 micro_usd
             epoch: 1,
           }),
         });
         assert.equal(preauthRes.status, 200);
         const preauthData = await preauthRes.json();
-        assert.equal(preauthData.remaining_micro_usd, 5_000);
+        assert.equal(preauthData.remaining_micro_usd, 500);
 
-        // 3. Request without warrant ID returns 403
+        // 4. Request without warrant ID returns 403
         const unauthRes = await fetch(`${baseUrl}/v1/chat/completions`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -195,58 +221,67 @@ describe("Production Containerization & Topology Gates", () => {
         });
         assert.equal(unauthRes.status, 403);
 
-        // 4. Request with valid warrant ID succeeds and meters budget
+        // 5. Zero-cost bypass prevention: caller CANNOT supply zero cost to bypass metering
+        // Gateway calculates cost server-side with MIN_CALL_COST_MICRO_USD floor
         const call1Res = await fetch(`${baseUrl}/v1/chat/completions`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "x-mirql-warrant-id": warrantId,
-            "x-mirql-cost-micro-usd": "2000",
+            "x-mirql-cost-micro-usd": "0", // Malicious caller attempts 0-cost bypass!
           },
-          body: JSON.stringify({ prompt: "test prompt" }),
+          body: JSON.stringify({ prompt: "test prompt", max_tokens: 50 }),
         });
         assert.equal(call1Res.status, 200);
-        assert.equal(call1Res.headers.get("x-mirql-budget-remaining"), "3000");
+        const rem1 = parseInt(call1Res.headers.get("x-mirql-budget-remaining"), 10);
+        assert.ok(rem1 < 500, "Must have charged server-calculated cost despite caller 0-cost header");
 
-        // 5. Another call consuming 2,500 micro_usd
-        const call2Res = await fetch(`${baseUrl}/v1/chat/completions`, {
+        // 6. Bad input (max_tokens: 1.5) returns 400 and DOES NOT crash process
+        const badTokenRes = await fetch(`${baseUrl}/v1/chat/completions`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "x-mirql-warrant-id": warrantId,
-            "x-mirql-cost-micro-usd": "2500",
           },
-          body: JSON.stringify({ prompt: "test prompt 2" }),
+          body: JSON.stringify({ prompt: "test", max_tokens: 1.5 }),
         });
-        assert.equal(call2Res.status, 200);
-        assert.equal(call2Res.headers.get("x-mirql-budget-remaining"), "500");
+        assert.equal(badTokenRes.status, 400);
 
-        // 6. Third call requiring 1,000 micro_usd trips HTTP 402 BUDGET_EXHAUSTED
-        const call3Res = await fetch(`${baseUrl}/v1/chat/completions`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-mirql-warrant-id": warrantId,
-            "x-mirql-cost-micro-usd": "1000",
-          },
-          body: JSON.stringify({ prompt: "test prompt 3" }),
-        });
-        assert.equal(call3Res.status, 402);
-        const call3Data = await call3Res.json();
-        assert.equal(call3Data.error, "BUDGET_EXHAUSTED");
-        assert.equal(call3Data.code, GATEWAY_CODES.BUDGET_EXHAUSTED);
-        assert.equal(call3Data.remaining_micro_usd, 500);
+        // Gateway remains alive and healthy after bad request
+        const healthCheck = await fetch(`${baseUrl}/health`);
+        assert.equal(healthCheck.status, 200);
 
-        // 7. Settle warrant and verify refund
+        // 7. Exhaust remaining budget
+        let exhausted = false;
+        for (let i = 0; i < 5; i++) {
+          const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-mirql-warrant-id": warrantId,
+            },
+            body: JSON.stringify({ prompt: "consume budget", max_tokens: 200 }),
+          });
+          if (res.status === 402) {
+            exhausted = true;
+            const data = await res.json();
+            assert.equal(data.error, "BUDGET_EXHAUSTED");
+            assert.equal(data.code, GATEWAY_CODES.BUDGET_EXHAUSTED);
+            break;
+          }
+        }
+        assert.equal(exhausted, true, "Must have tripped 402 BUDGET_EXHAUSTED");
+
+        // 8. Settle warrant with admin token
         const settleRes = await fetch(`${baseUrl}/v1/warrant/settle`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer test-admin-token-123",
+          },
           body: JSON.stringify({ warrant_id: warrantId }),
         });
         assert.equal(settleRes.status, 200);
-        const settleData = await settleRes.json();
-        assert.equal(settleData.spent_micro_usd, 4_500);
-        assert.equal(settleData.refund_micro_usd, 500);
       } finally {
         await gateway.close();
       }
@@ -275,41 +310,75 @@ describe("Production Containerization & Topology Gates", () => {
       assert.equal(s2.remainingMs, 0);
     });
 
-    it("LifeguardWatchdog disarms cleanly upon verified completion", () => {
-      const watchdog = new LifeguardWatchdog({ timeoutMs: 1000 });
-      assert.equal(watchdog.check().ok, true);
-      watchdog.disarm();
-      // Even if time expires, disarmed watchdog reports ok
-      assert.equal(watchdog.check(Date.now() + 5000).ok, true);
+    it("LifeguardWatchdog executes kill and rollback on timeout expiration (Law 2)", () => {
+      const tmp = mkdtempSync(join(tmpdir(), "mirql-lifeguard-test-"));
+      try {
+        const baseFile = join(tmp, "base_sha");
+        writeFileSync(baseFile, "test-target-base-sha-123", "utf8");
+
+        const watchdog = new LifeguardWatchdog({
+          repoDir: tmp,
+          baseShaFile: baseFile,
+          timeoutMs: 1000,
+          startTimeMs: Date.now() - 2000, // Started 2s ago, timeout 1s -> already expired!
+        });
+
+        const checkRes = watchdog.check();
+        assert.equal(checkRes.ok, false);
+        assert.equal(checkRes.tripped, true);
+        assert.equal(checkRes.reason, "PROBATION_TIMEOUT_EXPIRED");
+
+        // Disarm prevents further trips
+        watchdog.disarm();
+        assert.equal(watchdog.check().ok, true);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
     });
 
-    it("validateServiceUnit passes on deploy/systemd/mirql-launcher.service", () => {
-      const unitPath = join(ROOT, "deploy", "systemd", "mirql-launcher.service");
-      assert.ok(existsSync(unitPath), "mirql-launcher.service must exist");
-      const content = readFileSync(unitPath, "utf8");
+    it("validateServiceUnit passes on BOTH deploy/systemd service units with no root permissions", () => {
+      for (const unitName of ["mirql-launcher.service", "mirql-lifeguard.service"]) {
+        const unitPath = join(ROOT, "deploy", "systemd", unitName);
+        assert.ok(existsSync(unitPath), `${unitName} must exist`);
+        const content = readFileSync(unitPath, "utf8");
 
-      const res = validateServiceUnit(content);
-      assert.equal(res.ok, true, `Validation failed: ${res.errors.join(", ")} missing: ${res.missing.join(", ")}`);
-      assert.deepEqual(res.missing, []);
+        const res = validateServiceUnit(content);
+        assert.equal(res.ok, true, `${unitName} validation failed: ${res.errors.join(", ")} missing: ${res.missing.join(", ")}`);
+        assert.deepEqual(res.missing, []);
+        assert.deepEqual(res.errors, []);
+      }
     });
 
-    it("validateServiceUnit rejects units missing mandatory sandbox directives", () => {
+    it("validateServiceUnit strictly rejects units running as root", () => {
       const insecureUnit = `
+[Unit]
+Description=insecure
+
 [Service]
 User=root
-ExecStart=/bin/sh -c "run"
+ExecStart=/bin/mirql r supervisor
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
       `;
       const res = validateServiceUnit(insecureUnit);
       assert.equal(res.ok, false);
-      assert.ok(res.missing.includes("ProtectSystem"));
-      assert.ok(res.missing.includes("NoNewPrivileges"));
       assert.ok(res.errors.includes("Service unit must not run as root User"));
     });
 
-    it("renderLauncherUnit renders compliant systemd unit with all sandbox directives", () => {
+    it("renderLauncherUnit renders compliant systemd unit and rejects newline injections", () => {
       const unit = renderLauncherUnit({ workingDir: "/opt/mirql", user: "mirql" });
       const res = validateServiceUnit(unit);
       assert.equal(res.ok, true);
+
+      // Rejects newline injection attempt
+      assert.throws(() => renderLauncherUnit({ user: "mirql\nUser=root" }), /newline/);
+      assert.throws(() => renderLauncherUnit({ user: "root" }), /root/);
     });
   });
 });

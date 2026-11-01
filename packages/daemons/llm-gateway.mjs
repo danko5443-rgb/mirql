@@ -1,9 +1,8 @@
 // packages/daemons/llm-gateway.mjs — Zero-dependency LLM Gateway sidecar.
 // Enforces Law 1 (two-process privilege split) and Law 17 (integer-only micro_usd budget metering).
 
-import { createServer } from "node:http";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { createServer, request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 
 /** Canonical exit/error codes matching EXIT_CODES. */
 export const GATEWAY_CODES = Object.freeze({
@@ -12,6 +11,12 @@ export const GATEWAY_CODES = Object.freeze({
   USAGE_ERROR: 2,
   BUDGET_EXHAUSTED: 7,
 });
+
+/** Maximum allowable request body size (10 MB). */
+export const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
+
+/** Minimum cost in micro_usd for any inference call (100 micro_usd floor). */
+export const MIN_CALL_COST_MICRO_USD = 100;
 
 /** Default model pricing in micro_usd per 1,000,000 tokens (all safe integers). */
 export const DEFAULT_MODEL_PRICING = Object.freeze({
@@ -41,7 +46,7 @@ export function isSafeNonNegativeInteger(n) {
  */
 export function calculateTokenCostMicroUsd(promptTokens, completionTokens, pricing) {
   if (!isSafeNonNegativeInteger(promptTokens) || !isSafeNonNegativeInteger(completionTokens)) {
-    throw new TypeError("Token counts must be non-negative safe integers");
+    throw new TypeError("Token counts must be non-negative safe integers (Law 17)");
   }
   const inputCost = Math.floor((promptTokens * pricing.input_per_m) / 1_000_000);
   const outputCost = Math.floor((completionTokens * pricing.output_per_m) / 1_000_000);
@@ -65,7 +70,7 @@ export class WarrantBudgetManager {
    * @param {number} [epoch=1]
    */
   preauth(warrantId, budgetMicroUsd, epoch = 1) {
-    if (typeof warrantId !== "string" || warrantId.length === 0) {
+    if (typeof warrantId !== "string" || warrantId.trim().length === 0) {
       throw new Error("Invalid warrantId");
     }
     if (!isSafeNonNegativeInteger(budgetMicroUsd)) {
@@ -79,6 +84,9 @@ export class WarrantBudgetManager {
     if (existing) {
       if (existing.settled) {
         throw new Error(`Warrant ${warrantId} has already been settled`);
+      }
+      if (existing.budget_micro_usd + budgetMicroUsd > Number.MAX_SAFE_INTEGER) {
+        throw new Error("Integer overflow in budget preauth (Law 17)");
       }
       existing.budget_micro_usd += budgetMicroUsd;
       existing.remaining_micro_usd += budgetMicroUsd;
@@ -111,14 +119,13 @@ export class WarrantBudgetManager {
 
   /**
    * Attempts to deduct an integer cost from the warrant budget.
-   * Returns { allowed: true, remaining_micro_usd } or { allowed: false, reason: "BUDGET_EXHAUSTED" }.
    *
    * @param {string} warrantId
    * @param {number} costMicroUsd
    */
   deduct(warrantId, costMicroUsd) {
-    if (!isSafeNonNegativeInteger(costMicroUsd)) {
-      throw new Error("costMicroUsd must be a non-negative safe integer (Law 17)");
+    if (!isSafeNonNegativeInteger(costMicroUsd) || costMicroUsd <= 0) {
+      throw new Error("costMicroUsd must be a positive safe integer (Law 17)");
     }
     const entry = this.warrants.get(warrantId);
     if (!entry) {
@@ -165,168 +172,260 @@ export class WarrantBudgetManager {
  * @param {object} [options]
  * @param {number} [options.port=0]
  * @param {string} [options.host="127.0.0.1"]
+ * @param {string} [options.adminToken]
  * @param {string} [options.upstreamUrl]
- * @returns {Promise<{ server: import("node:http").Server, port: number, manager: WarrantBudgetManager, close: () => Promise<void> }>}
+ * @returns {Promise<{ server: import("node:http").Server, port: number, manager: WarrantBudgetManager, adminToken: string, close: () => Promise<void> }>}
  */
 export function createLlmGateway(options = {}) {
   const manager = new WarrantBudgetManager();
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 0;
+  const adminToken = options.adminToken ?? process.env.GATEWAY_ADMIN_TOKEN ?? "mirql-gateway-admin-secret";
+  const upstreamUrl = options.upstreamUrl ?? null;
 
   const server = createServer(async (req, res) => {
-    // Collect body
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const bodyText = Buffer.concat(chunks).toString("utf8");
-    let jsonBody = null;
-    if (bodyText.length > 0) {
-      try {
-        jsonBody = JSON.parse(bodyText);
-      } catch {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "INVALID_JSON", code: GATEWAY_CODES.USAGE_ERROR }));
-        return;
-      }
-    }
+    try {
+      // Body collection with strict payload size limit
+      let receivedBytes = 0;
+      const chunks = [];
+      let payloadTooLarge = false;
 
-    const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-    const pathname = url.pathname;
-
-    // Route: GET /health
-    if (req.method === "GET" && (pathname === "/health" || pathname === "/v1/health")) {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, status: "healthy", active_warrants: manager.warrants.size }));
-      return;
-    }
-
-    // Route: POST /v1/warrant/preauth
-    if (req.method === "POST" && pathname === "/v1/warrant/preauth") {
-      try {
-        if (!jsonBody || typeof jsonBody !== "object") {
-          throw new Error("Missing request body");
+      for await (const chunk of req) {
+        receivedBytes += chunk.length;
+        if (receivedBytes > MAX_REQUEST_BODY_BYTES) {
+          payloadTooLarge = true;
+          break;
         }
-        const { warrant_id, budget_micro_usd, epoch } = jsonBody;
-        const entry = manager.preauth(warrant_id, budget_micro_usd, epoch);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, ...entry }));
-      } catch (err) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "PREAUTH_FAILED", detail: err.message, code: GATEWAY_CODES.USAGE_ERROR }));
+        chunks.push(chunk);
       }
-      return;
-    }
 
-    // Route: GET /v1/warrant/:id
-    if (req.method === "GET" && pathname.startsWith("/v1/warrant/")) {
-      const warrantId = decodeURIComponent(pathname.slice("/v1/warrant/".length));
-      const entry = manager.get(warrantId);
-      if (!entry) {
-        res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "WARRANT_NOT_FOUND", warrant_id: warrantId }));
-        return;
-      }
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, ...entry }));
-      return;
-    }
-
-    // Route: POST /v1/warrant/settle
-    if (req.method === "POST" && pathname === "/v1/warrant/settle") {
-      try {
-        const warrantId = jsonBody?.warrant_id;
-        const receipt = manager.settle(warrantId);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, ...receipt }));
-      } catch (err) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "SETTLE_FAILED", detail: err.message }));
-      }
-      return;
-    }
-
-    // Route: POST /v1/chat/completions (Metered proxy endpoint)
-    if (req.method === "POST" && (pathname === "/v1/chat/completions" || pathname === "/v1/proxy")) {
-      const warrantId =
-        req.headers["x-mirql-warrant-id"] ??
-        jsonBody?.warrant_id;
-
-      if (!warrantId) {
-        res.writeHead(403, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({
-          error: "UNAUTHORIZED",
-          detail: "Missing x-mirql-warrant-id header or warrant_id field",
-          code: 4,
-        }));
+      if (payloadTooLarge) {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "PAYLOAD_TOO_LARGE", code: GATEWAY_CODES.USAGE_ERROR }));
         return;
       }
 
-      // Estimate integer cost
-      let costMicroUsd = 1000; // minimum nominal integer cost (0.001 USD)
-      if (req.headers["x-mirql-cost-micro-usd"]) {
-        const headerCost = parseInt(req.headers["x-mirql-cost-micro-usd"], 10);
-        if (isSafeNonNegativeInteger(headerCost)) {
-          costMicroUsd = headerCost;
+      const bodyText = Buffer.concat(chunks).toString("utf8");
+      let jsonBody = null;
+      if (bodyText.length > 0) {
+        try {
+          jsonBody = JSON.parse(bodyText);
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "INVALID_JSON", code: GATEWAY_CODES.USAGE_ERROR }));
+          return;
         }
-      } else if (jsonBody?.model) {
-        const tier = DEFAULT_MODEL_PRICING[jsonBody.model] ?? DEFAULT_MODEL_PRICING["workhorse"];
-        const promptEst = Math.max(10, Math.floor((bodyText.length) / 4));
-        const maxTokens = jsonBody?.max_tokens ?? 256;
-        costMicroUsd = calculateTokenCostMicroUsd(promptEst, maxTokens, tier);
       }
 
-      const deduction = manager.deduct(warrantId, costMicroUsd);
-      if (!deduction.allowed) {
-        res.writeHead(402, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({
-          error: "BUDGET_EXHAUSTED",
-          code: GATEWAY_CODES.BUDGET_EXHAUSTED,
-          warrant_id: warrantId,
-          remaining_micro_usd: deduction.remaining_micro_usd ?? 0,
-        }));
-        return;
-      }
+      const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+      const pathname = url.pathname;
 
-      // Return synthetic or forwarded response with budget tracking header
-      res.writeHead(200, {
-        "Content-Type": "application/json",
-        "x-mirql-budget-remaining": String(deduction.remaining_micro_usd),
-        "x-mirql-cost-micro-usd": String(costMicroUsd),
-      });
-
-      const responsePayload = {
-        id: `chatcmpl-${Date.now()}`,
-        object: "chat.completion",
-        created: Math.floor(Date.now() / 1000),
-        model: jsonBody?.model ?? "workhorse",
-        choices: [
-          {
-            index: 0,
-            message: {
-              role: "assistant",
-              content: "ok",
-            },
-            finish_reason: "stop",
-          },
-        ],
-        usage: {
-          prompt_tokens: 15,
-          completion_tokens: 5,
-          total_tokens: 20,
-        },
-        mirql_metering: {
-          warrant_id: warrantId,
-          charged_micro_usd: costMicroUsd,
-          remaining_micro_usd: deduction.remaining_micro_usd,
-        },
+      // Helper for admin auth check
+      const checkAdminAuth = () => {
+        const authHeader = req.headers["authorization"] ?? "";
+        const customToken = req.headers["x-mirql-admin-token"] ?? "";
+        const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+        return (bearer === adminToken || customToken === adminToken);
       };
 
-      res.end(JSON.stringify(responsePayload));
-      return;
-    }
+      // Route: GET /health
+      if (req.method === "GET" && (pathname === "/health" || pathname === "/v1/health")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, status: "healthy", active_warrants: manager.warrants.size }));
+        return;
+      }
 
-    // Default 404
-    res.writeHead(404, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "NOT_FOUND", path: pathname }));
+      // Route: POST /v1/warrant/preauth (Admin only)
+      if (req.method === "POST" && pathname === "/v1/warrant/preauth") {
+        if (!checkAdminAuth()) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "UNAUTHORIZED_ADMIN", detail: "Admin token required for warrant preauth" }));
+          return;
+        }
+        try {
+          if (!jsonBody || typeof jsonBody !== "object") {
+            throw new Error("Missing request body");
+          }
+          const { warrant_id, budget_micro_usd, epoch } = jsonBody;
+          const entry = manager.preauth(warrant_id, budget_micro_usd, epoch);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, ...entry }));
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "PREAUTH_FAILED", detail: err.message, code: GATEWAY_CODES.USAGE_ERROR }));
+        }
+        return;
+      }
+
+      // Route: GET /v1/warrant/:id
+      if (req.method === "GET" && pathname.startsWith("/v1/warrant/")) {
+        const warrantId = decodeURIComponent(pathname.slice("/v1/warrant/".length));
+        const entry = manager.get(warrantId);
+        if (!entry) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "WARRANT_NOT_FOUND", warrant_id: warrantId }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, ...entry }));
+        return;
+      }
+
+      // Route: POST /v1/warrant/settle (Admin only)
+      if (req.method === "POST" && pathname === "/v1/warrant/settle") {
+        if (!checkAdminAuth()) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "UNAUTHORIZED_ADMIN", detail: "Admin token required for warrant settle" }));
+          return;
+        }
+        try {
+          const warrantId = jsonBody?.warrant_id;
+          const receipt = manager.settle(warrantId);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, ...receipt }));
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "SETTLE_FAILED", detail: err.message }));
+        }
+        return;
+      }
+
+      // Route: POST /v1/chat/completions (Metered proxy endpoint)
+      if (req.method === "POST" && (pathname === "/v1/chat/completions" || pathname === "/v1/proxy")) {
+        const warrantId =
+          req.headers["x-mirql-warrant-id"] ??
+          jsonBody?.warrant_id;
+
+        if (!warrantId) {
+          res.writeHead(403, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            error: "UNAUTHORIZED",
+            detail: "Missing x-mirql-warrant-id header or warrant_id field",
+            code: 4,
+          }));
+          return;
+        }
+
+        // Validate max_tokens if provided
+        if (jsonBody?.max_tokens !== undefined) {
+          if (!isSafeNonNegativeInteger(jsonBody.max_tokens) || jsonBody.max_tokens === 0) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              error: "INVALID_MAX_TOKENS",
+              detail: "max_tokens must be a positive safe integer",
+              code: GATEWAY_CODES.USAGE_ERROR,
+            }));
+            return;
+          }
+        }
+
+        // Deterministic server-side cost calculation (Never trust caller-supplied zero costs)
+        const tier = DEFAULT_MODEL_PRICING[jsonBody?.model] ?? DEFAULT_MODEL_PRICING["workhorse"];
+        const promptEst = Math.max(10, Math.floor(bodyText.length / 4));
+        const maxTokens = jsonBody?.max_tokens ?? 256;
+        const calculatedCost = calculateTokenCostMicroUsd(promptEst, maxTokens, tier);
+        const costMicroUsd = Math.max(MIN_CALL_COST_MICRO_USD, calculatedCost);
+
+        const deduction = manager.deduct(warrantId, costMicroUsd);
+        if (!deduction.allowed) {
+          res.writeHead(402, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            error: "BUDGET_EXHAUSTED",
+            code: GATEWAY_CODES.BUDGET_EXHAUSTED,
+            warrant_id: warrantId,
+            remaining_micro_usd: deduction.remaining_micro_usd ?? 0,
+          }));
+          return;
+        }
+
+        // If upstream URL is configured, forward the request
+        if (upstreamUrl) {
+          try {
+            const target = new URL(pathname, upstreamUrl);
+            const reqFn = target.protocol === "https:" ? httpsRequest : httpRequest;
+            const upstreamReq = reqFn(
+              target,
+              {
+                method: "POST",
+                headers: {
+                  ...req.headers,
+                  host: target.host,
+                  "content-length": Buffer.byteLength(bodyText),
+                },
+              },
+              (upstreamRes) => {
+                res.writeHead(upstreamRes.statusCode || 200, {
+                  ...upstreamRes.headers,
+                  "x-mirql-budget-remaining": String(deduction.remaining_micro_usd),
+                  "x-mirql-cost-micro-usd": String(costMicroUsd),
+                });
+                upstreamRes.pipe(res);
+              },
+            );
+            upstreamReq.on("error", (upErr) => {
+              res.writeHead(502, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "BAD_GATEWAY", detail: upErr.message }));
+            });
+            upstreamReq.write(bodyText);
+            upstreamReq.end();
+            return;
+          } catch (fwdErr) {
+            res.writeHead(502, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "FORWARD_FAILED", detail: fwdErr.message }));
+            return;
+          }
+        }
+
+        // Offline / synthetic completion mode
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "x-mirql-budget-remaining": String(deduction.remaining_micro_usd),
+          "x-mirql-cost-micro-usd": String(costMicroUsd),
+        });
+
+        const responsePayload = {
+          id: `chatcmpl-${Date.now()}`,
+          object: "chat.completion",
+          created: Math.floor(Date.now() / 1000),
+          model: jsonBody?.model ?? "workhorse",
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: "ok",
+              },
+              finish_reason: "stop",
+            },
+          ],
+          usage: {
+            prompt_tokens: promptEst,
+            completion_tokens: Math.min(maxTokens, 16),
+            total_tokens: promptEst + Math.min(maxTokens, 16),
+          },
+          mirql_metering: {
+            warrant_id: warrantId,
+            charged_micro_usd: costMicroUsd,
+            remaining_micro_usd: deduction.remaining_micro_usd,
+          },
+        };
+
+        res.end(JSON.stringify(responsePayload));
+        return;
+      }
+
+      // Default 404
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "NOT_FOUND", path: pathname }));
+    } catch (unhandledErr) {
+      // Top-level fail-safe: never crash Node process
+      try {
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "INTERNAL_SERVER_ERROR", detail: unhandledErr.message }));
+        }
+      } catch {}
+    }
   });
 
   return new Promise((resolve, reject) => {
@@ -337,6 +436,7 @@ export function createLlmGateway(options = {}) {
         server,
         port: actualPort,
         manager,
+        adminToken,
         close: () => new Promise((done) => server.close(done)),
       });
     });

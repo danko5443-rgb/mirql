@@ -6,16 +6,28 @@ Wants=mirql-launcher.service
 
 [Service]
 Type=simple
-User=root
+User=mirql
+Group=mirql
 WorkingDirectory=/opt/mirql
-ExecStart=/usr/bin/node /opt/mirql/packages/daemons/lifeguard.mjs --watch --timeout 1800
+ExecStart=/usr/bin/node /opt/mirql/packages/daemons/lifeguard.mjs --watch --timeout 1800 --base-file /opt/mirql/.mirql/state/base_sha
 Restart=always
 RestartSec=10s
+TimeoutStopSec=15s
 
-# Out-of-band kill and rollback authority
-NoNewPrivileges=false
-ProtectSystem=full
+# Strict security sandbox
+ProtectSystem=strict
+ProtectHome=true
 PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/mirql /tmp
+
+# Resource limits
+LimitNOFILE=65535
+MemoryMax=1G
 
 [Install]
 WantedBy=multi-user.target

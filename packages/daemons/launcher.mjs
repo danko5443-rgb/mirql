@@ -1,9 +1,6 @@
 // packages/daemons/launcher.mjs — Host systemd worker spawner and unit validator.
 // Fixed templates only (Law 1, Law 2, Law 8).
 
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
-
 /** Required systemd security sandboxing directives. */
 export const MANDATORY_SANDBOX_DIRECTIVES = Object.freeze([
   "ProtectSystem",
@@ -37,11 +34,11 @@ export function validateServiceUnit(unitContent) {
     }
   }
 
-  // Ensure unprivileged user unless explicitly permitted
+  // Ensure unprivileged user: root is NEVER allowed (Law 8)
   const userMatch = unitContent.match(/^\s*User\s*=\s*([a-zA-Z0-9_-]+)/m);
   if (!userMatch) {
     errors.push("Missing User= directive");
-  } else if (userMatch[1] === "root" && !unitContent.includes("mirql-lifeguard")) {
+  } else if (userMatch[1] === "root") {
     errors.push("Service unit must not run as root User");
   }
 
@@ -58,13 +55,24 @@ export function validateServiceUnit(unitContent) {
  * @param {object} [options]
  * @param {string} [options.workingDir="/opt/mirql"]
  * @param {string} [options.user="mirql"]
- * @param {string} [options.execStart="/usr/bin/node /opt/mirql/bin/mirql.mjs q daemon"]
+ * @param {string} [options.execStart="/usr/bin/node /opt/mirql/bin/mirql.mjs r supervisor"]
  * @returns {string}
  */
 export function renderLauncherUnit(options = {}) {
   const workingDir = options.workingDir ?? "/opt/mirql";
   const user = options.user ?? "mirql";
-  const execStart = options.execStart ?? "/usr/bin/node /opt/mirql/bin/mirql.mjs q daemon";
+  const execStart = options.execStart ?? "/usr/bin/node /opt/mirql/bin/mirql.mjs r supervisor";
+
+  // Prevent newline / directive injection
+  if (/[\r\n]/.test(user) || /[\r\n]/.test(workingDir) || /[\r\n]/.test(execStart)) {
+    throw new Error("Parameters must not contain newline characters");
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(user)) {
+    throw new Error("Invalid username format");
+  }
+  if (user === "root") {
+    throw new Error("Launcher cannot be configured to run as root");
+  }
 
   return `[Unit]
 Description=mirql Autonomous Factory Launcher

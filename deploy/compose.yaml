@@ -13,10 +13,15 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     environment:
       - NODE_ENV=production
       - MIRQL_DIR=/app/.mirql
       - LLM_GATEWAY_URL=http://llm-gateway:8080
+      - GATEWAY_ADMIN_TOKEN=${GATEWAY_ADMIN_TOKEN:-mirql-gateway-admin-secret}
     networks:
       - control-net
       - gateway-net
@@ -33,13 +38,17 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     environment:
       - NODE_ENV=production
       - PORT=8080
-    ports:
-      - "127.0.0.1:8080:8080"
+      - GATEWAY_ADMIN_TOKEN=${GATEWAY_ADMIN_TOKEN:-mirql-gateway-admin-secret}
     networks:
       - gateway-net
+      - agent-net
       - egress-net
 
   agent:

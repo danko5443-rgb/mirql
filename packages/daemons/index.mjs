@@ -6,6 +6,8 @@ export {
   calculateTokenCostMicroUsd,
   DEFAULT_MODEL_PRICING,
   GATEWAY_CODES,
+  MIN_CALL_COST_MICRO_USD,
+  MAX_REQUEST_BODY_BYTES,
   isSafeNonNegativeInteger,
 } from "./llm-gateway.mjs";
 
@@ -13,7 +15,9 @@ export {
   LifeguardWatchdog,
   checkProbationStatus,
   executeRollback,
+  killProcesses,
   DEFAULT_PROBATION_TIMEOUT_MS,
+  DEFAULT_HEARTBEAT_TIMEOUT_MS,
 } from "./lifeguard.mjs";
 
 export {
