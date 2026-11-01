@@ -49,6 +49,7 @@ export {
 export {
   foldLedger,
   readLedgerEvents,
+  readVerifiedLedgerEvents,
   foldQueueState,
   loadKeyring,
   PRIVILEGED_EVENTS,

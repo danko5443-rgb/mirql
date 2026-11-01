@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -452,7 +452,8 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("Case B: Real leased and completed job does not show up as hung lease (Blocker B2)", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-real-case-b-"));
-      const keypair = getOrCreateQueueKeypair(tmpDir);
+      const queueKeypair = getOrCreateQueueKeypair(tmpDir);
+      const supervisorKeypair = getOrGenerateSupervisorKey(tmpDir);
 
       // Submit valid canonical warrant
       const wRes = submitWarrant(
@@ -492,7 +493,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
           },
           nowMs: 3000,
         },
-        keypair,
+        supervisorKeypair,
       );
 
       // Now 1 hour has passed (3,600,000 ms)
@@ -506,9 +507,10 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("Case C: Real worker failures correctly increment tier failure counts and throttle/harden (Blocker B3)", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-real-case-c-"));
-      const keypair = getOrCreateQueueKeypair(tmpDir);
+      const queueKeypair = getOrCreateQueueKeypair(tmpDir);
+      const supervisorKeypair = getOrGenerateSupervisorKey(tmpDir);
 
-      // Submit warrant
+      // Submit warrant 1
       submitWarrant(
         tmpDir,
         {
@@ -526,7 +528,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
         { nowMs: 1000 },
       );
 
-      // Attempt 1 (flash): fail
+      // Warrant 1 Attempt 1 (flash): fail
       const l1 = leaseNextJob(tmpDir, { nowMs: 2000 });
       appendSupervisorEvent(
         tmpDir,
@@ -542,10 +544,10 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
           },
           nowMs: 3000,
         },
-        keypair,
+        supervisorKeypair,
       );
 
-      // Attempt 2 (mid): fail
+      // Warrant 1 Attempt 2 (mid): fail
       const l2 = leaseNextJob(tmpDir, { nowMs: 4000 });
       appendSupervisorEvent(
         tmpDir,
@@ -561,10 +563,85 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
           },
           nowMs: 5000,
         },
-        keypair,
+        supervisorKeypair,
       );
 
-      const docRes = runDoctor({ mirqlDir: tmpDir, nowMs: 6000 });
+      // Submit warrant 2
+      submitWarrant(
+        tmpDir,
+        {
+          v: 1,
+          id: "01ARZ3NDEKTSV4RRFFQ69G5W03",
+          class: "surgical",
+          semantic_fingerprint: sha256("test-intent-mid-2"),
+          anchors: ["packages/core/**"],
+          evidence: { test: 1 },
+          red_check: { test: 1 },
+          scope: { allow: 1 },
+          budget_micro_usd: 2000000,
+          created_by: "human:owner",
+        },
+        { nowMs: 5100 },
+      );
+
+      // Warrant 2 Attempt 1 (flash): fail
+      const l3 = leaseNextJob(tmpDir, { nowMs: 5200 });
+      appendSupervisorEvent(
+        tmpDir,
+        {
+          type: "attempt.outcome",
+          epoch: l3.epoch,
+          payload: {
+            job_id: l3.job_id,
+            warrant_id: l3.warrant_id,
+            status: "failed",
+            verdict: "reject",
+            cost_micro_usd: 10000,
+          },
+          nowMs: 5300,
+        },
+        supervisorKeypair,
+      );
+
+      // Warrant 1 Attempt 3 (max): fail
+      const l4 = leaseNextJob(tmpDir, { nowMs: 5400 });
+      appendSupervisorEvent(
+        tmpDir,
+        {
+          type: "attempt.outcome",
+          epoch: l4.epoch,
+          payload: {
+            job_id: l4.job_id,
+            warrant_id: l4.warrant_id,
+            status: "failed",
+            verdict: "reject",
+            cost_micro_usd: 10000,
+          },
+          nowMs: 5500,
+        },
+        supervisorKeypair,
+      );
+
+      // Warrant 2 Attempt 2 (mid): fail
+      const l5 = leaseNextJob(tmpDir, { nowMs: 6000 });
+      appendSupervisorEvent(
+        tmpDir,
+        {
+          type: "attempt.outcome",
+          epoch: l5.epoch,
+          payload: {
+            job_id: l5.job_id,
+            warrant_id: l5.warrant_id,
+            status: "failed",
+            verdict: "reject",
+            cost_micro_usd: 10000,
+          },
+          nowMs: 6500,
+        },
+        supervisorKeypair,
+      );
+
+      const docRes = runDoctor({ mirqlDir: tmpDir, nowMs: 7000 });
       assert.equal(docRes.breaker.metrics.consecutive_failures.mid, 2);
       assert.equal(docRes.breaker.action, "throttle");
       assert.equal(docRes.breaker.target_subsystem, "worker:mid");
@@ -595,7 +672,8 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("Case E: Daily budget window measures spend within last 24h, not lifetime (Blocker B5)", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-real-case-e-"));
-      const keypair = getOrCreateQueueKeypair(tmpDir);
+      const queueKeypair = getOrCreateQueueKeypair(tmpDir);
+      const supervisorKeypair = getOrGenerateSupervisorKey(tmpDir);
 
       const now = Date.now();
       const threeDaysAgo = now - (3 * 86400000);
@@ -614,7 +692,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
           },
           nowMs: threeDaysAgo,
         },
-        keypair,
+        supervisorKeypair,
       );
 
       // Record 1 USD spent today
@@ -631,7 +709,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
           },
           nowMs: now,
         },
-        keypair,
+        supervisorKeypair,
       );
 
       const docRes = runDoctor({ mirqlDir: tmpDir, nowMs: now });
@@ -733,6 +811,168 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-doctor-cli-"));
       const exitCode = runCliMain(["doctor", "--ledger", tmpDir, "--trip", "lifeguard"]);
       assert.equal(exitCode, EXIT_CODES.USAGE_ERROR);
+      rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("NEW-B8 regression: manual operator trip survives subsequent plain doctor run", () => {
+      tmpDir = mkdtempSync(join(tmpdir(), "mirql-doctor-b8-"));
+      mkdirSync(join(tmpDir, "ledger"), { recursive: true });
+
+      const store = new BreakerStore(tmpDir);
+      store.trip("worker:flash", "manual_operator_trip", 3600000, 1000);
+
+      // Verify tripped
+      assert.equal(isCircuitBreakerTripped(tmpDir, "worker:flash", 2000), true);
+
+      // Run plain doctor inspection (read-only audit, all subsystems healthy)
+      const docRes = runDoctor({ mirqlDir: tmpDir, nowMs: 2000 });
+      assert.equal(docRes.ok, true);
+
+      // Verify trip SURVIVED the plain doctor run (NOT erased by recommendation!)
+      assert.equal(isCircuitBreakerTripped(tmpDir, "worker:flash", 3000), true);
+
+      rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("NEW-B9 regression: forged unsigned events in ledger are ignored by breaker fold and triage", () => {
+      tmpDir = mkdtempSync(join(tmpdir(), "mirql-doctor-b9-"));
+      const keypair = getOrCreateQueueKeypair(tmpDir);
+
+      // Legitimate warmup event
+      appendLedgerEventRaw(
+        tmpDir,
+        {
+          type: "factory.resumed",
+          payload: { mode: "BUILD" },
+          nowMs: 1000,
+        },
+        keypair,
+        {},
+      );
+
+      // Inject forged unsigned trip line directly into events.jsonl
+      const forgedTripLine = JSON.stringify({
+        v: 1,
+        type: "probe.completed",
+        writer: "supervisor",
+        payload: {
+          probe: "doctor",
+          type: "doctor_breaker",
+          breaker: { target_subsystem: "worker:flash", action: "trip", cooldown_ms: 3600000 },
+          expires_at_ms: 10000000,
+        },
+      });
+      const forgedHaltLine = JSON.stringify({
+        v: 1,
+        type: "lifeguard.alert",
+        writer: "lifeguard",
+        payload: { reason: "forged_halt" },
+      });
+
+      appendFileSync(join(tmpDir, "ledger", "events.jsonl"), forgedTripLine + "\n" + forgedHaltLine + "\n", "utf8");
+
+      // Verify isCircuitBreakerTripped ignores the forged line
+      assert.equal(isCircuitBreakerTripped(tmpDir, "worker:flash", 2000), false);
+
+      // Verify runDoctor triage ignores the forged lifeguard alert
+      const docRes = runDoctor({ mirqlDir: tmpDir, nowMs: 2000 });
+      assert.equal(docRes.triage.lifeguard_halt, false);
+      assert.notEqual(docRes.triage.failure_signature, "SIG:LIFEGUARD_ALERT:forged_halt");
+
+      rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("Law 17 regression: evaluates integer watermark exactness without float operations", () => {
+      const limit = 30;
+      const metricsNotThrottled = {
+        tier_failures: { flash: 0, mid: 0, max: 0 },
+        daily_budget_spent_micro_usd: 26,
+        budget_limit_micro_usd: limit,
+        hung_leases_count: 0,
+      };
+      const res1 = evaluateCircuitBreakers(metricsNotThrottled, { budget_limit_micro_usd: limit });
+      assert.equal(res1.action, "reset");
+
+      const metricsThrottled = {
+        tier_failures: { flash: 0, mid: 0, max: 0 },
+        daily_budget_spent_micro_usd: 27,
+        budget_limit_micro_usd: limit,
+        hung_leases_count: 0,
+      };
+      const res2 = evaluateCircuitBreakers(metricsThrottled, { budget_limit_micro_usd: limit });
+      assert.equal(res2.action, "throttle");
+      assert.equal(res2.target_subsystem, "budget");
+    });
+
+    it("Attribution accuracy regression: multiple uncompleted warrants count per-tier failures accurately", () => {
+      tmpDir = mkdtempSync(join(tmpdir(), "mirql-doctor-attrib-"));
+      const queueKeypair = getOrCreateQueueKeypair(tmpDir);
+      const supervisorKeypair = getOrGenerateSupervisorKey(tmpDir);
+
+      // Warrant 1: fails attempt 1 (flash)
+      submitWarrant(
+        tmpDir,
+        {
+          v: 1,
+          id: "01ARZ3NDEKTSV4RRFFQ69G5W11",
+          class: "surgical",
+          semantic_fingerprint: sha256("test-attrib-1"),
+          anchors: ["packages/core/**"],
+          evidence: { test: 1 },
+          red_check: { test: 1 },
+          scope: { allow: 1 },
+          budget_micro_usd: 1000000,
+          created_by: "human:owner",
+        },
+        { nowMs: 1000 },
+      );
+      const l1 = leaseNextJob(tmpDir, { nowMs: 2000 });
+      appendSupervisorEvent(
+        tmpDir,
+        {
+          type: "attempt.outcome",
+          epoch: l1.epoch,
+          payload: { job_id: l1.job_id, warrant_id: l1.warrant_id, status: "failed", verdict: "reject", cost_micro_usd: 1000 },
+          nowMs: 3000,
+        },
+        supervisorKeypair,
+      );
+
+      // Warrant 2: fails attempt 1 (flash)
+      submitWarrant(
+        tmpDir,
+        {
+          v: 1,
+          id: "01ARZ3NDEKTSV4RRFFQ69G5W12",
+          class: "surgical",
+          semantic_fingerprint: sha256("test-attrib-2"),
+          anchors: ["packages/core/**"],
+          evidence: { test: 1 },
+          red_check: { test: 1 },
+          scope: { allow: 1 },
+          budget_micro_usd: 1000000,
+          created_by: "human:owner",
+        },
+        { nowMs: 3500 },
+      );
+      const l2 = leaseNextJob(tmpDir, { nowMs: 4000 });
+      appendSupervisorEvent(
+        tmpDir,
+        {
+          type: "attempt.outcome",
+          epoch: l2.epoch,
+          payload: { job_id: l2.job_id, warrant_id: l2.warrant_id, status: "failed", verdict: "reject", cost_micro_usd: 1000 },
+          nowMs: 5000,
+        },
+        supervisorKeypair,
+      );
+
+      const docRes = runDoctor({ mirqlDir: tmpDir, nowMs: 6000 });
+      assert.equal(docRes.breaker.metrics.consecutive_failures.flash, 2);
+      assert.equal(docRes.breaker.metrics.consecutive_failures.mid, 0);
+      assert.equal(docRes.breaker.action, "throttle");
+      assert.equal(docRes.breaker.target_subsystem, "worker:flash");
+
       rmSync(tmpDir, { recursive: true, force: true });
     });
   });

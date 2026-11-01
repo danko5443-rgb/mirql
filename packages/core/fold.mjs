@@ -119,6 +119,57 @@ export function readLedgerEvents(mirqlDir) {
 }
 
 /**
+ * Reads and cryptographically verifies events from .mirql/ledger/events.jsonl (Law 4 & Law 3).
+ * Any forged, unsigned, or invalidly signed line is strictly rejected.
+ *
+ * @param {string} mirqlDir
+ * @param {object} [options]
+ * @returns {Array<{ event: object, raw: string }>}
+ */
+export function readVerifiedLedgerEvents(mirqlDir, options = {}) {
+  const rawEvents = readLedgerEvents(mirqlDir);
+  const keyring = options.keyring || loadKeyring(mirqlDir);
+  const valid = [];
+
+  for (const item of rawEvents) {
+    const evt = item && item.event ? item.event : item;
+    if (!evt || typeof evt !== "object") continue;
+
+    const writerNs = typeof evt.writer === "object" ? evt.writer.ns : evt.writer;
+    const keyId = typeof evt.writer === "object" ? evt.writer.key_id : null;
+
+    if (!canWriteEvent(writerNs, evt.type)) {
+      continue;
+    }
+
+    if (keyring && typeof keyring === "object" && Object.keys(keyring).length > 0) {
+      const trustedPubkey = getTrustedPublicKey(keyring, writerNs, keyId);
+      if (!trustedPubkey) {
+        continue;
+      }
+      if (keyId && keyId !== `ed25519:${trustedPubkey}`) {
+        continue;
+      }
+      if (!evt.sig || !evt.hash) {
+        continue;
+      }
+      const verifyRes = verifyEvent(evt, trustedPubkey);
+      if (!verifyRes.ok) {
+        continue;
+      }
+    } else {
+      if (PRIVILEGED_EVENTS.has(evt.type)) {
+        continue;
+      }
+    }
+
+    valid.push(item);
+  }
+
+  return valid;
+}
+
+/**
  * Pure mathematical fold over ledger events to compute system state (Law 4).
  *
  * @param {Array<object | { event: object, raw?: string }>} events

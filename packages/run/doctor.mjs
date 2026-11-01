@@ -9,6 +9,7 @@ import {
   jcs,
   foldLedger,
   readLedgerEvents,
+  readVerifiedLedgerEvents,
   foldQueueState,
 } from "../core/index.mjs";
 import { runProbe, KNOWN_PROBES } from "./probe.mjs";
@@ -493,7 +494,8 @@ export function evaluateCircuitBreakers(systemMetrics = {}, options = {}) {
   }
 
   // Rule 2: Budget high watermark warning (>= 90%)
-  const watermark = Math.floor((budgetLimit / 100) * 90);
+  // Law 17 integer-only math: 9000 basis points (90%) without floating point operations
+  const watermark = Math.floor((budgetLimit * 90) / 100);
   if (budgetLimit > 0 && budgetSpent >= watermark) {
     return {
       v: 1,
@@ -697,7 +699,7 @@ export function foldBreakerStateFromLedger(ledgerEvents = [], nowMs = Date.now()
     const evt = item && item.event ? item.event : item;
     if (!evt || evt.type !== "probe.completed") continue;
     const p = evt.payload || {};
-    if (p.probe !== "doctor" && p.type !== "doctor") continue;
+    if (p.probe !== "doctor" && p.type !== "doctor" && p.type !== "doctor_breaker") continue;
 
     const breaker = p.breaker;
     if (!breaker || !breaker.target_subsystem) continue;
@@ -705,6 +707,7 @@ export function foldBreakerStateFromLedger(ledgerEvents = [], nowMs = Date.now()
     const target = breaker.target_subsystem;
     const action = breaker.action;
 
+    // Reset action: ONLY resets if explicitly directed by an operator/breaker action
     if (action === "reset") {
       if (target === "all") {
         for (const k of Object.keys(subsystems)) delete subsystems[k];
@@ -736,14 +739,16 @@ export function foldBreakerStateFromLedger(ledgerEvents = [], nowMs = Date.now()
 
 /**
  * Checks whether a circuit breaker is currently active and tripped in the durable ledger.
+ * Uses readVerifiedLedgerEvents to prevent forged or unauthenticated entries from tripping breakers (Law 4).
  *
  * @param {string} mirqlDir
  * @param {string} subsystem
  * @param {number} [nowMs=Date.now()]
+ * @param {object} [options={}]
  * @returns {boolean}
  */
-export function isCircuitBreakerTripped(mirqlDir, subsystem, nowMs = Date.now()) {
-  const events = readLedgerEvents(mirqlDir);
+export function isCircuitBreakerTripped(mirqlDir, subsystem, nowMs = Date.now(), options = {}) {
+  const events = readVerifiedLedgerEvents(mirqlDir, options);
   const state = foldBreakerStateFromLedger(events, nowMs);
   if (state.subsystems[subsystem]?.state === "tripped") return true;
   if (subsystem.startsWith("worker:") && state.subsystems["worker"]?.state === "tripped") return true;
@@ -766,7 +771,7 @@ export class BreakerStore {
   }
 
   load(nowMs = Date.now()) {
-    const events = readLedgerEvents(this.mirqlDir);
+    const events = readVerifiedLedgerEvents(this.mirqlDir);
     const folded = foldBreakerStateFromLedger(events, nowMs);
     // Sync cache file
     try {
@@ -891,10 +896,10 @@ export function runDoctor(options = {}) {
     };
   }
 
-  // Read durable ledger events
+  // Read durable verified ledger events (Law 4 & Law 3)
   let ledgerEvents = [];
   try {
-    ledgerEvents = readLedgerEvents(mirqlDir);
+    ledgerEvents = options.ledgerEvents ?? readVerifiedLedgerEvents(mirqlDir, options);
   } catch {
     ledgerEvents = [];
   }
@@ -951,20 +956,13 @@ export function runDoctor(options = {}) {
   const warrants = Object.values(queueState.warrants || {});
 
   for (const w of warrants) {
-    // Only active or needs_human warrants count towards current tier failures (completed warrants are cleared)
+    // Only uncompleted warrants count towards live tier failures (completed warrants are cleared)
     if (w.status !== "completed") {
       const fails = w.failed_attempts || 0;
-      if (fails > 0) {
-        for (let i = 1; i <= fails; i++) {
-          const tier = ladder[i - 1] || "flash";
-          if (tier in tierFailures) {
-            tierFailures[tier] = Math.max(tierFailures[tier], 1);
-          }
-        }
-        // The current attempt tier is the one failing consecutively
-        const currentTier = ladder[fails - 1] || "flash";
-        if (currentTier in tierFailures) {
-          tierFailures[currentTier] = Math.max(tierFailures[currentTier], fails);
+      for (let i = 1; i <= fails; i++) {
+        const tier = ladder[i - 1] || "flash";
+        if (tier in tierFailures) {
+          tierFailures[tier] += 1;
         }
       }
     }
@@ -1015,27 +1013,38 @@ export function runDoctor(options = {}) {
     !triage.lifeguard_halt &&
     !hasActiveTrippedBreakers;
 
-  // Persist doctor evaluation to durable ledger
+  // Persist doctor evaluation to durable ledger (Law 4 & Law 3)
   try {
     const keypair = options.keypair || getOrGenerateSupervisorKey(mirqlDir);
+    const payload = {
+      probe: "doctor",
+      type: "doctor",
+      status: isHealthy ? "pass" : "fail",
+      triage,
+      recommendation: breaker,
+      transition,
+    };
+    if (breaker.action === "trip" || breaker.action === "throttle") {
+      payload.breaker = {
+        target_subsystem: breaker.target_subsystem,
+        action: breaker.action,
+        cooldown_ms: breaker.cooldown_ms,
+        reason: breaker.reason,
+      };
+      payload.expires_at_ms = Math.min(Number.MAX_SAFE_INTEGER, nowMs + breaker.cooldown_ms);
+    }
     appendSupervisorEvent(
       mirqlDir,
       {
         type: "probe.completed",
-        payload: {
-          probe: "doctor",
-          type: "doctor",
-          status: isHealthy ? "pass" : "fail",
-          triage,
-          breaker,
-          transition,
-          expires_at_ms: breaker.action === "trip" ? Math.min(Number.MAX_SAFE_INTEGER, nowMs + breaker.cooldown_ms) : 0,
-        },
+        payload,
         nowMs,
       },
       keypair,
     );
-  } catch {}
+  } catch (err) {
+    if (options.strictLedgerWrite) throw err;
+  }
 
   return {
     ok: true,
