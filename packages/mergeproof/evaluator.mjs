@@ -158,6 +158,8 @@ export function isTestFilePath(p) {
   );
 }
 
+const GIT_SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
+
 /**
  * Queries git diff --name-status base...head if git and a repository are available.
  * Returns { ok: true, files: string[], deletedFiles: string[] } on success,
@@ -172,6 +174,13 @@ export function getGitDiffInfo(baseSha, headSha, repoDir = process.cwd()) {
   if (!baseSha || !headSha) {
     return { ok: true, files: [], deletedFiles: [] };
   }
+  // The SHAs can come from an untrusted PR doc. Accept only full hex object
+  // ids so a value like "--output=<path>" can never be parsed as a git option.
+  for (const sha of [baseSha, headSha]) {
+    if (typeof sha !== "string" || !GIT_SHA_RE.test(sha)) {
+      return { ok: false, error: `invalid commit sha: ${JSON.stringify(sha)}`, files: [], deletedFiles: [] };
+    }
+  }
   const gitDir = join(repoDir, ".git");
   if (!existsSync(gitDir)) {
     return {
@@ -184,7 +193,7 @@ export function getGitDiffInfo(baseSha, headSha, repoDir = process.cwd()) {
   try {
     const res = spawnSync(
       "git",
-      ["diff", "--name-status", `${baseSha}...${headSha}`],
+      ["diff", "--name-status", "--end-of-options", `${baseSha}...${headSha}`],
       { cwd: repoDir, encoding: "utf8", timeout: 10000 },
     );
     if (res.status !== 0) {

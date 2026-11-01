@@ -11,16 +11,18 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { EXIT_CODES, generateEd25519Keypair } from "../packages/core/index.mjs";
+import { EXIT_CODES, generateEd25519Keypair, sha256, ulid } from "../packages/core/index.mjs";
 import { evaluatePullRequest } from "../packages/mergeproof/evaluator.mjs";
 import { checkAntiCheat } from "../packages/run/anti-cheat.mjs";
 import { verifyAttempt } from "../packages/run/verify.mjs";
 import { appendEvent, verifyLedger } from "../packages/log/index.mjs";
+import { leaseNextJob, stageCanary, submitWarrant } from "../packages/queue/index.mjs";
+import { getOrCreateQueueKeypair } from "../packages/queue/ledger.mjs";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const MIRQL = join(ROOT, "bin", "mirql.mjs");
@@ -271,6 +273,85 @@ describe("phase 0.0a: the notary's runner can run another tree", () => {
       assert.match(res.stdout + res.stderr, /P0_OTHER_ROOT_MARKER/);
     } finally {
       rmSync(other, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("security review: option injection and fail-open gates", () => {
+  it("a PR doc base_sha shaped like a git option never reaches git diff", () => {
+    const out = tmp("inject");
+    try {
+      const doc = forgedDoc({
+        pr: { ...forgedDoc().pr, base_sha: `--output=${join(out, "pwn")}`, head_sha: "a".repeat(40) },
+      });
+      evaluatePullRequest(doc, { rootDir: ROOT, repoDir: ROOT });
+      assert.deepEqual(readdirSync(out), [], "git diff wrote a file chosen by the PR doc");
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  it("an asserted --base that is not a hex SHA rejects with GIT_DIFF_FAILED", () => {
+    const res = evaluatePullRequest(forgedDoc(), {
+      rootDir: ROOT,
+      repoDir: ROOT,
+      targetTipSha: "--output=x",
+      expectedHeadSha: "a".repeat(40),
+    });
+    assert.equal(res.verdict, "reject");
+    assert.equal(res.violation, "GIT_DIFF_FAILED");
+  });
+
+  it("verifyAttempt rejects a ref shaped like a git option", () => {
+    const repo = tmp("refopt");
+    try {
+      buildFixRepo(repo);
+      const res = verifyAttempt({
+        git: true,
+        workspaceDir: repo,
+        baseSha: "--all",
+        headSha: "HEAD",
+        reproducerCommand: REPRO,
+      });
+      assert.equal(res.verified, false);
+      assert.equal(res.verdict, "reject");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("stageCanary refuses a job with no notary verdict", () => {
+    const work = tmp("canary");
+    try {
+      const dir = join(work, ".mirql");
+      mkdirSync(dir, { recursive: true });
+      getOrCreateQueueKeypair(dir);
+      const wid = ulid();
+      const sub = submitWarrant(dir, {
+        v: 1,
+        id: wid,
+        class: "surgical",
+        semantic_fingerprint: sha256(`intent: p0 canary ${wid}`),
+        anchors: [{ path: "packages/queue/index.mjs" }],
+        evidence: { citations: 1 },
+        red_check: { reviewed: 1 },
+        scope: { allow_globs: ["packages/queue/**"] },
+        budget_micro_usd: 500_000,
+        created_by: "human:owner",
+      });
+      assert.equal(sub.ok, true, sub.error);
+      leaseNextJob(dir, { workerId: "p0" });
+      assert.throws(
+        () => stageCanary(dir, {
+          jobId: sub.job_id,
+          baseSha: "a".repeat(40),
+          candidateVersion: "0.2.0",
+          supervisorVersion: "0.1.0",
+        }),
+        (err) => err.errorCode === "INVALID_VERDICT",
+      );
+    } finally {
+      rmSync(work, { recursive: true, force: true });
     }
   });
 });

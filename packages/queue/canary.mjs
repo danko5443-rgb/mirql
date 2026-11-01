@@ -376,15 +376,8 @@ export function stageCanary(mirqlDir, options = {}) {
       );
     }
 
-    // Verify verdict if present: if an outcome or verdict was recorded for this job, must be accepted by notary
-    const verdict = state.verdicts?.[jobId];
-    if (verdict && (verdict.status !== "accepted" || verdict.writer !== "notary:mergeproof")) {
-      throw canaryError(
-        "INVALID_VERDICT",
-        `Job ${jobId} has unaccepted or unauthorized verdict: ${verdict.status} by ${verdict.writer}`,
-        EXIT_CODES.POLICY_DENIAL,
-      );
-    }
+    // Fail closed: a job may only be staged once the notary has accepted it.
+    assertNotaryVerdict(state, jobId);
 
     const nowMs = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
     const canaryId = ulid(nowMs);
@@ -605,6 +598,26 @@ export function sampleCanaryHealth(mirqlDir, canaryId, sampleMetrics, options = 
 }
 
 /**
+ * Throws INVALID_VERDICT unless the job has an accepted verdict written by
+ * notary:mergeproof. A missing verdict is a denial, not a pass.
+ * @param {object} state
+ * @param {string} jobId
+ */
+function assertNotaryVerdict(state, jobId) {
+  const verdict = jobId ? state.verdicts?.[jobId] : undefined;
+  if (!verdict) {
+    throw canaryError("INVALID_VERDICT", `Job ${jobId} has no notary verdict`, EXIT_CODES.POLICY_DENIAL);
+  }
+  if (verdict.status !== "accepted" || verdict.writer !== "notary:mergeproof") {
+    throw canaryError(
+      "INVALID_VERDICT",
+      `Job ${jobId} has unaccepted or unauthorized verdict: ${verdict.status} by ${verdict.writer}`,
+      EXIT_CODES.POLICY_DENIAL,
+    );
+  }
+}
+
+/**
  * Evaluates the canary probation window and executes promotion or rollback.
  * Decisions are strictly made from the cryptographically verified fold (B3 hardening).
  * Requires verified SLSA provenance envelope (M4 hardening).
@@ -645,6 +658,9 @@ export function evaluateAndPromoteCanary(mirqlDir, canaryId, options = {}) {
         message: "Canary was previously rolled back",
       };
     }
+
+    // Re-verify the notary verdict before promotion (fail closed).
+    assertNotaryVerdict(state, canary.job_id);
 
     // Re-verify Law 9 invariant: candidate must strictly exceed supervisor (B4 hardening)
     const cmp = compareSemver(canary.candidate_version, canary.supervisor_version);
