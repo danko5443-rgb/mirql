@@ -1,6 +1,6 @@
 // packages/run/phi.mjs — Law 11, Law 13 & Law 17: Complexity Potential PHI and Thrift Engine.
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /**
  * Law 11, 13 & 17 — Complexity Potential Phi (Phi).
@@ -13,8 +13,14 @@ import { join, resolve } from "node:path";
  * - `dup_blocks`: count of identical repeated code blocks (>= 3 lines).
  * - `debt_markers`: count of debt marker comments.
  * - `max_nesting_depth`: maximum indentation/bracket nesting depth.
+ * - `test_gaps`: count of `packages/**` source files not reachable from any
+ *   `tests/*.test.mjs` file via the relative-import graph (Law 13 "test gaps":
+ *   a module no test can even import is untested code). Scoped to `packages/`
+ *   because that is the shipped library surface; `bin/` entrypoints are thin
+ *   wrappers exercised end-to-end via process spawn, and `scripts/` is dev
+ *   tooling — neither is import-graph coverage debt.
  * - `total`: composite safe-integer score:
- *   loc + 2*export_count + 3*cyclomatic + 10*dep_count + 5*dup_blocks + 4*debt_markers + 2*max_nesting_depth.
+ *   loc + 2*export_count + 3*cyclomatic + 10*dep_count + 5*dup_blocks + 4*debt_markers + 2*max_nesting_depth + 6*test_gaps.
  *
  * Every number returned is strictly guaranteed to be a safe integer (Law 17).
  *
@@ -27,6 +33,7 @@ import { join, resolve } from "node:path";
  *   dup_blocks: number,
  *   debt_markers: number,
  *   max_nesting_depth: number,
+ *   test_gaps: number,
  *   total: number
  * }}
  */
@@ -41,9 +48,11 @@ export function computePhi(workspaceDir = process.cwd()) {
   let dupBlocks = 0;
   let debtMarkers = 0;
   let maxNestingDepth = 0;
+  const contentsByFile = new Map();
 
   for (const file of files) {
     const content = readFileSync(file, "utf8");
+    contentsByFile.set(file, content);
     const lines = content.split(/\r?\n/);
 
     for (const rawLine of lines) {
@@ -126,6 +135,9 @@ export function computePhi(workspaceDir = process.cwd()) {
     }
   }
 
+  // Law 13 "test gaps": package modules unreachable from any test file.
+  const testGaps = computeTestGaps(root, files, contentsByFile);
+
   const total =
     loc +
     exportCount * 2 +
@@ -133,7 +145,8 @@ export function computePhi(workspaceDir = process.cwd()) {
     depCount * 10 +
     dupBlocks * 5 +
     debtMarkers * 4 +
-    maxNestingDepth * 2;
+    maxNestingDepth * 2 +
+    testGaps * 6;
 
   return {
     loc: Math.trunc(loc),
@@ -143,8 +156,109 @@ export function computePhi(workspaceDir = process.cwd()) {
     dup_blocks: Math.trunc(dupBlocks),
     debt_markers: Math.trunc(debtMarkers),
     max_nesting_depth: Math.trunc(maxNestingDepth),
+    test_gaps: Math.trunc(testGaps),
     total: Math.trunc(total),
   };
+}
+
+/**
+ * Law 13 test-gap metric: counts `packages/**` source files that no test file
+ * reaches via the relative-import graph (direct or transitive). Deterministic,
+ * offline (Law 1), and integer-only (Law 17). Workspaces without a `packages/`
+ * directory or without `tests/*.test.mjs` files score 0 gaps (metric scoped to
+ * the mirql package layout; documented, not silently widened).
+ *
+ * Weight rationale: an entirely untested module is heavier debt than a TODO
+ * marker (4) but lighter than an illicit external dependency (10) — hence 6.
+ *
+ * @param {string} root
+ * @param {string[]} files
+ * @param {Map<string, string>} contentsByFile
+ * @returns {number}
+ */
+function computeTestGaps(root, files, contentsByFile) {
+  const normalizedRoot = resolve(root);
+  const underRoot = (p) => {
+    const rel = relative(normalizedRoot, p);
+    return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel) ? rel : null;
+  };
+  const isTestFile = (p) => {
+    const rel = underRoot(p);
+    return rel !== null && rel.split(sep)[0] === "tests" && /\.test\.(mjs|js)$/.test(rel);
+  };
+  const isGapCandidate = (p) => {
+    const rel = underRoot(p);
+    return rel !== null && rel.split(sep)[0] === "packages" && /\.m?js$/.test(rel);
+  };
+
+  // Build the relative-import edge list once for every collected file.
+  const fileSet = new Set(files);
+  const edges = new Map();
+  for (const file of files) {
+    const content = contentsByFile.get(file) ?? "";
+    const specs = extractRelativeSpecifiers(content);
+    const targets = [];
+    for (const spec of specs) {
+      const resolved = resolveSpecifier(dirname(file), spec, fileSet);
+      if (resolved) targets.push(resolved);
+    }
+    edges.set(file, targets);
+  }
+
+  // BFS from every test file; mark reached files.
+  const reached = new Set();
+  const queue = files.filter(isTestFile);
+  for (const t of queue) reached.add(t);
+  while (queue.length > 0) {
+    const current = queue.shift();
+    for (const next of edges.get(current) ?? []) {
+      if (!reached.has(next)) {
+        reached.add(next);
+        queue.push(next);
+      }
+    }
+  }
+
+  let gaps = 0;
+  for (const file of files) {
+    if (isGapCandidate(file) && !reached.has(file)) gaps++;
+  }
+  return gaps;
+}
+
+/** Extracts relative import/export-from, side-effect import, dynamic import(), and require() specifiers. */
+function extractRelativeSpecifiers(content) {
+  const specs = [];
+  // import ... from './x' / export ... from './x' (bounded scan window keeps
+  // the match on the same statement even across newlines)
+  const staticFrom = /(?:^|[;{}\s])(?:import|export)\s[\s\S]{0,400}?from\s*["'](\.[^"']+)["']/g;
+  // bare side-effect import './x' (no from clause)
+  const sideEffect = /(?:^|[;{}\s])import\s*["'](\.[^"']+)["']/g;
+  // dynamic import('./x') and require('./x')
+  const dynamicCall = /\b(?:import|require)\s*\(\s*["'](\.[^"']+)["']\s*\)/g;
+  for (const re of [staticFrom, sideEffect, dynamicCall]) {
+    let m;
+    while ((m = re.exec(content)) !== null) {
+      if (!specs.includes(m[1])) specs.push(m[1]);
+    }
+  }
+  return specs;
+}
+
+/** Resolves a relative specifier to an existing collected file, or null. */
+function resolveSpecifier(fromDir, spec, fileSet) {
+  const base = resolve(fromDir, spec);
+  const candidates = [
+    base,
+    `${base}.mjs`,
+    `${base}.js`,
+    join(base, "index.mjs"),
+    join(base, "index.js"),
+  ];
+  for (const candidate of candidates) {
+    if (fileSet.has(candidate)) return candidate;
+  }
+  return null;
 }
 
 /**
