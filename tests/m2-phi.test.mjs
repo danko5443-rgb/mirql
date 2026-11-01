@@ -1,0 +1,183 @@
+// tests/m2-phi.test.mjs — Milestone M2: Monotone Potential Phi Engine & Thrift Tests (Law 13 & Law 17).
+import { describe, it, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  computePhi,
+  checkPhiReduction,
+  evaluatePhiGate,
+  verifyThrift,
+} from "../packages/run/index.mjs";
+
+const ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
+
+describe("Milestone M2: Monotone Potential Phi Engine & Thrift Gate (Law 13)", () => {
+  let tempDir;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "mirql-m2-test-"));
+  });
+
+  afterEach(() => {
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {}
+  });
+
+  describe("1. Deterministic AST Metric Extractor (computePhi)", () => {
+    it("extracts integer-only metrics across all dimensions on real codebase", () => {
+      const phi = computePhi(ROOT);
+
+      assert.ok(Number.isSafeInteger(phi.loc), "loc must be safe integer");
+      assert.ok(Number.isSafeInteger(phi.export_count), "export_count must be safe integer");
+      assert.ok(Number.isSafeInteger(phi.cyclomatic), "cyclomatic must be safe integer");
+      assert.ok(Number.isSafeInteger(phi.dep_count), "dep_count must be safe integer");
+      assert.ok(Number.isSafeInteger(phi.dup_blocks), "dup_blocks must be safe integer");
+      assert.ok(Number.isSafeInteger(phi.debt_markers), "debt_markers must be safe integer");
+      assert.ok(Number.isSafeInteger(phi.max_nesting_depth), "max_nesting_depth must be safe integer");
+      assert.ok(Number.isSafeInteger(phi.total), "total must be safe integer");
+
+      assert.ok(phi.loc > 0, "loc must be positive");
+      assert.equal(phi.dep_count, 0, "Law 0: external dependency count must be 0");
+      assert.ok(phi.total > phi.loc, "total must be composite sum");
+    });
+
+    it("accurately detects debt markers (TODO, FIXME, HACK, XXX) in source files", () => {
+      const pkgDir = join(tempDir, "pkg");
+      mkdirSync(pkgDir, { recursive: true });
+      writeFileSync(
+        join(pkgDir, "code.mjs"),
+        `// TODO: optimize algorithm\n// FIXME: edge case crash\n// HACK: workaround\n// XXX: review\nexport const x = 1;\n`,
+        "utf8",
+      );
+
+      const phi = computePhi(tempDir);
+      assert.equal(phi.debt_markers, 4, "Must detect exactly 4 debt markers");
+      assert.equal(phi.export_count, 1, "Must detect 1 export");
+    });
+
+    it("measures block nesting depth deterministically", () => {
+      const pkgDir = join(tempDir, "pkg");
+      mkdirSync(pkgDir, { recursive: true });
+      writeFileSync(
+        join(pkgDir, "deep.mjs"),
+        `export function deep() { if (true) { while (false) { try { [ ( { a: 1 } ) ] } catch {} } } }\n`,
+        "utf8",
+      );
+
+      const phi = computePhi(tempDir);
+      assert.ok(phi.max_nesting_depth >= 4, "Nesting depth must reflect nested blocks");
+    });
+  });
+
+  describe("2. Monotone Potential Ratchet (Law 13)", () => {
+    it("allows non-increasing potential for regular builder PRs (deltaPhi <= 0)", () => {
+      const rEqual = checkPhiReduction(1000, 1000, false);
+      assert.equal(rEqual.ok, true);
+      assert.equal(rEqual.delta_phi, 0);
+
+      const rDrop = checkPhiReduction(1000, 950, false);
+      assert.equal(rDrop.ok, true);
+      assert.equal(rDrop.delta_phi, -50);
+    });
+
+    it("rejects complexity increases for builder PRs (deltaPhi > 0)", () => {
+      const rIncrease = checkPhiReduction(1000, 1050, false);
+      assert.equal(rIncrease.ok, false);
+      assert.equal(rIncrease.delta_phi, 50);
+    });
+
+    it("strictly requires negative potential delta for consolidator role (deltaPhi < 0)", () => {
+      // Consolidator with equal phi must fail
+      const rEqualConsolidator = checkPhiReduction(1000, 1000, true);
+      assert.equal(rEqualConsolidator.ok, false);
+
+      // Consolidator with increased phi must fail
+      const rIncreaseConsolidator = checkPhiReduction(1000, 1020, true);
+      assert.equal(rIncreaseConsolidator.ok, false);
+
+      // Consolidator with strictly reduced phi passes
+      const rDropConsolidator = checkPhiReduction(1000, 980, true);
+      assert.equal(rDropConsolidator.ok, true);
+      assert.equal(rDropConsolidator.delta_phi, -20);
+    });
+
+    it("Law 17: rejects non-safe-integer inputs with TypeError", () => {
+      assert.throws(() => checkPhiReduction(100.5, 95), TypeError);
+      assert.throws(() => checkPhiReduction(100, "95"), TypeError);
+      assert.throws(() => checkPhiReduction(NaN, 95), TypeError);
+    });
+  });
+
+  describe("3. Gate Evaluator (evaluatePhiGate)", () => {
+    it("approves clean non-increasing deltaPhi with auto_merge", () => {
+      const res = evaluatePhiGate({ phiBefore: 200, phiAfter: 190, role: "builder" });
+      assert.equal(res.ok, true);
+      assert.equal(res.verdict, "auto_merge");
+      assert.equal(res.delta_phi, -10);
+    });
+
+    it("rejects phi increase with LAW_13_PHI_INCREASE", () => {
+      const res = evaluatePhiGate({ phiBefore: 200, phiAfter: 205, role: "builder" });
+      assert.equal(res.ok, false);
+      assert.equal(res.verdict, "reject");
+      assert.equal(res.rule, "LAW_13_PHI_INCREASE");
+      assert.equal(res.violation, "PHI_INCREASED");
+    });
+
+    it("rejects consolidator without strict reduction with LAW_13_CONSOLIDATOR_PHI", () => {
+      const res = evaluatePhiGate({ phiBefore: 200, phiAfter: 200, role: "consolidator" });
+      assert.equal(res.ok, false);
+      assert.equal(res.verdict, "reject");
+      assert.equal(res.rule, "LAW_13_CONSOLIDATOR_PHI");
+      assert.equal(res.violation, "CONSOLIDATOR_PHI_NOT_DECREASED");
+    });
+  });
+
+  describe("4. Law 13 Thrift Test (verifyThrift)", () => {
+    it("passes refactoring candidate with negative deltaPhi and preserved tests and surface", () => {
+      const res = verifyThrift({
+        phiBefore: 500,
+        phiAfter: 450,
+        testsPreserved: true,
+        surfacePreserved: true,
+      });
+
+      assert.equal(res.ok, true);
+      assert.equal(res.verdict, "pass");
+      assert.equal(res.delta_phi, -50);
+      assert.equal(res.thrift_score, 50);
+      assert.equal(res.reasons.length, 0);
+    });
+
+    it("rejects refactoring candidate if tests were weakened or deleted", () => {
+      const res = verifyThrift({
+        phiBefore: 500,
+        phiAfter: 450,
+        testsPreserved: false,
+        surfacePreserved: true,
+      });
+
+      assert.equal(res.ok, false);
+      assert.equal(res.verdict, "reject");
+      assert.ok(res.reasons.some((r) => r.includes("Test preservation")));
+    });
+
+    it("rejects refactoring candidate if public surface was modified without approval", () => {
+      const res = verifyThrift({
+        phiBefore: 500,
+        phiAfter: 450,
+        testsPreserved: true,
+        surfacePreserved: false,
+      });
+
+      assert.equal(res.ok, false);
+      assert.equal(res.verdict, "reject");
+      assert.ok(res.reasons.some((r) => r.includes("Public surface preserved")));
+    });
+  });
+});
