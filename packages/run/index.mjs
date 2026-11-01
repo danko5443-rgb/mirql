@@ -275,6 +275,8 @@ export function runCli(argv = []) {
           probe: flags.probe ?? flags.type ?? "tests",
           dir: flags.dir,
           workspaceDir: flags.workspace ?? process.cwd(),
+          source: flags.source,
+          test: flags.test,
         });
         emitLine(jcs(res));
         return res.ok ? EXIT_CODES.OK : EXIT_CODES.DOMAIN_NEGATIVE;

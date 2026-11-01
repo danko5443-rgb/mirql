@@ -157,40 +157,52 @@ export function runProbe(options = {}) {
       };
     }
   } else if (probeName === "mutants") {
-    const minKillRateBp = config?.min_kill_rate_bp ?? 8000;
+    const minKillRateBp = Math.max(8000, config?.min_kill_rate_bp ?? 8000);
     const sourcePath = options.source ?? options.target;
     const testPath = options.test;
 
     if (sourcePath && testPath) {
-      const mutantRes = runMutationTesting({
-        sourcePath,
-        testPath,
-        killThresholdBp: minKillRateBp,
-      });
-      const passed = mutantRes.ok;
-      probeResult = {
-        name: config?.name ?? "incremental_mutation_density",
-        type: "mutants",
-        status: passed ? "pass" : "fail",
-        passed,
-        kill_rate_bp: mutantRes.kill_rate_bp,
-        min_kill_rate_bp: minKillRateBp,
-        mutants_total: mutantRes.mutants_total,
-        mutants_killed: mutantRes.mutants_killed,
-        mutants_survived: mutantRes.mutants_survived,
-        failures: passed ? 0 : 1,
-        duration_ms: 50,
-      };
+      try {
+        const mutantRes = runMutationTesting({
+          sourcePath,
+          testPath,
+          killThresholdBp: minKillRateBp,
+        });
+        const passed = mutantRes.ok;
+        probeResult = {
+          name: config?.name ?? "incremental_mutation_density",
+          type: "mutants",
+          status: passed ? "pass" : "fail",
+          passed,
+          kill_rate_bp: mutantRes.kill_rate_bp,
+          min_kill_rate_bp: minKillRateBp,
+          mutants_total: mutantRes.mutants_total,
+          mutants_killed: mutantRes.mutants_killed,
+          mutants_survived: mutantRes.mutants_survived,
+          failures: passed ? 0 : 1,
+          duration_ms: 50,
+        };
+      } catch (err) {
+        probeResult = {
+          name: config?.name ?? "incremental_mutation_density",
+          type: "mutants",
+          status: "fail",
+          passed: false,
+          kill_rate_bp: 0,
+          min_kill_rate_bp: minKillRateBp,
+          failures: 1,
+          duration_ms: 0,
+        };
+      }
     } else {
+      // Fail closed: without target source and test paths, report not_implemented
       probeResult = {
         name: config?.name ?? "incremental_mutation_density",
         type: "mutants",
-        status: "pass",
-        passed: true,
-        kill_rate_bp: 10000,
-        min_kill_rate_bp: minKillRateBp,
-        failures: 0,
-        duration_ms: 5,
+        status: "not_implemented",
+        passed: false,
+        failures: 1,
+        duration_ms: 0,
       };
     }
   } else {

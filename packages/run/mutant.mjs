@@ -30,21 +30,31 @@ export function maskStringsAndComments(line) {
   let inDouble = false;
   let inSingle = false;
   let inBacktick = false;
-  let inComment = false;
+  let inBlockComment = false;
 
   for (let i = 0; i < line.length; i++) {
     const char = line[i];
     const prev = i > 0 ? line[i - 1] : "";
     const isEscaped = prev === "\\";
 
-    if (inComment) {
+    if (inBlockComment) {
       masked += " ";
+      if (char === "*" && line[i + 1] === "/") {
+        inBlockComment = false;
+        masked += " ";
+        i++;
+      }
       continue;
     }
 
     if (!inDouble && !inSingle && !inBacktick) {
       if (char === "/" && line[i + 1] === "/") {
-        inComment = true;
+        // Line comment: the rest of the line is masked
+        masked += " ".repeat(line.length - i);
+        break;
+      }
+      if (char === "/" && line[i + 1] === "*") {
+        inBlockComment = true;
         masked += "  ";
         i++;
         continue;
@@ -78,6 +88,19 @@ export function maskStringsAndComments(line) {
   }
 
   return masked;
+}
+
+/**
+ * Splices a replacement string into `line` at exact character range `[matchIdx, matchIdx + matchLen)`.
+ *
+ * @param {string} line
+ * @param {number} matchIdx
+ * @param {number} matchLen
+ * @param {string} replacement
+ * @returns {string}
+ */
+function spliceMatch(line, matchIdx, matchLen, replacement) {
+  return line.slice(0, matchIdx) + replacement + line.slice(matchIdx + matchLen);
 }
 
 /**
@@ -163,37 +186,41 @@ export function generateMutants(sourceCode, options = {}) {
     // 1. invert-conditional
     if (allowedOps.includes("invert-conditional")) {
       if (masked.includes("===")) {
-        addCandidate(mutants, lines, lineIdx, lineNum, "invert-conditional", "===", "!==", "Invert strict equality to strict inequality");
+        addCandidateAtOffset(mutants, lines, lineIdx, lineNum, "invert-conditional", masked.indexOf("==="), 3, "===", "!==", "Invert strict equality to strict inequality");
       } else if (masked.includes("!==")) {
-        addCandidate(mutants, lines, lineIdx, lineNum, "invert-conditional", "!==", "===", "Invert strict inequality to strict equality");
+        addCandidateAtOffset(mutants, lines, lineIdx, lineNum, "invert-conditional", masked.indexOf("!=="), 3, "!==", "===", "Invert strict inequality to strict equality");
       } else if (masked.includes("<=")) {
-        addCandidate(mutants, lines, lineIdx, lineNum, "invert-conditional", "<=", ">", "Invert less-than-or-equal to greater-than");
+        addCandidateAtOffset(mutants, lines, lineIdx, lineNum, "invert-conditional", masked.indexOf("<="), 2, "<=", ">", "Invert less-than-or-equal to greater-than");
       } else if (masked.includes(">=")) {
-        addCandidate(mutants, lines, lineIdx, lineNum, "invert-conditional", ">=", "<", "Invert greater-than-or-equal to less-than");
+        addCandidateAtOffset(mutants, lines, lineIdx, lineNum, "invert-conditional", masked.indexOf(">="), 2, ">=", "<", "Invert greater-than-or-equal to less-than");
       } else if (masked.includes(" < ")) {
-        addCandidate(mutants, lines, lineIdx, lineNum, "invert-conditional", " < ", " >= ", "Invert less-than to greater-than-or-equal");
+        addCandidateAtOffset(mutants, lines, lineIdx, lineNum, "invert-conditional", masked.indexOf(" < "), 3, " < ", " >= ", "Invert less-than to greater-than-or-equal");
       } else if (masked.includes(" > ")) {
-        addCandidate(mutants, lines, lineIdx, lineNum, "invert-conditional", " > ", " <= ", "Invert greater-than to less-than-or-equal");
+        addCandidateAtOffset(mutants, lines, lineIdx, lineNum, "invert-conditional", masked.indexOf(" > "), 3, " > ", " <= ", "Invert greater-than to less-than-or-equal");
       }
     }
 
     // 2. swap-arithmetic
     if (allowedOps.includes("swap-arithmetic")) {
       if (masked.includes(" + ")) {
-        addCandidate(mutants, lines, lineIdx, lineNum, "swap-arithmetic", " + ", " - ", "Swap addition with subtraction");
+        addCandidateAtOffset(mutants, lines, lineIdx, lineNum, "swap-arithmetic", masked.indexOf(" + "), 3, " + ", " - ", "Swap addition with subtraction");
       } else if (masked.includes(" - ")) {
-        addCandidate(mutants, lines, lineIdx, lineNum, "swap-arithmetic", " - ", " + ", "Swap subtraction with addition");
+        addCandidateAtOffset(mutants, lines, lineIdx, lineNum, "swap-arithmetic", masked.indexOf(" - "), 3, " - ", " + ", "Swap subtraction with addition");
       } else if (masked.includes(" * ")) {
-        addCandidate(mutants, lines, lineIdx, lineNum, "swap-arithmetic", " * ", " / ", "Swap multiplication with division");
+        addCandidateAtOffset(mutants, lines, lineIdx, lineNum, "swap-arithmetic", masked.indexOf(" * "), 3, " * ", " / ", "Swap multiplication with division");
       }
     }
 
     // 3. mutate-boundary
     if (allowedOps.includes("mutate-boundary")) {
-      if (/\btrue\b/.test(masked)) {
-        addCandidate(mutants, lines, lineIdx, lineNum, "mutate-boundary", "true", "false", "Mutate boolean true to false");
-      } else if (/\bfalse\b/.test(masked)) {
-        addCandidate(mutants, lines, lineIdx, lineNum, "mutate-boundary", "false", "true", "Mutate boolean false to true");
+      const trueMatch = /\btrue\b/.exec(masked);
+      if (trueMatch) {
+        addCandidateAtOffset(mutants, lines, lineIdx, lineNum, "mutate-boundary", trueMatch.index, 4, "true", "false", "Mutate boolean true to false");
+      } else {
+        const falseMatch = /\bfalse\b/.exec(masked);
+        if (falseMatch) {
+          addCandidateAtOffset(mutants, lines, lineIdx, lineNum, "mutate-boundary", falseMatch.index, 5, "false", "true", "Mutate boolean false to true");
+        }
       }
     }
 
@@ -209,16 +236,21 @@ export function generateMutants(sourceCode, options = {}) {
         !trimmedClean.includes("=") &&
         !trimmedClean.includes("*/")
       ) {
-        addCandidate(
-          mutants,
-          lines,
-          lineIdx,
-          lineNum,
-          "remove-call",
-          trimmedClean,
-          `/* ${trimmedClean} */`,
-          "Remove standalone call statement",
-        );
+        const callIdx = line.indexOf(trimmedClean);
+        if (callIdx !== -1) {
+          addCandidateAtOffset(
+            mutants,
+            lines,
+            lineIdx,
+            lineNum,
+            "remove-call",
+            callIdx,
+            trimmedClean.length,
+            trimmedClean,
+            `/* ${trimmedClean} */`,
+            "Remove standalone call statement",
+          );
+        }
       }
     }
   }
@@ -226,18 +258,10 @@ export function generateMutants(sourceCode, options = {}) {
   return mutants;
 }
 
-/** Helper to construct and syntax-validate mutant candidate */
-function addCandidate(mutants, lines, lineIdx, lineNum, operator, original, replacement, description) {
+/** Helper to construct and syntax-validate mutant candidate using exact string offset */
+function addCandidateAtOffset(mutants, lines, lineIdx, lineNum, operator, matchIdx, matchLen, original, replacement, description) {
   const line = lines[lineIdx];
-  let mutatedLine = "";
-
-  if (operator === "remove-call") {
-    mutatedLine = line.replace(original, replacement);
-  } else if (operator === "mutate-boundary" && (original === "true" || original === "false")) {
-    mutatedLine = line.replace(new RegExp(`\\b${original}\\b`), replacement);
-  } else {
-    mutatedLine = line.replace(original, replacement);
-  }
+  const mutatedLine = spliceMatch(line, matchIdx, matchLen, replacement);
 
   const mutatedLines = [...lines];
   mutatedLines[lineIdx] = mutatedLine;

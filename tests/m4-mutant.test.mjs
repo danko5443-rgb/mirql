@@ -65,6 +65,31 @@ export function calc(a, b) {
       assert.equal(boolMutant.operator, "mutate-boundary");
     });
 
+    it("strictly splices code tokens and never mutates string literals or inline block comments", () => {
+      // 1. log("a + b", x + y); -> log("a + b", x - y);
+      const code1 = 'export function f1(x, y) { log("a + b", x + y); }\n';
+      const m1 = generateMutants(code1);
+      assert.equal(m1.length, 1);
+      assert.ok(m1[0].mutatedCode.includes('log("a + b", x - y);'));
+
+      // 2. const s = "true" || true; -> const s = "true" || false;
+      const code2 = 'export function f2() { const s = "true" || true; return s; }\n';
+      const m2 = generateMutants(code2);
+      assert.equal(m2.length, 1);
+      assert.ok(m2[0].mutatedCode.includes('const s = "true" || false;'));
+
+      // 3. "x === y" && a === b -> "x === y" && a !== b
+      const code3 = 'export function f3(a, b) { if ("x === y" && a === b) return 1; }\n';
+      const m3 = generateMutants(code3);
+      assert.equal(m3.length, 1);
+      assert.ok(m3[0].mutatedCode.includes('if ("x === y" && a !== b)'));
+
+      // 4. const t = 1; /* a === b */ -> 0 mutants
+      const code4 = 'export function f4() { const t = 1; /* a === b */ return t; }\n';
+      const m4 = generateMutants(code4);
+      assert.equal(m4.length, 0, "Inline block comments must be completely masked");
+    });
+
     it("skips string literals, comments, and identifiers containing target words", () => {
       // String with "a === b" and identifier "construed" containing "true"
       const code = `
@@ -375,11 +400,29 @@ export function compute(a, b) {
   });
 
   describe("7. Probe mutants wiring", () => {
-    it("runs mutants probe through runProbe successfully", () => {
+    it("fails closed with not_implemented when source and test are omitted", () => {
       const res = runProbe({ probe: "mutants", dir: tempDir });
+      assert.equal(res.ok, false);
+      assert.equal(res.probe.status, "not_implemented");
+      assert.equal(res.probe.type, "mutants");
+    });
+
+    it("runs mutants probe successfully when target source and test are provided", () => {
+      const srcFile = join(tempDir, "probe_math.mjs");
+      const testFile = join(tempDir, "probe_math.test.mjs");
+      writeFileSync(srcFile, `export function add(a, b) { if (a === 0) return b; return a + b; }\n`, "utf8");
+      writeFileSync(testFile, `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { add } from "./probe_math.mjs";\ntest("adds", () => { assert.equal(add(0, 2), 2); assert.equal(add(2, 3), 5); });\n`, "utf8");
+
+      const res = runProbe({
+        probe: "mutants",
+        dir: tempDir,
+        source: srcFile,
+        test: testFile,
+      });
       assert.equal(res.ok, true);
       assert.equal(res.probe.status, "pass");
       assert.equal(res.probe.type, "mutants");
+      assert.ok(res.probe.kill_rate_bp >= 8000);
     });
   });
 });
