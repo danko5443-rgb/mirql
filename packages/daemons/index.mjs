@@ -9,6 +9,7 @@ export {
   MIN_CALL_COST_MICRO_USD,
   MAX_REQUEST_BODY_BYTES,
   isSafeNonNegativeInteger,
+  timingSafeCompare,
 } from "./llm-gateway.mjs";
 
 export {
@@ -16,6 +17,7 @@ export {
   checkProbationStatus,
   executeRollback,
   killProcesses,
+  killServices,
   DEFAULT_PROBATION_TIMEOUT_MS,
   DEFAULT_HEARTBEAT_TIMEOUT_MS,
 } from "./lifeguard.mjs";

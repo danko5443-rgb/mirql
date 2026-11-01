@@ -2,7 +2,7 @@
 // Enforces Law 2 (unblockable kill authority) and Law 14 (quiescence / fail-safe convergence).
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /** Default probation window: 30 minutes in milliseconds (1,800,000 ms). */
@@ -120,6 +120,36 @@ export function killProcesses(pids = []) {
 }
 
 /**
+ * Stops or kills systemd services using systemctl (Law 2).
+ *
+ * @param {string[]} services
+ * @returns {{ killed: string[], failed: Array<{ service: string, error: string }> }}
+ */
+export function killServices(services = []) {
+  const killed = [];
+  const failed = [];
+
+  for (const service of services) {
+    if (typeof service !== "string" || service.trim().length === 0) continue;
+    try {
+      const res = spawnSync("systemctl", ["kill", service.trim()], {
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      if (res.status === 0) {
+        killed.push(service.trim());
+      } else {
+        failed.push({ service, error: res.stderr?.trim() || `Exit code ${res.status}` });
+      }
+    } catch (err) {
+      failed.push({ service, error: err.message });
+    }
+  }
+
+  return { killed, failed };
+}
+
+/**
  * Lifeguard watchdog daemon instance.
  */
 export class LifeguardWatchdog {
@@ -127,11 +157,14 @@ export class LifeguardWatchdog {
     this.repoDir = options.repoDir ?? process.cwd();
     this.targetBaseSha = options.targetBaseSha ?? null;
     this.baseShaFile = options.baseShaFile ?? null;
+    this.heartbeatFile = options.heartbeatFile ?? null;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_PROBATION_TIMEOUT_MS;
     this.heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
     this.startTimeMs = options.startTimeMs ?? Date.now();
     this.lastHeartbeatMs = this.startTimeMs;
     this.killPids = Array.isArray(options.killPids) ? [...options.killPids] : [];
+    this.killServices = Array.isArray(options.killServices) ? [...options.killServices] : [];
+    this.killPidFiles = Array.isArray(options.killPidFiles) ? [...options.killPidFiles] : [];
     this.disarmed = false;
     this.rolledBack = false;
     this.intervalId = null;
@@ -168,18 +201,44 @@ export class LifeguardWatchdog {
       return { ok: true, disarmed: true, tripped: false };
     }
 
+    // Check heartbeat file mtime if configured
+    if (this.heartbeatFile && existsSync(this.heartbeatFile)) {
+      try {
+        const stats = statSync(this.heartbeatFile);
+        if (stats.mtimeMs > this.lastHeartbeatMs) {
+          this.lastHeartbeatMs = stats.mtimeMs;
+        }
+      } catch {}
+    }
+
     const status = checkProbationStatus({
       startTimeMs: this.startTimeMs,
       nowMs,
       timeoutMs: this.timeoutMs,
     });
 
-    const heartbeatElapsed = nowMs - this.lastHeartbeatMs;
+    const heartbeatElapsed = Math.max(0, nowMs - this.lastHeartbeatMs);
     const heartbeatTripped = heartbeatElapsed > this.heartbeatTimeoutMs;
 
     if ((status.tripped || heartbeatTripped) && !this.rolledBack) {
+      // Collect PIDs from killPidFiles
+      const allPids = [...this.killPids];
+      for (const pidFile of this.killPidFiles) {
+        if (existsSync(pidFile)) {
+          try {
+            const rawPid = parseInt(readFileSync(pidFile, "utf8").trim(), 10);
+            if (Number.isSafeInteger(rawPid) && rawPid > 0 && !allPids.includes(rawPid)) {
+              allPids.push(rawPid);
+            }
+          } catch {}
+        }
+      }
+
       // Execute unblockable kill on registered processes (Law 2)
-      const killResult = killProcesses(this.killPids);
+      const killResult = killProcesses(allPids);
+
+      // Execute kill on systemd services if specified
+      const serviceKillResult = killServices(this.killServices);
 
       // Execute rollback if target SHA is resolvable
       const targetSha = this.resolveTargetSha();
@@ -195,15 +254,21 @@ export class LifeguardWatchdog {
         reason: status.tripped ? "PROBATION_TIMEOUT_EXPIRED" : "HEARTBEAT_TIMEOUT_EXPIRED",
         elapsedMs: status.elapsedMs,
         remainingMs: status.remainingMs,
+        heartbeatElapsedMs: heartbeatElapsed,
         killed: killResult.killed,
+        killedServices: serviceKillResult.killed,
         rollback,
       };
     }
 
-    return status;
+    return {
+      ...status,
+      heartbeatElapsedMs: heartbeatElapsed,
+      heartbeatRemainingMs: Math.max(0, this.heartbeatTimeoutMs - heartbeatElapsed),
+    };
   }
 
-  start(intervalMs = 1000) {
+  start(intervalMs = 1000, unrefTimer = false) {
     if (this.intervalId) return;
     this.intervalId = setInterval(() => {
       const res = this.check();
@@ -212,8 +277,8 @@ export class LifeguardWatchdog {
         this.stop();
       }
     }, intervalMs);
-    // Don't keep Node process alive solely for watchdog in test suites
-    if (typeof this.intervalId.unref === "function") {
+    // Only unref if explicitly requested (e.g. in test suites); keep event loop active in --watch mode
+    if (unrefTimer && typeof this.intervalId.unref === "function") {
       this.intervalId.unref();
     }
   }
@@ -229,24 +294,36 @@ export class LifeguardWatchdog {
 // CLI entrypoint
 if (process.argv[1] && process.argv[1].endsWith("lifeguard.mjs")) {
   let timeoutSec = 1800;
+  let heartbeatTimeoutSec = 300;
   let baseSha = null;
   let baseFile = null;
+  let heartbeatFile = null;
   let repoDir = process.cwd();
   let watchMode = false;
   const killPids = [];
+  const killServices = [];
+  const killPidFiles = [];
 
   for (let i = 2; i < process.argv.length; i++) {
     const arg = process.argv[i];
     if (arg === "--timeout" && process.argv[i + 1]) {
       timeoutSec = parseInt(process.argv[++i], 10);
+    } else if (arg === "--heartbeat-timeout" && process.argv[i + 1]) {
+      heartbeatTimeoutSec = parseInt(process.argv[++i], 10);
     } else if (arg === "--base" && process.argv[i + 1]) {
       baseSha = process.argv[++i];
     } else if (arg === "--base-file" && process.argv[i + 1]) {
       baseFile = process.argv[++i];
+    } else if (arg === "--heartbeat-file" && process.argv[i + 1]) {
+      heartbeatFile = process.argv[++i];
     } else if (arg === "--repo" && process.argv[i + 1]) {
       repoDir = process.argv[++i];
     } else if (arg === "--kill-pid" && process.argv[i + 1]) {
       killPids.push(parseInt(process.argv[++i], 10));
+    } else if (arg === "--kill-service" && process.argv[i + 1]) {
+      killServices.push(process.argv[++i]);
+    } else if (arg === "--kill-pid-file" && process.argv[i + 1]) {
+      killPidFiles.push(process.argv[++i]);
     } else if (arg === "--watch") {
       watchMode = true;
     }
@@ -256,13 +333,18 @@ if (process.argv[1] && process.argv[1].endsWith("lifeguard.mjs")) {
     repoDir,
     targetBaseSha: baseSha,
     baseShaFile: baseFile,
+    heartbeatFile,
     killPids,
+    killServices,
+    killPidFiles,
     timeoutMs: timeoutSec * 1000,
+    heartbeatTimeoutMs: heartbeatTimeoutSec * 1000,
   });
 
   if (watchMode) {
-    process.stdout.write(JSON.stringify({ status: "watching", timeout_ms: timeoutSec * 1000 }) + "\n");
-    watchdog.start(2000);
+    process.stdout.write(JSON.stringify({ status: "watching", timeout_ms: timeoutSec * 1000, heartbeat_file: heartbeatFile }) + "\n");
+    // In watch mode, keep the event loop alive (unrefTimer = false)
+    watchdog.start(2000, false);
   } else {
     const checkResult = watchdog.check();
     process.stdout.write(JSON.stringify(checkResult) + "\n");

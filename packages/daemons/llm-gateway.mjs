@@ -3,6 +3,7 @@
 
 import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { timingSafeEqual } from "node:crypto";
 
 /** Canonical exit/error codes matching EXIT_CODES. */
 export const GATEWAY_CODES = Object.freeze({
@@ -51,6 +52,21 @@ export function calculateTokenCostMicroUsd(promptTokens, completionTokens, prici
   const inputCost = Math.floor((promptTokens * pricing.input_per_m) / 1_000_000);
   const outputCost = Math.floor((completionTokens * pricing.output_per_m) / 1_000_000);
   return inputCost + outputCost;
+}
+
+/**
+ * Constant-time string comparison preventing timing side-channel attacks.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+export function timingSafeCompare(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const bufA = Buffer.from(a, "utf8");
+  const bufB = Buffer.from(b, "utf8");
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
 }
 
 /**
@@ -180,7 +196,18 @@ export function createLlmGateway(options = {}) {
   const manager = new WarrantBudgetManager();
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 0;
-  const adminToken = options.adminToken ?? process.env.GATEWAY_ADMIN_TOKEN ?? "mirql-gateway-admin-secret";
+  const envToken = process.env.GATEWAY_ADMIN_TOKEN;
+  let adminToken = options.adminToken ?? envToken;
+  if (!adminToken) {
+    if (process.env.NODE_ENV === "test" || options.isMock) {
+      adminToken = "test-mock-admin-token-at-least-32-chars-long";
+    } else {
+      throw new Error("GATEWAY_ADMIN_TOKEN must be configured and set (minimum 32 characters in production)");
+    }
+  }
+  if (adminToken.length < 32 && process.env.NODE_ENV !== "test" && !options.isMock) {
+    throw new Error("GATEWAY_ADMIN_TOKEN must be at least 32 characters long");
+  }
   const upstreamUrl = options.upstreamUrl ?? null;
 
   const server = createServer(async (req, res) => {
@@ -220,12 +247,12 @@ export function createLlmGateway(options = {}) {
       const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
       const pathname = url.pathname;
 
-      // Helper for admin auth check
+      // Helper for admin auth check using constant-time comparison
       const checkAdminAuth = () => {
         const authHeader = req.headers["authorization"] ?? "";
         const customToken = req.headers["x-mirql-admin-token"] ?? "";
         const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
-        return (bearer === adminToken || customToken === adminToken);
+        return timingSafeCompare(bearer, adminToken) || timingSafeCompare(customToken, adminToken);
       };
 
       // Route: GET /health
@@ -257,9 +284,19 @@ export function createLlmGateway(options = {}) {
         return;
       }
 
-      // Route: GET /v1/warrant/:id
+      // Route: GET /v1/warrant/:id (Admin or Warrant Holder)
       if (req.method === "GET" && pathname.startsWith("/v1/warrant/")) {
         const warrantId = decodeURIComponent(pathname.slice("/v1/warrant/".length));
+        const callerWarrantHeader = req.headers["x-mirql-warrant-id"];
+        const isAdmin = checkAdminAuth();
+        const isHolder = callerWarrantHeader === warrantId;
+
+        if (!isAdmin && !isHolder) {
+          res.writeHead(403, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "FORBIDDEN", detail: "Admin token or matching x-mirql-warrant-id header required" }));
+          return;
+        }
+
         const entry = manager.get(warrantId);
         if (!entry) {
           res.writeHead(404, { "Content-Type": "application/json" });
@@ -306,16 +343,21 @@ export function createLlmGateway(options = {}) {
           return;
         }
 
-        // Validate max_tokens if provided
-        if (jsonBody?.max_tokens !== undefined) {
-          if (!isSafeNonNegativeInteger(jsonBody.max_tokens) || jsonBody.max_tokens === 0) {
-            res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({
-              error: "INVALID_MAX_TOKENS",
-              detail: "max_tokens must be a positive safe integer",
-              code: GATEWAY_CODES.USAGE_ERROR,
-            }));
-            return;
+        // Validate max_tokens if provided, or default to 256 and clamp into request body
+        if (jsonBody) {
+          if (jsonBody.max_tokens !== undefined) {
+            if (!isSafeNonNegativeInteger(jsonBody.max_tokens) || jsonBody.max_tokens === 0) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({
+                error: "INVALID_MAX_TOKENS",
+                detail: "max_tokens must be a positive safe integer",
+                code: GATEWAY_CODES.USAGE_ERROR,
+              }));
+              return;
+            }
+          } else {
+            // Explicitly clamp missing max_tokens to 256 to prevent upstream running open-ended
+            jsonBody.max_tokens = 256;
           }
         }
 
@@ -338,11 +380,12 @@ export function createLlmGateway(options = {}) {
           return;
         }
 
-        // If upstream URL is configured, forward the request
+        // If upstream URL is configured, forward the request with the clamped max_tokens
         if (upstreamUrl) {
           try {
             const target = new URL(pathname, upstreamUrl);
             const reqFn = target.protocol === "https:" ? httpsRequest : httpRequest;
+            const forwardedBody = jsonBody ? JSON.stringify(jsonBody) : bodyText;
             const upstreamReq = reqFn(
               target,
               {
@@ -350,7 +393,7 @@ export function createLlmGateway(options = {}) {
                 headers: {
                   ...req.headers,
                   host: target.host,
-                  "content-length": Buffer.byteLength(bodyText),
+                  "content-length": Buffer.byteLength(forwardedBody),
                 },
               },
               (upstreamRes) => {
@@ -366,7 +409,7 @@ export function createLlmGateway(options = {}) {
               res.writeHead(502, { "Content-Type": "application/json" });
               res.end(JSON.stringify({ error: "BAD_GATEWAY", detail: upErr.message }));
             });
-            upstreamReq.write(bodyText);
+            upstreamReq.write(forwardedBody);
             upstreamReq.end();
             return;
           } catch (fwdErr) {
@@ -447,12 +490,15 @@ export function createLlmGateway(options = {}) {
 // CLI entrypoint
 if (process.argv[1] && process.argv[1].endsWith("llm-gateway.mjs")) {
   let port = 8080;
+  let adminToken = process.env.GATEWAY_ADMIN_TOKEN;
   for (let i = 2; i < process.argv.length; i++) {
     if (process.argv[i] === "--port" && process.argv[i + 1]) {
       port = parseInt(process.argv[++i], 10);
+    } else if (process.argv[i] === "--admin-token" && process.argv[i + 1]) {
+      adminToken = process.argv[++i];
     }
   }
-  createLlmGateway({ port, host: "0.0.0.0" }).then(({ port: boundPort }) => {
+  createLlmGateway({ port, host: "0.0.0.0", adminToken }).then(({ port: boundPort }) => {
     process.stdout.write(JSON.stringify({ status: "running", port: boundPort }) + "\n");
   }).catch((err) => {
     process.stderr.write(`Failed to start LLM Gateway: ${err.message}\n`);

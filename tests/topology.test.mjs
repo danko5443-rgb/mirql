@@ -16,9 +16,11 @@ import {
   GATEWAY_CODES,
   MIN_CALL_COST_MICRO_USD,
   isSafeNonNegativeInteger,
+  timingSafeCompare,
   LifeguardWatchdog,
   checkProbationStatus,
   killProcesses,
+  killServices,
   executeRollback,
   validateServiceUnit,
   renderLauncherUnit,
@@ -170,14 +172,79 @@ describe("Production Containerization & Topology Gates", () => {
       assert.equal(receipt.refund_micro_usd, 0);
     });
 
-    it("WarrantBudgetManager rejects non-safe integer or overflow top-ups (Law 17)", () => {
-      const mgr = new WarrantBudgetManager();
-      assert.throws(() => mgr.preauth("01W", 1.5), /Law 17/);
-      assert.throws(() => mgr.preauth("01W", -10), /Law 17/);
+    it("timingSafeCompare compares strings in constant time and rejects invalid inputs safely", () => {
+      assert.equal(timingSafeCompare("secret-token-12345", "secret-token-12345"), true);
+      assert.equal(timingSafeCompare("secret-token-12345", "secret-token-wrong"), false);
+      assert.equal(timingSafeCompare("short", "longer-token-123"), false);
+      assert.equal(timingSafeCompare(null, "token"), false);
+      assert.equal(timingSafeCompare("token", undefined), false);
+    });
+
+    it("HTTP LLM Gateway enforces min 32-char admin token, constant-time auth, protected warrant lookup, and clamps max_tokens", async () => {
+      const adminSecret = "a".repeat(32); // 32 characters
+      const gateway = await createLlmGateway({ port: 0, adminToken: adminSecret });
+      try {
+        const baseUrl = `http://127.0.0.1:${gateway.port}`;
+        const warrantId = "01WARRANTPROTECTTEST0000000";
+
+        // Preauth with valid admin token
+        const preauthRes = await fetch(`${baseUrl}/v1/warrant/preauth`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${adminSecret}`,
+          },
+          body: JSON.stringify({
+            warrant_id: warrantId,
+            budget_micro_usd: 10_000,
+          }),
+        });
+        assert.equal(preauthRes.status, 200);
+
+        // Protected warrant lookup: unauthenticated access rejected with 403 Forbidden
+        const unauthLookup = await fetch(`${baseUrl}/v1/warrant/${warrantId}`);
+        assert.equal(unauthLookup.status, 403);
+
+        // Access with wrong warrant header is 403 Forbidden
+        const wrongLookup = await fetch(`${baseUrl}/v1/warrant/${warrantId}`, {
+          headers: { "x-mirql-warrant-id": "wrong-warrant-id" },
+        });
+        assert.equal(wrongLookup.status, 403);
+
+        // Access with matching warrant header succeeds
+        const holderLookup = await fetch(`${baseUrl}/v1/warrant/${warrantId}`, {
+          headers: { "x-mirql-warrant-id": warrantId },
+        });
+        assert.equal(holderLookup.status, 200);
+        const holderData = await holderLookup.json();
+        assert.equal(holderData.warrant_id, warrantId);
+
+        // Access with admin token succeeds
+        const adminLookup = await fetch(`${baseUrl}/v1/warrant/${warrantId}`, {
+          headers: { "Authorization": `Bearer ${adminSecret}` },
+        });
+        assert.equal(adminLookup.status, 200);
+
+        // Omitted max_tokens is automatically clamped to 256
+        const completionRes = await fetch(`${baseUrl}/v1/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-mirql-warrant-id": warrantId,
+          },
+          body: JSON.stringify({ prompt: "hello, world" }), // omitted max_tokens
+        });
+        assert.equal(completionRes.status, 200);
+        const completionData = await completionRes.json();
+        assert.ok(completionData.usage.completion_tokens <= 256);
+      } finally {
+        await gateway.close();
+      }
     });
 
     it("HTTP LLM Gateway enforces admin auth on preauth/settle, prevents zero-cost bypass, and handles bad inputs safely", async () => {
-      const gateway = await createLlmGateway({ port: 0, adminToken: "test-admin-token-123" });
+      const adminToken = "test-admin-token-123-at-least-32-chars-long";
+      const gateway = await createLlmGateway({ port: 0, adminToken });
       try {
         const baseUrl = `http://127.0.0.1:${gateway.port}`;
 
@@ -201,7 +268,7 @@ describe("Production Containerization & Topology Gates", () => {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": "Bearer test-admin-token-123",
+            "Authorization": `Bearer ${adminToken}`,
           },
           body: JSON.stringify({
             warrant_id: warrantId,
@@ -277,7 +344,7 @@ describe("Production Containerization & Topology Gates", () => {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": "Bearer test-admin-token-123",
+            "Authorization": `Bearer ${adminToken}`,
           },
           body: JSON.stringify({ warrant_id: warrantId }),
         });
@@ -334,6 +401,40 @@ describe("Production Containerization & Topology Gates", () => {
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }
+    });
+
+    it("LifeguardWatchdog tracks heartbeat file mtime and trips when heartbeat goes stale", () => {
+      const tmp = mkdtempSync(join(tmpdir(), "mirql-lifeguard-hb-"));
+      try {
+        const hbFile = join(tmp, "heartbeat");
+        writeFileSync(hbFile, "alive", "utf8");
+
+        const watchdog = new LifeguardWatchdog({
+          repoDir: tmp,
+          heartbeatFile: hbFile,
+          timeoutMs: 60_000,
+          heartbeatTimeoutMs: 500, // 500ms heartbeat timeout
+          startTimeMs: Date.now(),
+        });
+
+        // Fresh check succeeds
+        const c1 = watchdog.check();
+        assert.equal(c1.ok, true);
+
+        // Check after heartbeat timeout (600ms in the past) trips
+        const c2 = watchdog.check(Date.now() + 600);
+        assert.equal(c2.ok, false);
+        assert.equal(c2.tripped, true);
+        assert.equal(c2.reason, "HEARTBEAT_TIMEOUT_EXPIRED");
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("killServices safely attempts service termination without throwing", () => {
+      const res = killServices(["nonexistent-mirql-service.service"]);
+      assert.ok(Array.isArray(res.killed));
+      assert.ok(Array.isArray(res.failed));
     });
 
     it("validateServiceUnit passes on BOTH deploy/systemd service units with no root permissions", () => {

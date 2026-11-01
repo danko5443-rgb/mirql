@@ -21,7 +21,7 @@ services:
       - NODE_ENV=production
       - MIRQL_DIR=/app/.mirql
       - LLM_GATEWAY_URL=http://llm-gateway:8080
-      - GATEWAY_ADMIN_TOKEN=${GATEWAY_ADMIN_TOKEN:-mirql-gateway-admin-secret}
+      - GATEWAY_ADMIN_TOKEN=${GATEWAY_ADMIN_TOKEN:?GATEWAY_ADMIN_TOKEN is required (min 32 chars)}
     networks:
       - control-net
       - gateway-net
@@ -45,7 +45,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=8080
-      - GATEWAY_ADMIN_TOKEN=${GATEWAY_ADMIN_TOKEN:-mirql-gateway-admin-secret}
+      - GATEWAY_ADMIN_TOKEN=${GATEWAY_ADMIN_TOKEN:?GATEWAY_ADMIN_TOKEN is required (min 32 chars)}
     networks:
       - gateway-net
       - agent-net
