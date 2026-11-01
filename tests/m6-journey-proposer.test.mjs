@@ -16,6 +16,7 @@ import {
   distillIntent,
   createProposal,
   create1TapProposal,
+  executeReproducer,
   formatIntentDistilledEvent,
   formatProposalCreatedEvent,
   INTENT_CATEGORIES,
@@ -55,9 +56,25 @@ describe("Milestone M6: Journey Harness & 1-Tap Proposer", () => {
       assert.equal(distilled.kind, "bugfix");
       assert.equal(distilled.roadmap_ref, "M1"); // inferred from queue/lease/warrant keywords
       assert.ok(distilled.title.length > 0);
-      assert.ok(distilled.reproducer_verified);
+      // Law 16 honesty: a command string alone is not verification
+      assert.equal(distilled.reproducer_verified, false);
       assert.equal(distilled.red_check, "npm test -- tests/queue.test.mjs");
       assert.ok(distilled.proposed_invariants.length > 0);
+    });
+
+    it("marks reproducer verified only when execution evidence is supplied (Law 16)", () => {
+      const rawText = "Fix crash in queue lease timeout where warrants expire too early";
+      const verified = distillIntent(rawText, {
+        "red-check": "node -e \"process.exit(1)\"",
+        reproducerEvidence: { executed: true, timed_out: false, exit_code: 1, duration_ms: 12 },
+      });
+      assert.equal(verified.reproducer_verified, true);
+
+      const timedOut = distillIntent(rawText, {
+        "red-check": "node -e \"setTimeout(()=>{},5000)\"",
+        reproducerEvidence: { executed: false, timed_out: true, exit_code: null, duration_ms: 1000 },
+      });
+      assert.equal(timedOut.reproducer_verified, false, "timeouts must fail closed");
     });
 
     it("distills feature intent with default reproducer and explicit roadmap citation", () => {
@@ -66,7 +83,7 @@ describe("Milestone M6: Journey Harness & 1-Tap Proposer", () => {
 
       assert.equal(distilled.kind, "feature");
       assert.equal(distilled.roadmap_ref, "M6");
-      assert.ok(distilled.reproducer_verified);
+      assert.equal(distilled.reproducer_verified, false, "defaulted reproducer is recorded but unverified");
       assert.equal(distilled.red_check, "npm test");
       assert.equal(distilled.surface_impact, "none");
     });
@@ -158,6 +175,107 @@ describe("Milestone M6: Journey Harness & 1-Tap Proposer", () => {
       } finally {
         tearDownSandbox();
       }
+    });
+
+    it("executes an explicit reproducer and records Law 16 evidence (any exit code)", () => {
+      setupSandbox();
+      try {
+        const res = createProposal(
+          mirqlDir,
+          {
+            roadmap_ref: "M5",
+            title: "Doctor breaker reset regression",
+            description: "Breaker fails to reset after quiescence window",
+            red_check: "node -e \"process.exit(3)\"",
+          },
+          { executeReproducer: true },
+        );
+
+        assert.equal(res.proposal.reproducer_executed, true);
+        assert.equal(res.proposal.reproducer_exit_code, 3, "non-zero (red) exit is still verified evidence");
+        assert.equal(res.proposal.reproducer_timed_out, false);
+        assert.equal(res.proposal.reproducer_verified, true);
+        assert.ok(
+          Number.isSafeInteger(res.proposal.reproducer_duration_ms) && res.proposal.reproducer_duration_ms >= 0,
+          "duration must be a safe integer (Law 17)",
+        );
+
+        const saved = JSON.parse(
+          readFileSync(join(mirqlDir, "proposals", `${res.proposal_id}.json`), "utf8"),
+        );
+        assert.equal(saved.reproducer_verified, true);
+        assert.equal(saved.reproducer_exit_code, 3);
+      } finally {
+        tearDownSandbox();
+      }
+    });
+
+    it("never executes the silent npm-test default and leaves it unverified", () => {
+      setupSandbox();
+      try {
+        const res = createProposal(
+          mirqlDir,
+          {
+            roadmap_ref: "M6",
+            title: "Journey coverage extension",
+            description: "Extend journey harness with quarantine-to-harden flow",
+          },
+          { executeReproducer: true },
+        );
+
+        assert.equal(res.proposal.red_check, "npm test", "command is still recorded");
+        assert.equal(res.proposal.reproducer_executed, false, "default must not run silently");
+        assert.equal(res.proposal.reproducer_verified, false);
+        assert.equal(res.proposal.reproducer_exit_code, null);
+      } finally {
+        tearDownSandbox();
+      }
+    });
+
+    it("1-tap proposals execute an explicit reproducer by default (pre-validated path)", () => {
+      setupSandbox();
+      try {
+        const res = create1TapProposal(mirqlDir, {
+          roadmap_ref: "M1",
+          title: "Warrant burst stranding fix",
+          description: "Burst submissions strand jobs under load",
+          red_check: "node -e \"process.exit(1)\"",
+        });
+
+        assert.equal(res.proposal.reproducer_executed, true, "1-tap must attach execution evidence");
+        assert.equal(res.proposal.reproducer_exit_code, 1);
+        assert.equal(res.proposal.reproducer_verified, true);
+      } finally {
+        tearDownSandbox();
+      }
+    });
+
+    it("fail closed on reproducer timeout (Law 16)", () => {
+      setupSandbox();
+      try {
+        const res = createProposal(
+          mirqlDir,
+          {
+            roadmap_ref: "M4",
+            title: "Flake sentinel hang regression",
+            description: "Sentinel hangs indefinitely on locked test files",
+            red_check: "node -e \"setTimeout(() => {}, 30000)\"",
+          },
+          { executeReproducer: true, reproducerTimeoutMs: 1500 },
+        );
+
+        assert.equal(res.proposal.reproducer_verified, false, "timeout must fail closed");
+        assert.equal(res.proposal.reproducer_executed, false);
+      } finally {
+        tearDownSandbox();
+      }
+    });
+
+    it("rejects non-integer reproducer timeouts (Law 17)", () => {
+      assert.throws(
+        () => executeReproducer("node -e \"process.exit(0)\"", { reproducerTimeoutMs: 1500.5 }),
+        /safe integer/,
+      );
     });
 
     it("synthesizes proposal from raw text using distillIntent", () => {
