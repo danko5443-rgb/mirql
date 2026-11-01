@@ -26,6 +26,7 @@ import {
   detectFlakes,
   quarantineTest,
   formatMutantEvent,
+  formatKillTestNeededEvent,
   MUTATION_OPERATORS,
 } from "./mutant.mjs";
 import {
@@ -362,15 +363,34 @@ export function runCli(argv = []) {
     }
 
     case "mutant": {
-      const sourcePath = flags.source ?? positional[1];
-      const testPath = flags.test ?? positional[2];
-      if (!sourcePath) {
-        emitError({ error: "USAGE_ERROR", reason: "missing required --source <path>" });
+      try {
+        const sourcePath = flags.source ?? positional[1];
+        const testPath = flags.test ?? positional[2];
+        if (!sourcePath) {
+          emitError({ error: "USAGE_ERROR", reason: "missing required --source <path>" });
+          return EXIT_CODES.USAGE_ERROR;
+        }
+        if (!testPath) {
+          emitError({ error: "USAGE_ERROR", reason: "missing required --test <path>" });
+          return EXIT_CODES.USAGE_ERROR;
+        }
+        const killThresholdBp = flags.threshold ? parseInt(flags.threshold, 10) : 8000;
+        const maxMutants = flags["max-mutants"] ? parseInt(flags["max-mutants"], 10) : 20;
+        const res = runMutationTesting({
+          sourcePath,
+          testPath,
+          killThresholdBp,
+          maxMutants,
+        });
+        emitLine(jcs(res));
+        return res.ok ? EXIT_CODES.OK : EXIT_CODES.REJECT;
+      } catch (err) {
+        emitError({
+          error: "USAGE_ERROR",
+          reason: err instanceof Error ? err.message : String(err),
+        });
         return EXIT_CODES.USAGE_ERROR;
       }
-      const res = runMutationTesting({ sourcePath, testPath });
-      emitLine(jcs(res));
-      return res.ok ? EXIT_CODES.OK : EXIT_CODES.REJECT;
     }
 
     default: {
@@ -442,6 +462,7 @@ export {
   detectFlakes,
   quarantineTest,
   formatMutantEvent,
+  formatKillTestNeededEvent,
   MUTATION_OPERATORS,
   verifyAttempt,
   runSupervisor,

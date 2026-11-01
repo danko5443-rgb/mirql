@@ -11,8 +11,11 @@ import {
   detectFlakes,
   quarantineTest,
   formatMutantEvent,
+  formatKillTestNeededEvent,
   MUTATION_OPERATORS,
+  runCli,
 } from "../packages/run/index.mjs";
+import { EXIT_CODES } from "../packages/core/index.mjs";
 
 describe("Milestone M4: AST Mutation Engine & Flake Detector", () => {
   let tempDir;
@@ -59,6 +62,35 @@ export function calc(a, b) {
       assert.equal(boolMutant.operator, "mutate-boundary");
     });
 
+    it("generates remove-call mutants for standalone function statements", () => {
+      const code = `
+export function processItem(item) {
+  notifyWatcher(item);
+  return item.value;
+}
+`;
+      const mutants = generateMutants(code);
+      const removeMutant = mutants.find((m) => m.operator === "remove-call");
+      assert.ok(removeMutant, "Must generate remove-call mutant");
+      assert.ok(removeMutant.mutated.includes("/* notifyWatcher(item); */"));
+      assert.equal(removeMutant.line, 3);
+    });
+
+    it("restricts mutant generation to changedLines in incremental mode", () => {
+      const code = `
+export function compute(a, b) {
+  const x = a + b;
+  const y = a === b;
+  return x * y;
+}
+`;
+      // Only mutate line 4 (a === b)
+      const mutants = generateMutants(code, { changedLines: [4] });
+      assert.equal(mutants.length, 1);
+      assert.equal(mutants[0].line, 4);
+      assert.equal(mutants[0].operator, "invert-conditional");
+    });
+
     it("skips comments and empty lines", () => {
       const code = `
 // if (a === b) return a + b;
@@ -79,9 +111,9 @@ export function calc(a, b) {
         "utf8",
       );
 
-      // Custom mock test runner that fails whenever code is mutated
+      // Custom mock test runner: baseline passes (true), mutants fail test (false) -> killed
       const mockRunner = (mutant) => {
-        // Return false -> test fails -> mutant killed
+        if (mutant.isBaseline) return true;
         return false;
       };
 
@@ -102,6 +134,28 @@ export function calc(a, b) {
       assert.ok(contentAfter.includes("a + b"));
     });
 
+    it("aborts and returns BASELINE_TEST_FAILED when baseline tests fail on unmutated code", () => {
+      const srcFile = join(tempDir, "broken.mjs");
+      writeFileSync(srcFile, `export function broken() { return false; }\n`, "utf8");
+
+      // Baseline fails
+      const mockRunner = (mutant) => {
+        if (mutant.isBaseline) return false;
+        return true;
+      };
+
+      const res = runMutationTesting({
+        sourcePath: srcFile,
+        testPath: "dummy.test.mjs",
+        testRunner: mockRunner,
+      });
+
+      assert.equal(res.ok, false);
+      assert.equal(res.error, "BASELINE_TEST_FAILED");
+      assert.equal(res.kill_rate_bp, 0);
+      assert.equal(res.mutants_total, 0);
+    });
+
     it("detects surviving mutants and rejects when kill rate is below 8000 bp threshold", () => {
       const srcFile = join(tempDir, "guard.mjs");
       writeFileSync(
@@ -110,8 +164,9 @@ export function calc(a, b) {
         "utf8",
       );
 
-      // Mock test runner that passes for mutants on line 3 (surviving mutant)
+      // Mock test runner that passes baseline, and passes line 3 (surviving mutant)
       const mockRunner = (mutant) => {
+        if (mutant.isBaseline) return true;
         if (mutant.line === 3) return true; // survived
         return false; // killed
       };
@@ -163,7 +218,7 @@ export function calc(a, b) {
   });
 
   describe("4. Flake Quarantine Isolation (quarantineTest)", () => {
-    it("isolates flaky test from critical path into quarantine directory", () => {
+    it("isolates flaky test from critical path and records event to ledger", () => {
       const testsDir = join(tempDir, "tests");
       const quarantineDir = join(tempDir, "quarantine");
       mkdirSync(testsDir, { recursive: true });
@@ -171,29 +226,34 @@ export function calc(a, b) {
       const testFile = join(testsDir, "flaky.test.mjs");
       writeFileSync(testFile, `// flaky test\n`, "utf8");
 
-      const res = quarantineTest(testFile, quarantineDir);
+      const ledgerEntries = [];
+      const appendLedger = (evt) => ledgerEntries.push(evt);
+
+      const res = quarantineTest(testFile, quarantineDir, { appendLedger });
 
       assert.equal(res.quarantined, true);
       assert.equal(existsSync(testFile), false, "Must remove test from critical path");
       assert.equal(existsSync(res.quarantined_path), true, "Must move test into quarantine");
       assert.equal(res.event.type, "test.quarantined");
       assert.equal(res.event.payload.test_file, "flaky.test.mjs");
+      assert.equal(ledgerEntries.length, 1);
+      assert.equal(ledgerEntries[0].type, "test.quarantined");
     });
   });
 
-  describe("5. Canonical Mutant Event Formatting (formatMutantEvent)", () => {
-    it("formats mutant.survived and mutant.evaluated events conforming to roles/scout-mutants.md", () => {
+  describe("5. Canonical Mutant Event Formatting (formatMutantEvent & formatKillTestNeededEvent)", () => {
+    it("formats mutant.evaluated and mutant.survived events conforming to roles/scout-mutants.md", () => {
       const killedResult = {
         ok: true,
         kill_rate_bp: 9000,
         mutants_total: 10,
         mutants_killed: 9,
         mutants_survived: 1,
-        survived_mutants: [{ id: "m-1", line: 12, operator: "invert-conditional", description: "=== to !==" }],
+        survived_mutants: [{ id: "m-1", file: "src.mjs", line: 12, operator: "invert-conditional", original: "===", mutated: "!==", description: "=== to !==" }],
         summary: "Mutation testing: 9/10 killed",
       };
 
-      const evtPass = formatMutantEvent(killedResult, { nowMs: 1700000000000 });
+      const evtPass = formatMutantEvent(killedResult, { file: "src.mjs", nowMs: 1700000000000 });
       assert.equal(evtPass.type, "mutant.evaluated");
       assert.equal(evtPass.payload.kill_rate_bp, 9000);
       assert.equal(evtPass.payload.mutants_killed, 9);
@@ -203,10 +263,28 @@ export function calc(a, b) {
         ok: false,
         kill_rate_bp: 5000,
       };
-      const evtFail = formatMutantEvent(failedResult, { nowMs: 1700000000000 });
+      const evtFail = formatMutantEvent(failedResult, { file: "src.mjs", nowMs: 1700000000000 });
       assert.equal(evtFail.type, "mutant.survived");
-      assert.equal(evtFail.payload.kill_rate_bp, 5000);
-      assert.equal(evtFail.payload.first_survived.id, "m-1");
+      assert.equal(evtFail.payload.file, "src.mjs");
+      assert.equal(evtFail.payload.line, 12);
+      assert.equal(evtFail.payload.status, "survived");
+      assert.equal(evtFail.payload.mutation_applied, "=== -> !==");
+
+      const killNeededEvt = formatKillTestNeededEvent(failedResult.survived_mutants[0], { nowMs: 1700000000000 });
+      assert.equal(killNeededEvt.type, "mutant.kill_test_needed");
+      assert.equal(killNeededEvt.payload.file, "src.mjs");
+      assert.equal(killNeededEvt.payload.line, 12);
+      assert.ok(killNeededEvt.payload.recommendation.includes("invert-conditional"));
+    });
+  });
+
+  describe("6. CLI Dispatch for mirql r mutant", () => {
+    it("returns USAGE_ERROR (exit code 2) when --source or --test is missing", () => {
+      const code1 = runCli(["mutant"]);
+      assert.equal(code1, EXIT_CODES.USAGE_ERROR);
+
+      const code2 = runCli(["mutant", "--source", "nonexistent.mjs"]);
+      assert.equal(code2, EXIT_CODES.USAGE_ERROR);
     });
   });
 });

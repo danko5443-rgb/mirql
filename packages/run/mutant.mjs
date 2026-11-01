@@ -1,8 +1,7 @@
 // packages/run/mutant.mjs — Milestone M4: Incremental AST Mutation Engine & Flake Detector.
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync, readdirSync } from "node:fs";
-import { join, resolve, basename, dirname } from "node:path";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
+import { join, resolve, basename } from "node:path";
 import { spawnSync } from "node:child_process";
-import { ulid } from "../core/index.mjs";
 
 /**
  * Standard AST mutation operators supported by Scout (Mutants) per roles/scout-mutants.md:
@@ -20,10 +19,12 @@ export const MUTATION_OPERATORS = Object.freeze([
 
 /**
  * Generates semantic mutation candidates for a given source string.
+ * Supports incremental mutation restricted to `changedLines`.
  *
  * @param {string} sourceCode
  * @param {object} [options]
  * @param {string[]} [options.operators]
+ * @param {number[] | Set<number>} [options.changedLines] - 1-based line numbers to mutate (incremental mode)
  * @returns {Array<{
  *   id: string,
  *   operator: string,
@@ -38,9 +39,18 @@ export function generateMutants(sourceCode, options = {}) {
   const allowedOps = options.operators ?? MUTATION_OPERATORS;
   const mutants = [];
   const lines = sourceCode.split(/\r?\n/);
+  const changedSet = options.changedLines
+    ? (options.changedLines instanceof Set ? options.changedLines : new Set(options.changedLines))
+    : null;
 
   for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
     const lineNum = lineIdx + 1;
+
+    // Incremental filter: skip lines not in changedLines if provided
+    if (changedSet && !changedSet.has(lineNum)) {
+      continue;
+    }
+
     const line = lines[lineIdx];
     const trimmed = line.trim();
 
@@ -85,6 +95,29 @@ export function generateMutants(sourceCode, options = {}) {
         mutants.push(createMutant(lines, lineIdx, lineNum, "mutate-boundary", "false", "true", "Mutate boolean false to true"));
       }
     }
+
+    // 4. remove-call
+    if (allowedOps.includes("remove-call")) {
+      const trimmedClean = trimmed.split("//")[0].trim();
+      const isReserved = /^(?:return|throw|import|export|const|let|var|if|while|for|yield|await)\b/.test(trimmedClean);
+      if (
+        trimmedClean.endsWith(";") &&
+        !isReserved &&
+        /\b[a-zA-Z_$][a-zA-Z0-9_$.]*\s*\(.*\)\s*;?$/.test(trimmedClean)
+      ) {
+        mutants.push(
+          createMutant(
+            lines,
+            lineIdx,
+            lineNum,
+            "remove-call",
+            line,
+            line.replace(trimmedClean, `/* ${trimmedClean} */`),
+            "Remove call statement",
+          ),
+        );
+      }
+    }
   }
 
   return mutants;
@@ -93,7 +126,11 @@ export function generateMutants(sourceCode, options = {}) {
 /** Helper to construct mutant record */
 function createMutant(lines, lineIdx, lineNum, operator, original, replacement, description) {
   const mutatedLines = [...lines];
-  mutatedLines[lineIdx] = mutatedLines[lineIdx].replace(original, replacement);
+  if (original === lines[lineIdx]) {
+    mutatedLines[lineIdx] = replacement;
+  } else {
+    mutatedLines[lineIdx] = mutatedLines[lineIdx].replace(original, replacement);
+  }
   return {
     id: `mutant-${operator}-${lineNum}-${Math.abs(hashString(original + lineIdx))}`,
     operator,
@@ -116,22 +153,25 @@ function hashString(str) {
 
 /**
  * Runs mutation testing against a source file and a test suite.
- * Enforces the Milestone M4 invariant: >= 8000 bp (80%) mutant kill rate.
+ * Enforces pre-flight baseline test verification and the M4 invariant: >= 8000 bp (80%) kill rate.
  *
  * @param {object} options
  * @param {string} options.sourcePath - Path to source file being evaluated
- * @param {string} options.testPath - Path to test file covering the source
+ * @param {string} [options.testPath] - Path to test file covering the source
  * @param {number} [options.maxMutants=20] - Maximum mutants to evaluate
  * @param {number} [options.killThresholdBp=8000] - Required kill rate (default 8000 bp = 80%)
  * @param {Function} [options.testRunner] - Custom test runner for sandboxing
+ * @param {number[] | Set<number>} [options.changedLines] - Line filter for incremental mutation
  * @returns {{
  *   ok: boolean,
+ *   source_path?: string,
+ *   error?: string,
  *   kill_rate_bp: number,
  *   kill_threshold_bp: number,
  *   mutants_total: number,
  *   mutants_killed: number,
  *   mutants_survived: number,
- *   survived_mutants: Array<{ id: string, line: number, operator: string, description: string }>,
+ *   survived_mutants: Array<{ id: string, file: string, line: number, operator: string, original: string, mutated: string, description: string }>,
  *   summary: string
  * }}
  */
@@ -148,13 +188,47 @@ export function runMutationTesting(options = {}) {
     throw new Error(`sourcePath not found: ${sourcePath}`);
   }
 
+  if (!testRunner && (!testPath || !existsSync(testPath))) {
+    throw new Error(`testPath not found or missing: ${testPath}`);
+  }
+
   const originalContent = readFileSync(sourcePath, "utf8");
+
+  // Pre-flight baseline verification: tests must pass on unmutated code
+  let baselinePassed = false;
+  if (typeof testRunner === "function") {
+    baselinePassed = Boolean(testRunner({ id: "baseline", original: "", mutated: "", isBaseline: true }));
+  } else {
+    const baselineResult = spawnSync(process.execPath, ["--test", testPath], {
+      encoding: "utf8",
+      timeout: 15000,
+      env: { ...process.env, NODE_ENV: "test" },
+    });
+    baselinePassed = baselineResult.status === 0;
+  }
+
+  if (!baselinePassed) {
+    return {
+      ok: false,
+      error: "BASELINE_TEST_FAILED",
+      source_path: sourcePath,
+      kill_rate_bp: 0,
+      kill_threshold_bp: killThresholdBp,
+      mutants_total: 0,
+      mutants_killed: 0,
+      mutants_survived: 0,
+      survived_mutants: [],
+      summary: "Baseline test failed on unmutated source; mutation testing aborted",
+    };
+  }
+
   const allMutants = generateMutants(originalContent, options);
   const mutantsToTest = allMutants.slice(0, maxMutants);
 
   if (mutantsToTest.length === 0) {
     return {
       ok: true,
+      source_path: sourcePath,
       kill_rate_bp: 10000,
       kill_threshold_bp: killThresholdBp,
       mutants_total: 0,
@@ -168,6 +242,10 @@ export function runMutationTesting(options = {}) {
   let killedCount = 0;
   const survivedMutants = [];
 
+  // Write safe backup file for crash recovery
+  const backupPath = `${sourcePath}.mutant-bak`;
+  writeFileSync(backupPath, originalContent, "utf8");
+
   try {
     for (const mutant of mutantsToTest) {
       // Apply mutant
@@ -175,33 +253,40 @@ export function runMutationTesting(options = {}) {
 
       let testPassed = false;
       if (typeof testRunner === "function") {
-        testPassed = testRunner(mutant);
+        testPassed = Boolean(testRunner(mutant));
       } else {
-        // Run test via node --test
         const result = spawnSync(process.execPath, ["--test", testPath], {
           encoding: "utf8",
-          timeout: 10000,
+          timeout: 15000,
           env: { ...process.env, NODE_ENV: "test" },
         });
         testPassed = result.status === 0;
       }
 
       if (testPassed) {
-        // Test passed despite synthetic fault: MUTANT SURVIVED (test suite was too weak)
+        // Test passed despite synthetic fault: MUTANT SURVIVED
         survivedMutants.push({
           id: mutant.id,
+          file: sourcePath,
           line: mutant.line,
           operator: mutant.operator,
+          original: mutant.original,
+          mutated: mutant.mutated,
           description: mutant.description,
         });
       } else {
-        // Test failed: MUTANT KILLED (test caught the fault)
+        // Test failed: MUTANT KILLED
         killedCount++;
       }
     }
   } finally {
-    // ALWAYS restore original source file
+    // ALWAYS restore original source file and clean backup
     writeFileSync(sourcePath, originalContent, "utf8");
+    if (existsSync(backupPath)) {
+      try {
+        unlinkSync(backupPath);
+      } catch {}
+    }
   }
 
   const total = mutantsToTest.length;
@@ -211,6 +296,7 @@ export function runMutationTesting(options = {}) {
 
   return {
     ok: passed,
+    source_path: sourcePath,
     kill_rate_bp: killRateBp,
     kill_threshold_bp: killThresholdBp,
     mutants_total: total,
@@ -279,6 +365,10 @@ export function detectFlakes(testPath, options = {}) {
  *
  * @param {string} testFilePath
  * @param {string} quarantineDir
+ * @param {object} [options]
+ * @param {number} [options.nowMs]
+ * @param {string} [options.reason]
+ * @param {Function} [options.appendLedger]
  * @returns {{
  *   quarantined: boolean,
  *   original_path: string,
@@ -286,7 +376,7 @@ export function detectFlakes(testPath, options = {}) {
  *   event: object
  * }}
  */
-export function quarantineTest(testFilePath, quarantineDir) {
+export function quarantineTest(testFilePath, quarantineDir, options = {}) {
   const fullTestPath = resolve(testFilePath);
   if (!existsSync(fullTestPath)) {
     throw new Error(`Test file not found: ${fullTestPath}`);
@@ -302,7 +392,7 @@ export function quarantineTest(testFilePath, quarantineDir) {
 
   renameSync(fullTestPath, quarantinedPath);
 
-  const nowMs = Date.now();
+  const nowMs = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
   const event = {
     type: "test.quarantined",
     payload: {
@@ -310,9 +400,13 @@ export function quarantineTest(testFilePath, quarantineDir) {
       original_path: fullTestPath,
       quarantined_path: quarantinedPath,
       timestamp_ms: nowMs,
-      quarantine_reason: "nondeterministic_flakiness_detected",
+      quarantine_reason: options.reason ?? "nondeterministic_flakiness_detected",
     },
   };
+
+  if (typeof options.appendLedger === "function") {
+    options.appendLedger(event);
+  }
 
   return {
     quarantined: true,
@@ -331,17 +425,57 @@ export function quarantineTest(testFilePath, quarantineDir) {
  */
 export function formatMutantEvent(mutantResult, options = {}) {
   const nowMs = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
-  const firstSurvived = mutantResult.survived_mutants?.[0];
+  const file = options.file ?? mutantResult.source_path ?? "unknown";
+
+  if (!mutantResult.ok && mutantResult.survived_mutants?.length > 0) {
+    const firstSurvived = mutantResult.survived_mutants[0];
+    return {
+      type: "mutant.survived",
+      payload: {
+        file,
+        line: firstSurvived.line,
+        mutation_applied: `${firstSurvived.original} -> ${firstSurvived.mutated}`,
+        status: "survived",
+        kill_rate_bp: mutantResult.kill_rate_bp ?? 0,
+        mutants_total: mutantResult.mutants_total ?? 0,
+        mutants_killed: mutantResult.mutants_killed ?? 0,
+        mutants_survived: mutantResult.mutants_survived ?? 0,
+        timestamp_ms: nowMs,
+      },
+    };
+  }
 
   return {
-    type: mutantResult.ok ? "mutant.evaluated" : "mutant.survived",
+    type: "mutant.evaluated",
     payload: {
+      file,
       kill_rate_bp: mutantResult.kill_rate_bp ?? 0,
       mutants_total: mutantResult.mutants_total ?? 0,
       mutants_killed: mutantResult.mutants_killed ?? 0,
       mutants_survived: mutantResult.mutants_survived ?? 0,
-      first_survived: firstSurvived ?? null,
       summary: mutantResult.summary ?? "",
+      timestamp_ms: nowMs,
+    },
+  };
+}
+
+/**
+ * Formats a canonical mutant.kill_test_needed event per roles/scout-mutants.md.
+ *
+ * @param {object} survivedMutant
+ * @param {object} [options]
+ * @returns {object}
+ */
+export function formatKillTestNeededEvent(survivedMutant, options = {}) {
+  const nowMs = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
+  const file = options.file ?? survivedMutant.file ?? "unknown";
+  return {
+    type: "mutant.kill_test_needed",
+    payload: {
+      file,
+      line: survivedMutant.line,
+      survived_mutant_id: survivedMutant.id,
+      recommendation: `Add unit test assertion covering ${survivedMutant.operator} mutation at line ${survivedMutant.line} (${survivedMutant.description})`,
       timestamp_ms: nowMs,
     },
   };
