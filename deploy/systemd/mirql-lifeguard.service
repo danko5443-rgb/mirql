@@ -9,8 +9,8 @@ Type=simple
 User=mirql
 Group=mirql
 WorkingDirectory=/opt/mirql
-ExecStart=/usr/bin/node /opt/mirql/packages/daemons/lifeguard.mjs --watch --timeout 1800 --base-file /opt/mirql/.mirql/state/base_sha --heartbeat-file /opt/mirql/.mirql/state/heartbeat --kill-pid-file /opt/mirql/.mirql/state/launcher.pid --disarm-file /opt/mirql/.mirql/state/disarm
-Restart=always
+ExecStart=/usr/bin/node /opt/mirql/packages/daemons/lifeguard.mjs --watch --timeout 1800 --base-file /opt/mirql/.mirql/state/base_sha --heartbeat-file /opt/mirql/.mirql/state/heartbeat --kill-pid-file /opt/mirql/.mirql/state/launcher.pid --disarm-file /etc/mirql/disarm
+Restart=on-failure
 RestartSec=10s
 TimeoutStopSec=15s
 

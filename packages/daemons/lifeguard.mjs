@@ -2,7 +2,7 @@
 // Enforces Law 2 (unblockable kill authority) and Law 14 (quiescence / fail-safe convergence).
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 /** Default probation window: 30 minutes in milliseconds (1,800,000 ms). */
@@ -169,6 +169,18 @@ export class LifeguardWatchdog {
     this.disarmed = false;
     this.rolledBack = false;
     this.intervalId = null;
+    this.onDisarmExit = false;
+
+    // Clear stale disarm file if it specifies a mismatched target SHA
+    if (this.disarmFile && existsSync(this.disarmFile)) {
+      try {
+        const text = readFileSync(this.disarmFile, "utf8").trim();
+        const targetSha = this.resolveTargetSha();
+        if (text && targetSha && text !== targetSha) {
+          unlinkSync(this.disarmFile);
+        }
+      } catch {}
+    }
   }
 
   heartbeat(nowMs = Date.now()) {
@@ -203,8 +215,15 @@ export class LifeguardWatchdog {
     }
 
     if (this.disarmFile && existsSync(this.disarmFile)) {
-      this.disarm();
-      return { ok: true, disarmed: true, tripped: false, reason: "DISARM_FILE_PRESENT" };
+      try {
+        const text = readFileSync(this.disarmFile, "utf8").trim();
+        const targetSha = this.resolveTargetSha();
+        // Disarm if file is empty (global signal) or matches targetBaseSha
+        if (!text || !targetSha || text === targetSha) {
+          this.disarm();
+          return { ok: true, disarmed: true, tripped: false, reason: "DISARMED_FOR_TARGET_SHA", targetSha };
+        }
+      } catch {}
     }
 
     // Check heartbeat file mtime if configured
@@ -223,8 +242,14 @@ export class LifeguardWatchdog {
       timeoutMs: this.timeoutMs,
     });
 
+    // Heartbeat check: only applies when a monitored launcher process is running
+    const isLauncherRunning =
+      this.killPidFiles.length > 0
+        ? this.killPidFiles.some((f) => existsSync(f))
+        : true;
+
     const heartbeatElapsed = Math.max(0, nowMs - this.lastHeartbeatMs);
-    const heartbeatTripped = heartbeatElapsed > this.heartbeatTimeoutMs;
+    const heartbeatTripped = isLauncherRunning && heartbeatElapsed > this.heartbeatTimeoutMs;
 
     if ((status.tripped || heartbeatTripped) && !this.rolledBack) {
       // Collect PIDs from killPidFiles
@@ -281,6 +306,9 @@ export class LifeguardWatchdog {
       if (res.disarmed) {
         process.stdout.write("[mirql-lifeguard] Watchdog disarmed, exiting.\n");
         this.stop();
+        if (this.onDisarmExit) {
+          process.exit(0);
+        }
         return;
       }
       if (!res.ok && res.tripped) {
@@ -357,6 +385,7 @@ if (process.argv[1] && process.argv[1].endsWith("lifeguard.mjs")) {
   });
 
   if (watchMode) {
+    watchdog.onDisarmExit = true;
     process.stdout.write(JSON.stringify({ status: "watching", timeout_ms: timeoutSec * 1000, heartbeat_file: heartbeatFile }) + "\n");
     // In watch mode, keep the event loop alive (unrefTimer = false)
     watchdog.start(2000, false);

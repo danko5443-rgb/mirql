@@ -26,7 +26,7 @@ import {
   renderLauncherUnit,
   MANDATORY_SANDBOX_DIRECTIVES,
 } from "../packages/daemons/index.mjs";
-import { touchHeartbeat, runSupervisor } from "../packages/run/index.mjs";
+import { touchHeartbeat, runSupervisor, startHeartbeatTicker } from "../packages/run/index.mjs";
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
 
@@ -438,45 +438,79 @@ describe("Production Containerization & Topology Gates", () => {
         const mirqlDir = join(tmp, ".mirql");
         const hbFile = join(mirqlDir, "state", "heartbeat");
         const pidFile = join(mirqlDir, "state", "launcher.pid");
-        const disarmFile = join(mirqlDir, "state", "disarm");
+        const disarmFile = join(tmp, "disarm"); // outside mirqlDir (operator controlled)
 
         // Touch heartbeat directly
         touchHeartbeat(mirqlDir);
         assert.ok(existsSync(hbFile), "Heartbeat file must be created by touchHeartbeat");
 
-        // Run supervisor writes both heartbeat and launcher.pid
+        // Run supervisor writes heartbeat and launcher.pid, then cleans up pid on exit
         runSupervisor({
           mirqlDir,
           workspaceDir: tmp,
           warrantId: "01HGWTEST00000000000000000",
           verifyOptions: { workspaceDir: tmp },
           agentOptions: { command: "echo ok" },
+          noHeartbeatTicker: true,
         });
 
         assert.ok(existsSync(hbFile), "Heartbeat file must exist after supervisor run");
-        assert.ok(existsSync(pidFile), "Launcher PID file must exist after supervisor run");
-        const recordedPid = parseInt(readFileSync(pidFile, "utf8").trim(), 10);
-        assert.equal(recordedPid, process.pid);
 
-        // Lifeguard monitoring launcher.pid and disarmFile
-        const watchdog = new LifeguardWatchdog({
+        // When launcher PID file does NOT exist (idle between runs), heartbeat timeout does NOT falsely trip
+        const idleWatchdog = new LifeguardWatchdog({
           repoDir: tmp,
           heartbeatFile: hbFile,
           killPidFiles: [pidFile],
           disarmFile,
           timeoutMs: 60_000,
-          heartbeatTimeoutMs: 60_000,
+          heartbeatTimeoutMs: 100,
+          startTimeMs: Date.now() - 500,
         });
+        assert.equal(idleWatchdog.check().ok, true, "Idle factory must not trip heartbeat timeout");
 
-        // Initially ok
-        assert.equal(watchdog.check().ok, true);
+        // When launcher PID file exists (active run) and heartbeat is stale, watchdog trips
+        // (Use dummy PID 999999 so watchdog does not SIGKILL the test runner process itself!)
+        writeFileSync(pidFile, "999999\n", "utf8");
+        const activeStaleWatchdog = new LifeguardWatchdog({
+          repoDir: tmp,
+          heartbeatFile: hbFile,
+          killPidFiles: [pidFile],
+          disarmFile,
+          targetBaseSha: "test-target-sha",
+          timeoutMs: 60_000,
+          heartbeatTimeoutMs: 100,
+          startTimeMs: Date.now() - 500,
+        });
+        const staleRes = activeStaleWatchdog.check(Date.now() + 200);
+        assert.equal(staleRes.ok, false);
+        assert.equal(staleRes.tripped, true);
+        assert.equal(staleRes.reason, "HEARTBEAT_TIMEOUT_EXPIRED");
 
-        // Creating disarm file disarms watchdog
-        writeFileSync(disarmFile, "disarm", "utf8");
-        const disarmCheck = watchdog.check();
+        // Creating matching disarm file disarms watchdog
+        writeFileSync(disarmFile, "test-target-sha", "utf8");
+        const disarmCheck = activeStaleWatchdog.check();
         assert.equal(disarmCheck.ok, true);
         assert.equal(disarmCheck.disarmed, true);
-        assert.equal(watchdog.disarmed, true);
+        assert.equal(activeStaleWatchdog.disarmed, true);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("startHeartbeatTicker keeps refreshing heartbeat file continuously", async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "mirql-ticker-hb-"));
+      try {
+        const hbFile = join(tmp, "heartbeat");
+        writeFileSync(hbFile, "0", "utf8");
+        const ticker = startHeartbeatTicker(hbFile, 50);
+        assert.ok(ticker);
+        try {
+          await new Promise((done) => setTimeout(done, 200));
+          const content = readFileSync(hbFile, "utf8").trim();
+          assert.ok(parseInt(content, 10) > 0, "Heartbeat file must be refreshed by ticker");
+        } finally {
+          ticker.kill();
+        }
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }

@@ -1,5 +1,6 @@
+import { spawn } from "node:child_process";
 import { join, resolve } from "node:path";
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
 import {
   ulid,
   sha256,
@@ -28,14 +29,37 @@ export function runSupervisor(options = {}) {
   const workspaceDir = options.workspaceDir ?? process.cwd();
 
   // Touch heartbeat and write launcher PID for watchdog monitoring
+  const stateDir = join(mirqlDir, "state");
+  const heartbeatPath = join(stateDir, "heartbeat");
+  const pidPath = join(stateDir, "launcher.pid");
+
   try {
-    const stateDir = join(mirqlDir, "state");
     mkdirSync(stateDir, { recursive: true });
-    writeFileSync(join(stateDir, "heartbeat"), `${Date.now()}\n`, "utf8");
+    writeFileSync(heartbeatPath, `${Date.now()}\n`, "utf8");
     if (!options.skipPidFile) {
-      writeFileSync(join(stateDir, "launcher.pid"), `${process.pid}\n`, "utf8");
+      writeFileSync(pidPath, `${process.pid}\n`, "utf8");
     }
-  } catch {}
+  } catch (err) {
+    if (process.env.MIRQL_DEBUG) {
+      process.stderr.write(`[mirql-supervisor] State write error: ${err.message}\n`);
+    }
+  }
+
+  // Start continuous heartbeat ticker process while supervisor executes
+  const heartbeatTicker = options.noHeartbeatTicker ? null : startHeartbeatTicker(heartbeatPath, 2000);
+
+  const cleanupState = () => {
+    if (heartbeatTicker) {
+      try { heartbeatTicker.kill(); } catch {}
+    }
+    if (!options.skipPidFile) {
+      try {
+        if (existsSync(pidPath)) unlinkSync(pidPath);
+      } catch {}
+    }
+  };
+
+  try {
 
   // 1. Resolve and validate Warrant (Law 11)
   let warrant = null;
@@ -120,12 +144,14 @@ export function runSupervisor(options = {}) {
   );
 
   if (verifyResult && typeof verifyResult.then === "function") {
-    return verifyResult.then((vRes) =>
-      finalizeSupervisor(options, mirqlDir, workspaceDir, keypair, warrant, agentResult, vRes, agentDuration),
-    );
+    return verifyResult
+      .then((vRes) =>
+        finalizeSupervisor(options, mirqlDir, workspaceDir, keypair, warrant, agentResult, vRes, agentDuration),
+      )
+      .finally(cleanupState);
   }
 
-  return finalizeSupervisor(
+  const res = finalizeSupervisor(
     options,
     mirqlDir,
     workspaceDir,
@@ -135,6 +161,12 @@ export function runSupervisor(options = {}) {
     verifyResult,
     agentDuration,
   );
+  cleanupState();
+  return res;
+} catch (err) {
+  cleanupState();
+  throw err;
+}
 }
 
 function finalizeSupervisor(
@@ -307,4 +339,32 @@ export function touchHeartbeat(mirqlDir) {
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, "heartbeat"), `${Date.now()}\n`, "utf8");
   } catch {}
+}
+
+/**
+ * Starts a background heartbeat ticker process that refreshes the heartbeat file.
+ *
+ * @param {string} heartbeatPath
+ * @param {number} [intervalMs=2000]
+ * @returns {import("node:child_process").ChildProcess | null}
+ */
+export function startHeartbeatTicker(heartbeatPath, intervalMs = 2000) {
+  try {
+    const cp = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const fs = require('fs');
+         const f = process.argv[1];
+         setInterval(() => {
+           try { fs.writeFileSync(f, Date.now() + '\\n', 'utf8'); } catch {}
+         }, ${intervalMs});`,
+        heartbeatPath,
+      ],
+      { stdio: "ignore", detached: false },
+    );
+    return cp;
+  } catch {
+    return null;
+  }
 }

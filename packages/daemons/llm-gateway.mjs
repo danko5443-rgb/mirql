@@ -480,7 +480,13 @@ export function createLlmGateway(options = {}) {
         port: actualPort,
         manager,
         adminToken,
-        close: () => new Promise((done) => server.close(done)),
+        close: () =>
+          new Promise((done) => {
+            if (typeof server.closeAllConnections === "function") {
+              server.closeAllConnections();
+            }
+            server.close(() => done());
+          }),
       });
     });
     server.on("error", reject);
