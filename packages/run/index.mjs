@@ -21,6 +21,14 @@ import {
   formatDriftEvent,
 } from "./drift.mjs";
 import {
+  generateMutants,
+  runMutationTesting,
+  detectFlakes,
+  quarantineTest,
+  formatMutantEvent,
+  MUTATION_OPERATORS,
+} from "./mutant.mjs";
+import {
   checkAntiCheat,
   checkHumanOnlyPaths,
   checkHumanApprovePaths,
@@ -58,6 +66,7 @@ export const SUBCOMMANDS = Object.freeze([
   "bb",
   "phi",
   "drift",
+  "mutant",
   "help",
 ]);
 
@@ -352,6 +361,18 @@ export function runCli(argv = []) {
       return res.ok ? EXIT_CODES.OK : EXIT_CODES.REJECT;
     }
 
+    case "mutant": {
+      const sourcePath = flags.source ?? positional[1];
+      const testPath = flags.test ?? positional[2];
+      if (!sourcePath) {
+        emitError({ error: "USAGE_ERROR", reason: "missing required --source <path>" });
+        return EXIT_CODES.USAGE_ERROR;
+      }
+      const res = runMutationTesting({ sourcePath, testPath });
+      emitLine(jcs(res));
+      return res.ok ? EXIT_CODES.OK : EXIT_CODES.REJECT;
+    }
+
     default: {
       emitError({
         error: "USAGE_ERROR",
@@ -416,6 +437,12 @@ export {
   detectDrift,
   verifyClaimCheck,
   formatDriftEvent,
+  generateMutants,
+  runMutationTesting,
+  detectFlakes,
+  quarantineTest,
+  formatMutantEvent,
+  MUTATION_OPERATORS,
   verifyAttempt,
   runSupervisor,
   runSupervisorReactive,

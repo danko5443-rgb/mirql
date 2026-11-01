@@ -26,6 +26,7 @@ import {
   readFileSync,
   rmSync,
   writeFileSync,
+  statSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -397,7 +398,7 @@ describe("mergeproof: notary signing & ledger append", () => {
       const persisted = JSON.parse(readFileSync(kp.sourceFile, "utf8"));
       assert.equal(persisted.keyId, kp.keyId);
       if (process.platform !== "win32") {
-        const mode = (readFileSync(kp.sourceFile).mode & 0o777);
+        const mode = (statSync(kp.sourceFile).mode & 0o777);
         assert.equal(mode, 0o600, "notary private key file must be 0o600");
       }
       const keyring = JSON.parse(readFileSync(join(tmp, "ledger", "keyring.json"), "utf8"));

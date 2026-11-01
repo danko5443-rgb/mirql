@@ -1352,7 +1352,9 @@ test("add correctly computes sum", () => {
         // Safe allowlisted variables survive (case varies by platform).
         const pathValue = childEnv.PATH ?? childEnv.Path;
         assert.ok(typeof pathValue === "string" && pathValue.length > 0, "PATH must survive sanitization");
-        assert.ok(childEnv.SystemRoot ?? childEnv.SYSTEMROOT, "SystemRoot must survive sanitization");
+        if (process.platform === "win32") {
+          assert.ok(childEnv.SystemRoot ?? childEnv.SYSTEMROOT, "SystemRoot must survive sanitization");
+        }
       } finally {
         for (const [k, v] of Object.entries(saved)) {
           if (v === undefined) {
