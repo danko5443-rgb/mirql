@@ -25,9 +25,9 @@
 // Exit codes: 0 evidence written; 1 any measurement failed (fail-closed).
 
 import { spawnSync } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, writeFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 
 /** Parses a boolean-ish environment string ("true"/"1", case-insensitive). */
 export function parseBoolEnv(value) {
@@ -134,7 +134,7 @@ export function buildPrDoc({ pr, diff, suite, phi, causalCompleted = false }) {
  * Loads computePhi from the BASE-NOTARY checkout (Law 7: the running version
  * N-1 owns the metric definition; the candidate never measures itself).
  */
-async function loadBaseComputePhi(baseDir) {
+export async function loadBaseComputePhi(baseDir) {
   const phiPath = join(resolve(baseDir), "packages", "run", "phi.mjs");
   if (!existsSync(phiPath)) {
     throw new Error(`Law 7 fail-closed: base-notary phi engine not found at ${phiPath}`);
@@ -146,19 +146,24 @@ async function loadBaseComputePhi(baseDir) {
   return mod.computePhi;
 }
 
-async function main() {
+export async function main(env = process.env) {
   const required = ["BASE_NOTARY_DIR", "CANDIDATE_DIR", "BASE_SHA", "HEAD_SHA", "PR_NUMBER", "PR_AUTHOR", "SUITE_PASS_BASE", "SUITE_PASS_HEAD"];
-  const missing = required.filter((k) => !process.env[k]);
+  const missing = required.filter((k) => !env[k]);
   if (missing.length > 0) {
     process.stderr.write(`ci-evidence: missing required env: ${missing.join(", ")}\n`);
     process.exit(1);
   }
 
-  const baseDir = resolve(process.env.BASE_NOTARY_DIR);
-  const candidateDir = resolve(process.env.CANDIDATE_DIR);
-  const baseSha = process.env.BASE_SHA;
-  const headSha = process.env.HEAD_SHA;
-  const prNumber = Number.parseInt(process.env.PR_NUMBER, 10);
+  const baseDir = resolve(env.BASE_NOTARY_DIR);
+  const candidateDir = resolve(env.CANDIDATE_DIR);
+  const baseSha = env.BASE_SHA;
+  const headSha = env.HEAD_SHA;
+  const prRaw = String(env.PR_NUMBER || "").trim();
+  if (!/^\d+$/.test(prRaw)) {
+    process.stderr.write(`ci-evidence: PR_NUMBER is not a safe positive integer\n`);
+    process.exit(1);
+  }
+  const prNumber = Number.parseInt(prRaw, 10);
   if (!Number.isSafeInteger(prNumber) || prNumber <= 0) {
     process.stderr.write(`ci-evidence: PR_NUMBER is not a safe positive integer\n`);
     process.exit(1);
@@ -188,28 +193,36 @@ async function main() {
 
   // 3. Honest suite outcomes (measured by the CI steps, never assumed)
   const prDoc = buildPrDoc({
-    pr: { number: prNumber, base_sha: baseSha, head_sha: headSha, author: process.env.PR_AUTHOR },
+    pr: { number: prNumber, base_sha: baseSha, head_sha: headSha, author: env.PR_AUTHOR },
     diff: { files_changed: diff.files, tests_deleted: diff.deletedTests },
     suite: {
-      pass_base: parseBoolEnv(process.env.SUITE_PASS_BASE),
-      pass_head: parseBoolEnv(process.env.SUITE_PASS_HEAD),
+      pass_base: parseBoolEnv(env.SUITE_PASS_BASE),
+      pass_head: parseBoolEnv(env.SUITE_PASS_HEAD),
     },
     phi: { delta_phi: deltaPhi },
     causalCompleted: false, // Law 16: no verified reproducer artifact in this pipeline yet
   });
 
-  const outPath = resolve(process.env.PR_DOC_PATH ?? join(candidateDir, "pr-doc.json"));
+  const outPath = resolve(env.PR_DOC_PATH ?? join(candidateDir, "pr-doc.json"));
   writeFileSync(outPath, JSON.stringify(prDoc), "utf8");
   process.stdout.write(
     `ci-evidence: wrote ${outPath} (suite base=${prDoc.proof.suite_pass_base} head=${prDoc.proof.suite_pass_head} delta_phi=${deltaPhi} causal=false)\n`,
   );
 }
 
-// Run only when invoked as a CLI entrypoint, not when imported by tests.
-const invokedAsCli =
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
-if (invokedAsCli) {
+// Robust CLI invocation check using realpath
+function isInvokedAsCli() {
+  if (!process.argv[1]) return false;
+  try {
+    const argv1Real = realpathSync(resolve(process.argv[1]));
+    const thisFileReal = realpathSync(fileURLToPath(import.meta.url));
+    return argv1Real.toLowerCase() === thisFileReal.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+if (isInvokedAsCli()) {
   main().catch((err) => {
     process.stderr.write(`ci-evidence: ${err?.stack || err?.message || String(err)}\n`);
     process.exit(1);

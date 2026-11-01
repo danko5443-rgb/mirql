@@ -54,14 +54,18 @@ jobs:
       - name: Run BASE test suite (Authoritative Measurement, Law 7)
         id: base_suite
         working-directory: base-notary
+        timeout-minutes: 15
         continue-on-error: true
         run: node scripts/run-tests.mjs
 
       # Law 6 & 16: every proof field is MEASURED — suite outcomes mirror the
-      # step conclusions above, the diff is the authoritative git diff, phi is
+      # step outcomes above (outcome, not conclusion, so continue-on-error reflects
+      # true test failure), the diff is the authoritative git diff, phi is
       # computed by the base-notary's own engine, and causal_cycle_completed
       # stays false until a verified reproducer artifact exists in this
       # pipeline (never assumed, never faked).
+      # Law 7 & 9: N-1 base-notary executes the evidence builder; falls back to
+      # candidate copy only during bootstrap when base does not yet possess it.
       - name: Build Honest PR Evidence (Measured Facts Only)
         env:
           BASE_NOTARY_DIR: ./base-notary
@@ -70,9 +74,14 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          SUITE_PASS_BASE: ${{ steps.base_suite.conclusion == 'success' }}
-          SUITE_PASS_HEAD: ${{ steps.head_suite.conclusion == 'success' }}
-        run: node scripts/ci-evidence.mjs
+          SUITE_PASS_BASE: ${{ steps.base_suite.outcome == 'success' }}
+          SUITE_PASS_HEAD: ${{ steps.head_suite.outcome == 'success' }}
+        run: |
+          if [ -f base-notary/scripts/ci-evidence.mjs ]; then
+            node base-notary/scripts/ci-evidence.mjs
+          else
+            node candidate/scripts/ci-evidence.mjs
+          fi
 
       - name: Evaluate Mergeproof Notary Gate (Base-Authored Conscience)
         env:

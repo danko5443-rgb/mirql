@@ -5,9 +5,9 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 import {
@@ -15,6 +15,7 @@ import {
   isTestFilePath,
   collectDiff,
   buildPrDoc,
+  main,
 } from "../scripts/ci-evidence.mjs";
 
 function git(repoDir, ...args) {
@@ -115,40 +116,122 @@ describe("ci-evidence: honest notary evidence builder", () => {
 
     it("reports changed files and deleted tests from a real diff", () => {
       repo = mkdtempSync(join(tmpdir(), "mirql-ciev-repo-"));
-      git(repo, "init", "-q");
-      git(repo, "config", "user.email", "test@mirql.local");
-      git(repo, "config", "user.name", "mirql-test");
+      try {
+        git(repo, "init", "-q");
+        git(repo, "config", "user.email", "test@mirql.local");
+        git(repo, "config", "user.name", "mirql-test");
 
-      // Base commit: source + two test files
-      mkdirSync(join(repo, "src"), { recursive: true });
-      mkdirSync(join(repo, "tests"), { recursive: true });
-      writeFileSync(join(repo, "src", "a.mjs"), "export const a = 1;\n");
-      writeFileSync(join(repo, "tests", "a.test.mjs"), "import { a } from '../src/a.mjs';\n");
-      writeFileSync(join(repo, "tests", "b.test.mjs"), "export {};\n");
-      git(repo, "add", "-A");
-      git(repo, "commit", "-q", "-m", "base");
+        // Base commit: source + two test files
+        mkdirSync(join(repo, "src"), { recursive: true });
+        mkdirSync(join(repo, "tests"), { recursive: true });
+        writeFileSync(join(repo, "src", "a.mjs"), "export const a = 1;\n");
+        writeFileSync(join(repo, "tests", "a.test.mjs"), "import { a } from '../src/a.mjs';\n");
+        writeFileSync(join(repo, "tests", "b.test.mjs"), "export {};\n");
+        git(repo, "add", "-A");
+        git(repo, "commit", "-q", "-m", "base");
 
-      // Head commit: modify source, delete one test, rename the other test out of tests/
-      writeFileSync(join(repo, "src", "a.mjs"), "export const a = 2;\n");
-      writeFileSync(join(repo, "src", "c.mjs"), "export const c = 3;\n");
-      git(repo, "rm", "-q", "tests/a.test.mjs");
-      git(repo, "mv", "tests/b.test.mjs", "src/b.mjs");
-      git(repo, "add", "-A");
-      git(repo, "commit", "-q", "-m", "head");
+        // Head commit: modify source, delete one test, rename the other test out of tests/
+        writeFileSync(join(repo, "src", "a.mjs"), "export const a = 2;\n");
+        writeFileSync(join(repo, "src", "c.mjs"), "export const c = 3;\n");
+        git(repo, "rm", "-q", "tests/a.test.mjs");
+        git(repo, "mv", "tests/b.test.mjs", "src/b.mjs");
+        git(repo, "add", "-A");
+        git(repo, "commit", "-q", "-m", "head");
 
-      const baseSha = git(repo, "rev-parse", "HEAD~1").trim();
-      const headSha = git(repo, "rev-parse", "HEAD").trim();
+        const baseSha = git(repo, "rev-parse", "HEAD~1").trim();
+        const headSha = git(repo, "rev-parse", "HEAD").trim();
 
-      const res = collectDiff(baseSha, headSha, repo);
-      assert.equal(res.ok, true, `diff should succeed: ${res.error}`);
-      assert.ok(res.files.includes("src/a.mjs"), `files: ${res.files.join(",")}`);
-      assert.ok(res.files.includes("src/c.mjs"), `files: ${res.files.join(",")}`);
-      assert.ok(res.files.includes("src/b.mjs"), `files: ${res.files.join(",")}`);
-      assert.ok(res.deletedTests.includes("tests/a.test.mjs"), `deleted: ${res.deletedTests.join(",")}`);
+        const res = collectDiff(baseSha, headSha, repo);
+        assert.equal(res.ok, true, `diff should succeed: ${res.error}`);
+        assert.ok(res.files.includes("src/a.mjs"), `files: ${res.files.join(",")}`);
+        assert.ok(res.files.includes("src/c.mjs"), `files: ${res.files.join(",")}`);
+        assert.ok(res.files.includes("src/b.mjs"), `files: ${res.files.join(",")}`);
+        assert.ok(res.deletedTests.includes("tests/a.test.mjs"), `deleted: ${res.deletedTests.join(",")}`);
+        assert.ok(res.deletedTests.includes("tests/b.test.mjs"), `renamed test must count as deleted test: ${res.deletedTests.join(",")}`);
 
-      // Law 6: an unknown SHA must fail closed, not return an empty diff
-      const bad = collectDiff("0".repeat(40), headSha, repo);
-      assert.equal(bad.ok, false);
+        // Law 6: an unknown SHA must fail closed, not return an empty diff
+        const bad = collectDiff("0".repeat(40), headSha, repo);
+        assert.equal(bad.ok, false);
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("5. main entrypoint fail-closed contracts (H2 hardening)", () => {
+    it("fails closed via CLI spawn when required env vars are missing", () => {
+      const res = spawnSync(process.execPath, ["scripts/ci-evidence.mjs"], {
+        env: {},
+        encoding: "utf8",
+      });
+      assert.equal(res.status, 1);
+      assert.ok(res.stderr.includes("missing required env"));
+    });
+
+    it("fails closed via CLI spawn when PR_NUMBER is non-numeric or float", () => {
+      const res = spawnSync(process.execPath, ["scripts/ci-evidence.mjs"], {
+        env: {
+          BASE_NOTARY_DIR: ".",
+          CANDIDATE_DIR: ".",
+          BASE_SHA: "a".repeat(40),
+          HEAD_SHA: "b".repeat(40),
+          PR_NUMBER: "abc",
+          PR_AUTHOR: "tester",
+          SUITE_PASS_BASE: "true",
+          SUITE_PASS_HEAD: "true",
+        },
+        encoding: "utf8",
+      });
+      assert.equal(res.status, 1);
+      assert.ok(res.stderr.includes("PR_NUMBER is not a safe positive integer"));
+    });
+
+    it("end-to-end: executes successfully and writes valid pr-doc.json", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "mirql-ciev-e2e-"));
+      try {
+        git(tempDir, "init", "-q");
+        git(tempDir, "config", "user.email", "test@mirql.local");
+        git(tempDir, "config", "user.name", "mirql-test");
+        writeFileSync(join(tempDir, "sample.txt"), "hello\n");
+        git(tempDir, "add", "-A");
+        git(tempDir, "commit", "-q", "-m", "init");
+
+        writeFileSync(join(tempDir, "sample.txt"), "hello world\n");
+        git(tempDir, "add", "-A");
+        git(tempDir, "commit", "-q", "-m", "update");
+
+        const baseSha = git(tempDir, "rev-parse", "HEAD~1").trim();
+        const headSha = git(tempDir, "rev-parse", "HEAD").trim();
+
+        const outDocPath = join(tempDir, "out-pr-doc.json");
+        const res = spawnSync(process.execPath, [resolve("scripts/ci-evidence.mjs")], {
+          env: {
+            BASE_NOTARY_DIR: resolve("."),
+            CANDIDATE_DIR: tempDir,
+            BASE_SHA: baseSha,
+            HEAD_SHA: headSha,
+            PR_NUMBER: "17",
+            PR_AUTHOR: "test-author",
+            SUITE_PASS_BASE: "true",
+            SUITE_PASS_HEAD: "false",
+            PR_DOC_PATH: outDocPath,
+          },
+          encoding: "utf8",
+        });
+
+        assert.equal(res.status, 0, `spawn failed: ${res.stderr}`);
+        assert.ok(existsSync(outDocPath));
+
+        const parsed = JSON.parse(readFileSync(outDocPath, "utf8"));
+        assert.equal(parsed.pr.number, 17);
+        assert.equal(parsed.proof.suite_pass_base, true);
+        assert.equal(parsed.proof.suite_pass_head, false);
+        assert.equal(parsed.proof.causal_cycle_completed, false);
+        assert.ok(Array.isArray(parsed.diff_stat.files_changed));
+        assert.ok(Number.isSafeInteger(parsed.phi.delta_phi));
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
     });
   });
 });
