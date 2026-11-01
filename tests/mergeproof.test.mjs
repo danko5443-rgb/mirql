@@ -777,4 +777,99 @@ describe("mergeproof: F1 anti-cheat string-concealment patch", () => {
     assert.equal(checkTestWeakenings('it["skip"]("a", () => {});').ok, false);
     assert.equal(checkTestWeakenings('it("a", () => {});').ok, true);
   });
+
+  describe("8. Adversarial Probes & Strict Invariants (Claude Review Remediations)", () => {
+    it("Anti-cheat flags regex literal, fake exit prefix, and identifier evasions", () => {
+      // 1. Regex literal containing process.exit
+      const regexEvasion = "process.on('uncaughtException', (err) => { const r = /process.exit/; if (r) {} });";
+      assert.equal(checkSwallowedExceptions(regexEvasion).ok, false, "Regex literal evasion must be caught");
+
+      // 2. rethrow(e) helper call instead of real throw
+      const rethrowEvasion = "process.on('uncaughtException', (err) => { rethrow(err); });";
+      assert.equal(checkSwallowedExceptions(rethrowEvasion).ok, false, "rethrow() identifier must not satisfy \\bthrow\\b");
+
+      // 3. myprocess.exit instead of process.exit
+      const fakeProcess = "process.on('uncaughtException', (err) => { myprocess.exit(1); });";
+      assert.equal(checkSwallowedExceptions(fakeProcess).ok, false, "myprocess.exit must not satisfy \\bprocess.exit\\(");
+
+      // 4. regex containing brace in catch block does not truncate parser
+      const regexBrace = "try { risky(); } catch (e) { const r = /}/; }";
+      assert.equal(checkSwallowedExceptions(regexBrace).ok, false, "Catch with regex literal brace must not defeat scanner");
+    });
+
+    it("PR cannot self-approve via inline human_approved: true", () => {
+      const selfApprovePr = {
+        pr: { number: 999, head_sha: "a".repeat(40), base_sha: "b".repeat(40), kind: "feature" },
+        diff_stat: { files_changed: ["packages/core/index.mjs", "package.json"] },
+        proof: { causal_cycle_completed: false, suite_pass_head: true },
+        evidence: { forbidden_paths_touched: [], tests_deleted: [] },
+        anti_cheat: { violations_count: 0, flags: [] },
+        phi: { phi_base: 50, phi_head: 50, delta_phi: 0 },
+        surface: { uncited_commands: [], delta_count: 0 },
+        human_approved: true, // Candidate PR attempts self-approval
+      };
+
+      const result = evaluatePullRequest(selfApprovePr, { rootDir: ROOT });
+      assert.notEqual(result.verdict, "auto_merge", "PR inline human_approved MUST NOT grant auto_merge");
+      assert.equal(result.rule, "MP-005", "Must escalate to MP-005 needs_human");
+    });
+
+    it("Missing delta_phi fails closed under Law 13", () => {
+      const missingPhiPr = {
+        pr: { number: 998, head_sha: "a".repeat(40), base_sha: "b".repeat(40), kind: "bugfix" },
+        diff_stat: { files_changed: ["src/index.mjs"] },
+        proof: { causal_cycle_completed: true },
+        evidence: { forbidden_paths_touched: [], tests_deleted: [] },
+        anti_cheat: { violations_count: 0, flags: [] },
+        surface: { uncited_commands: [], delta_count: 0 },
+        // phi is omitted completely!
+      };
+
+      const result = evaluatePullRequest(missingPhiPr, { rootDir: ROOT });
+      assert.equal(result.ok, false);
+      assert.equal(result.rule, "LAW_13");
+      assert.equal(result.violation, "MISSING_PHI");
+      assert.equal(result.verdict, "reject");
+    });
+
+    it("Missing base_sha fails closed against target tip", () => {
+      const missingBasePr = {
+        pr: { number: 997, head_sha: "a".repeat(40), kind: "bugfix" }, // base_sha omitted!
+        diff_stat: { files_changed: ["src/index.mjs"] },
+        proof: { causal_cycle_completed: true },
+        evidence: { forbidden_paths_touched: [], tests_deleted: [] },
+        anti_cheat: { violations_count: 0, flags: [] },
+        phi: { delta_phi: 0 },
+        surface: { uncited_commands: [], delta_count: 0 },
+      };
+
+      const result = evaluatePullRequest(missingBasePr, {
+        rootDir: ROOT,
+        targetTipSha: "c".repeat(40),
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.rule, "MP-004");
+      assert.equal(result.violation, "STALE_BASE");
+      assert.equal(result.verdict, "reject");
+    });
+
+    it("Untruthful diff_stat is caught if forbidden file is in modifiedFiles", () => {
+      const untruthfulPr = {
+        pr: { number: 996, head_sha: "a".repeat(40), base_sha: "b".repeat(40), kind: "bugfix" },
+        diff_stat: { files_changed: ["src/clean.mjs"] }, // Omitted CONSTITUTION.md
+        modifiedFiles: ["CONSTITUTION.md"], // Discovered by git diff
+        proof: { causal_cycle_completed: true },
+        evidence: { forbidden_paths_touched: [], tests_deleted: [] },
+        anti_cheat: { violations_count: 0, flags: [] },
+        phi: { delta_phi: 0 },
+        surface: { uncited_commands: [], delta_count: 0 },
+      };
+
+      const result = evaluatePullRequest(untruthfulPr, { rootDir: ROOT });
+      assert.equal(result.rule, "MP-001");
+      assert.equal(result.violation, "TOUCH_HUMAN_ONLY");
+      assert.equal(result.verdict, "reject");
+    });
+  });
 });
+

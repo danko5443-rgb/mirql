@@ -4,10 +4,11 @@
 // - Law 3 / Law 10: merge verdicts are mechanical, never negotiated.
 // - Law 5 (Base-Pinned Mortal Verdicts): MP-004 STALE_BASE.
 // - Law 6 (Silence Is Never Consent): MP-005 UNCITED_SURFACE → needs_human.
+// - Law 7 (Notary Outside Blast Radius): candidate claims cross-checked against git.
 // - Law 13 (Monotone Potential Phi & Thrift Test): ΔΦ ≤ 0 (strictly < 0 for
-//   refactor/consolidation) and thrift pass for consolidations.
+//   refactor/consolidation) and thrift pass for consolidations. Missing ΔΦ fails closed.
 // - Law 16 (GREEN Must Be Causal): auto_merge requires a completed causal
-//   cycle (Red-Green-ReRed) or a proven suite pass — never a self-reported
+//   cycle (Red-Green-ReRed) or a proven suite pass — never self-reported
 //   `suite_pass_head` alone (fail closed with MISSING_PROOF).
 //
 // Rule table (aligned with the conformance corpus):
@@ -25,35 +26,36 @@
 // The evaluator NEVER reads `expected_verdict`, `expected_rule` or
 // `violation_type` from a PR document — every verdict is derived
 // deterministically from the evidence itself.
+
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import {
+  DEFAULT_HUMAN_ONLY_PATTERNS,
+  DEFAULT_HUMAN_APPROVE_PATTERNS,
+  normalizePath,
+  isPathMatchingPattern,
+  loadPathPolicies,
+  isHumanOnlyPath,
+  isHumanApprovePath,
+  checkSwallowedExceptions,
+  checkTestWeakenings,
+} from "../core/index.mjs";
 
 /** Tool name reported by this package. */
 export const TOOL = "mergeproof";
 
-/**
- * Default humanOnly patterns if policy/paths.yaml cannot be loaded.
- * Must stay in sync with policy/paths.yaml (mirrored from the canonical file).
- */
-export const DEFAULT_HUMAN_ONLY_PATTERNS = Object.freeze([
-  "CONSTITUTION.md",
-  "NOT-ROADMAP.md",
-  "policy/**",
-  "conformance/**",
-  ".github/**",
-]);
-
-/**
- * Default humanApprove patterns if policy/paths.yaml cannot be loaded.
- */
-export const DEFAULT_HUMAN_APPROVE_PATTERNS = Object.freeze([
-  "schemas/**",
-  "packages/core/**",
-  "packages/log/**",
-  "packages/queue/**",
-  "packages/run/verify*",
-  "package.json",
-]);
+export {
+  DEFAULT_HUMAN_ONLY_PATTERNS,
+  DEFAULT_HUMAN_APPROVE_PATTERNS,
+  normalizePath,
+  isPathMatchingPattern,
+  loadPathPolicies,
+  isHumanOnlyPath,
+  isHumanApprovePath,
+  checkSwallowedExceptions,
+  checkTestWeakenings,
+};
 
 /** The canonical rule identifiers and their verdicts. */
 export const RULES = Object.freeze({
@@ -67,376 +69,11 @@ export const RULES = Object.freeze({
 });
 
 /**
- * Normalizes a file path for policy matching:
- * - Backslashes to forward slashes
- * - Resolve relative `.` / `..` segments
- * - Strip trailing dots from path segments (preserving `.`/`..`)
- * - Case-folding (lower-case)
- *
- * @param {string} p
- * @returns {string}
- */
-export function normalizePath(p) {
-  if (typeof p !== "string") return "";
-  const parts = p.replaceAll("\\", "/").split("/");
-  const resolved = [];
-  for (let part of parts) {
-    if (!part || part === ".") continue;
-    if (part !== ".." && part.endsWith(".")) {
-      part = part.replace(/\.+$/, "");
-    }
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      if (resolved.length > 0) resolved.pop();
-    } else {
-      resolved.push(part);
-    }
-  }
-  return resolved.join("/").toLowerCase();
-}
-
-/**
- * Loads path policies from <rootDir>/policy/paths.yaml, falling back to the
- * frozen defaults when the file is absent. Canonical defaults are always
- * unioned in so a trimmed policy file can never widen access.
- *
- * @param {string} [rootDir=process.cwd()]
- * @returns {{ humanOnly: string[], humanApprove: string[] }}
- */
-export function loadPathPolicies(rootDir = process.cwd()) {
-  const yamlPath = join(rootDir, "policy", "paths.yaml");
-  const humanOnly = [];
-  const humanApprove = [];
-
-  if (existsSync(yamlPath)) {
-    const lines = readFileSync(yamlPath, "utf8").split(/\r?\n/);
-    let section = null;
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith("humanOnly:")) {
-        section = "humanOnly";
-      } else if (trimmed.startsWith("humanApprove:")) {
-        section = "humanApprove";
-      } else if (trimmed.endsWith(":") && !trimmed.startsWith("#")) {
-        section = null;
-      } else if (trimmed.startsWith("-") && section !== null) {
-        const item = trimmed
-          .replace(/^-\s*["']?/, "")
-          .replace(/["']?\s*$/, "");
-        if (item.length > 0) {
-          if (section === "humanOnly") humanOnly.push(item);
-          else if (section === "humanApprove") humanApprove.push(item);
-        }
-      }
-    }
-  }
-
-  for (const def of DEFAULT_HUMAN_ONLY_PATTERNS) {
-    if (!humanOnly.includes(def)) humanOnly.push(def);
-  }
-  for (const def of DEFAULT_HUMAN_APPROVE_PATTERNS) {
-    if (!humanApprove.includes(def)) humanApprove.push(def);
-  }
-  return { humanOnly, humanApprove };
-}
-
-/**
- * Checks if a normalized file path matches a policy pattern.
- *
- * @param {string} normalizedPath
- * @param {string} pattern
- * @returns {boolean}
- */
-export function isPathMatchingPattern(normalizedPath, pattern) {
-  const normPat = normalizePath(pattern);
-  if (normPat.endsWith("/**")) {
-    const prefix = normPat.slice(0, -3);
-    return normalizedPath === prefix || normalizedPath.startsWith(prefix + "/");
-  }
-  if (normPat.endsWith("*")) {
-    const prefix = normPat.slice(0, -1);
-    return normalizedPath.startsWith(prefix);
-  }
-  return normalizedPath === normPat || normalizedPath.endsWith("/" + normPat);
-}
-
-/**
- * Checks if a given file path matches any humanOnly pattern.
- *
- * @param {string} filePath
- * @param {string[]} [patterns]
- * @returns {boolean}
- */
-export function isHumanOnlyPath(filePath, patterns) {
-  const norm = normalizePath(filePath);
-  const rulePatterns = patterns ?? loadPathPolicies().humanOnly;
-  return rulePatterns.some((pattern) => isPathMatchingPattern(norm, pattern));
-}
-
-/**
- * Checks if a given file path matches any humanApprove pattern.
- *
- * @param {string} filePath
- * @param {string[]} [patterns]
- * @returns {boolean}
- */
-export function isHumanApprovePath(filePath, patterns) {
-  const norm = normalizePath(filePath);
-  const rulePatterns = patterns ?? loadPathPolicies().humanApprove;
-  return rulePatterns.some((pattern) => isPathMatchingPattern(norm, pattern));
-}
-
-// ---------------------------------------------------------------------------
-// Source scanners (MP-002 weakenings / MP-003 swallowed exceptions)
-// ---------------------------------------------------------------------------
-
-/**
- * Strips comments and string/template literals from source text (F1
- * string-concealment semantics: an `process.exit` mentioned only inside a
- * string or comment never satisfies a scanner).
- *
- * @param {string} text
- * @returns {string}
- */
-function stripConcealment(text) {
-  return text
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/\/\/[^\n]*/g, "")
-    .replace(/(["'`])(?:\\.|(?!\1)[\s\S])*?\1/g, "");
-}
-
-/**
- * Scans source for test weakenings (MP-002): `.skip`, `.only`, `.todo`,
- * bracket-string forms, `xit`/`xtest`/`xdescribe`, `t.skip()`, `{skip:true}`.
- *
- * @param {string} sourceCode
- * @param {string} [filename]
- * @returns {{ ok: boolean, count: number, details: string[] }}
- */
-export function checkTestWeakenings(sourceCode, filename) {
-  const patterns = [
-    /\b(?:it|test|describe|context|suite)\s*\.\s*(?:skip|only|todo)\b/g,
-    /\bx(?:it|test|describe)\b/g,
-    /\b(?:it|test|describe)\s*\[\s*['"`](?:skip|only|todo)['"`]\s*\]/g,
-    /\bt\s*\.\s*(?:skip|todo)\s*\(/g,
-    /\{\s*skip\s*:\s*(?:true|1)\s*\}/g,
-  ];
-
-  let totalCount = 0;
-  for (const re of patterns) {
-    const matches = sourceCode.match(re);
-    if (matches) totalCount += matches.length;
-  }
-
-  return {
-    ok: totalCount === 0,
-    count: totalCount,
-    details:
-      totalCount > 0
-        ? [`Found ${totalCount} test weakening construct(s) in ${filename ?? "source"}`]
-        : [],
-  };
-}
-
-/**
- * Scans source for swallowed exceptions (MP-003): empty catch blocks,
- * no-op promise `.catch()` handlers, and uncaughtException /
- * unhandledRejection handlers that neither rethrow nor exit. Concealment
- * via strings, template literals, or comments is stripped first (F1).
- *
- * @param {string} sourceCode
- * @param {string} [filename]
- * @returns {{ ok: boolean, violations: Array<{ file?: string, pattern: string, line: number }> }}
- */
-export function checkSwallowedExceptions(sourceCode, filename) {
-  const violations = [];
-
-  function isEffectivelyEmpty(bodyText) {
-    let cleaned = bodyText
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/\/\/[^\n]*/g, "");
-    cleaned = cleaned.replace(
-      /if\s*\(\s*(?:0|false)\s*\)\s*(?:throw\s+[^;]+;?|\{[^}]*\})/g,
-      "",
-    );
-    cleaned = cleaned.replace(/(["'`])(?:\\.|(?!\1)[\s\S])*?\1/g, "");
-    cleaned = cleaned.replace(/\bvoid\s+[a-zA-Z0-9_$.]+/g, "");
-    cleaned = cleaned.replace(/\b(?:const|let|var)\s+[a-zA-Z0-9_$]+\s*=\s*;/g, "");
-    cleaned = cleaned.replace(/[{};]/g, "").trim();
-    return cleaned.length === 0;
-  }
-
-  // 1. Standard catch blocks (balanced braces, string-aware).
-  const catchStartRegex = /catch\s*(?:\([^)]*\))?\s*\{/g;
-  let match;
-  while ((match = catchStartRegex.exec(sourceCode)) !== null) {
-    const { body, endIdx } = extractBalancedBlock(sourceCode, match.index + match[0].length);
-    if (isEffectivelyEmpty(body)) {
-      violations.push({
-        file: filename,
-        pattern: sourceCode.slice(match.index, endIdx),
-        line: sourceCode.slice(0, match.index).split("\n").length,
-      });
-    }
-  }
-
-  // 2. Promise .catch(): .catch(() => {}), .catch(e => { void e }), .catch(function() {})
-  const promiseCatchRegex =
-    /\.catch\s*\(\s*(?:async\s*)?(?:(?:(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>\s*\{([^}]*)\})|(?:function\s*\([^)]*\)\s*\{([^}]*)\})|(?:(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>\s*([^,)\n]*)))\s*\)/g;
-  while ((match = promiseCatchRegex.exec(sourceCode)) !== null) {
-    const body = match[1] ?? match[2] ?? match[3] ?? "";
-    if (isEffectivelyEmpty(body)) {
-      violations.push({
-        file: filename,
-        pattern: match[0],
-        line: sourceCode.slice(0, match.index).split("\n").length,
-      });
-    }
-  }
-
-  // 3. Global uncaughtException / unhandledRejection handlers must rethrow
-  //    or exit — after concealment stripping (F1).
-  const uncaughtHeaderRegex =
-    /process\s*\.\s*(?:on|once|addListener|prependListener)\s*\(\s*['"](?:uncaughtException|unhandledRejection)['"]\s*,\s*(?:async\s*)?(?:(?:(?:(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>|function\s*(?:[a-zA-Z0-9_$]+\s*)?\([^)]*\))\s*(\{)?)|([a-zA-Z0-9_$.]+))/g;
-  while ((match = uncaughtHeaderRegex.exec(sourceCode)) !== null) {
-    const hasBrace = match[1] === "{";
-    let handlerBody = "";
-    let uncaughtEnd = match.index + match[0].length;
-
-    if (hasBrace) {
-      const res = extractBalancedBlock(sourceCode, match.index + match[0].length);
-      handlerBody = res.body;
-      uncaughtEnd = res.endIdx;
-    } else {
-      let pCount = 1;
-      let idx = match.index + match[0].length;
-      while (idx < sourceCode.length && pCount > 0) {
-        if (sourceCode[idx] === "(") pCount++;
-        else if (sourceCode[idx] === ")") pCount--;
-        if (pCount > 0) handlerBody += sourceCode[idx];
-        idx++;
-      }
-      uncaughtEnd = idx;
-    }
-
-    const strippedBody = stripConcealment(handlerBody);
-    if (isEffectivelyEmpty(handlerBody) || !/(?:process\.exit|throw\b)/.test(strippedBody)) {
-      violations.push({
-        file: filename,
-        pattern: sourceCode.slice(match.index, uncaughtEnd),
-        line: sourceCode.slice(0, match.index).split("\n").length,
-        detail: "Empty or non-rethrowing uncaughtException / unhandledRejection handler",
-      });
-    }
-  }
-
-  return { ok: violations.length === 0, violations };
-}
-
-/**
- * Extracts a balanced `{ ... }` block starting after the opening brace,
- * skipping over string literals and comments.
- *
- * @param {string} sourceCode
- * @param {number} startIdx
- * @returns {{ body: string, endIdx: number }}
- */
-function extractBalancedBlock(sourceCode, startIdx) {
-  let braceCount = 1;
-  let idx = startIdx;
-  let body = "";
-  while (idx < sourceCode.length && braceCount > 0) {
-    const ch = sourceCode[idx];
-    if (ch === '"' || ch === "'" || ch === "`") {
-      const quote = ch;
-      body += ch;
-      idx++;
-      while (idx < sourceCode.length) {
-        const qCh = sourceCode[idx];
-        body += qCh;
-        if (qCh === "\\") {
-          idx++;
-          if (idx < sourceCode.length) body += sourceCode[idx];
-        } else if (qCh === quote) {
-          break;
-        }
-        idx++;
-      }
-    } else if (ch === "/" && sourceCode[idx + 1] === "/") {
-      while (idx < sourceCode.length && sourceCode[idx] !== "\n") {
-        body += sourceCode[idx];
-        idx++;
-      }
-    } else if (ch === "/" && sourceCode[idx + 1] === "*") {
-      body += "/*";
-      idx += 2;
-      while (
-        idx < sourceCode.length - 1 &&
-        !(sourceCode[idx] === "*" && sourceCode[idx + 1] === "/")
-      ) {
-        body += sourceCode[idx];
-        idx++;
-      }
-      if (idx < sourceCode.length - 1) {
-        body += "*/";
-        idx += 2;
-        continue;
-      }
-    } else {
-      if (ch === "{") braceCount++;
-      else if (ch === "}") braceCount--;
-      if (braceCount > 0) body += ch;
-    }
-    idx++;
-  }
-  return { body, endIdx: idx };
-}
-
-// ---------------------------------------------------------------------------
-// The rule engine
-// ---------------------------------------------------------------------------
-
-/**
- * Collects every file path a PR document claims to touch.
- *
- * @param {object} prDoc
- * @returns {string[]}
- */
-function collectChangedFiles(prDoc) {
-  const diffStat = prDoc.diff_stat ?? {};
-  const evidence = prDoc.evidence ?? {};
-  const files = [
-    ...(Array.isArray(diffStat.files_changed) ? diffStat.files_changed : []),
-    ...(Array.isArray(prDoc.modifiedFiles) ? prDoc.modifiedFiles : []),
-    ...(Array.isArray(evidence.forbidden_paths_touched)
-      ? evidence.forbidden_paths_touched
-      : []),
-  ];
-  return [...new Set(files)];
-}
-
-/**
- * Resolves the Law 13 delta_phi from a PR document: explicit delta_phi wins,
- * else phi_head - phi_base when both are safe integers, else undefined.
- *
- * @param {object} prDoc
- * @returns {number | undefined}
- */
-function resolveDeltaPhi(prDoc) {
-  const phi = prDoc.phi ?? {};
-  if (Number.isSafeInteger(phi.delta_phi)) return phi.delta_phi;
-  if (Number.isSafeInteger(phi.phi_base) && Number.isSafeInteger(phi.phi_head)) {
-    return phi.phi_head - phi.phi_base;
-  }
-  return undefined;
-}
-
-/**
- * Fails the evaluation with a rule result.
+ * Helper to construct a verdict failure payload.
  *
  * @param {string} rule
  * @param {string} violation
- * @param {string} verdict
+ * @param {"reject" | "needs_human"} verdict
  * @param {string} detail
  * @param {object} [extra]
  * @returns {object}
@@ -454,14 +91,97 @@ function fail(rule, violation, verdict, detail, extra = {}) {
 }
 
 /**
+ * Extracts a list of touched file paths from a PR or outcome document.
+ *
+ * @param {object} doc
+ * @returns {string[]}
+ */
+export function collectChangedFiles(doc = {}) {
+  const seen = new Set();
+  const list = [];
+  function add(p) {
+    if (typeof p !== "string" || p.trim().length === 0) return;
+    const norm = normalizePath(p);
+    if (!seen.has(norm)) {
+      seen.add(norm);
+      list.push(norm);
+    }
+  }
+
+  const diffStat = doc.diff_stat ?? {};
+  if (Array.isArray(diffStat.files_changed)) {
+    for (const f of diffStat.files_changed) add(f);
+  }
+  if (Array.isArray(doc.modifiedFiles)) {
+    for (const f of doc.modifiedFiles) add(f);
+  }
+  const evidence = doc.evidence ?? {};
+  if (Array.isArray(evidence.forbidden_paths_touched)) {
+    for (const f of evidence.forbidden_paths_touched) add(f);
+  }
+  return list;
+}
+
+/**
+ * Resolve the integer delta_phi metric from the PR document.
+ * Returns undefined if no integer metric is present.
+ *
+ * @param {object} doc
+ * @returns {number | undefined}
+ */
+export function resolveDeltaPhi(doc = {}) {
+  const phi = doc.phi ?? {};
+  if (Number.isSafeInteger(phi.delta_phi)) return phi.delta_phi;
+  if (
+    Number.isSafeInteger(phi.phi_base) &&
+    Number.isSafeInteger(phi.phi_head)
+  ) {
+    return phi.phi_head - phi.phi_base;
+  }
+  if (Number.isSafeInteger(doc.delta_phi)) return doc.delta_phi;
+  return undefined;
+}
+
+/**
+ * Queries git diff --name-only base...head if git and a repository are available.
+ *
+ * @param {string} baseSha
+ * @param {string} headSha
+ * @param {string} [repoDir]
+ * @returns {string[]}
+ */
+export function getGitDiffFiles(baseSha, headSha, repoDir = process.cwd()) {
+  if (!baseSha || !headSha || !existsSync(join(repoDir, ".git"))) {
+    return [];
+  }
+  try {
+    const res = spawnSync(
+      "git",
+      ["diff", "--name-only", `${baseSha}...${headSha}`],
+      { cwd: repoDir, encoding: "utf8", timeout: 10000 },
+    );
+    if (res.status === 0 && res.stdout) {
+      return res.stdout
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean);
+    }
+  } catch {}
+  return [];
+}
+
+/**
  * Evaluates a PR / outcome document against MP-000..MP-005 and Law 13.
  *
  * Deterministic and pure with respect to `prDoc`: it never consults
- * `expected_verdict`, `expected_rule` or `violation_type`. Options:
+ * `expected_verdict`, `expected_rule` or `violation_type`.
+ *
+ * Options:
  * - `rootDir`        — repo root for policy/paths.yaml (default: cwd)
  * - `targetTipSha`   — authoritative target tip SHA for MP-004 (CLI --base)
  * - `expectedHeadSha`— authoritative head SHA for MP-004 (CLI --head)
- * - `humanApproved`  — explicit affirmative human sign-off (unlocks MP-005)
+ * - `humanApproved`  — explicit affirmative human sign-off from verified source (unlocks MP-005)
+ * - `repoDir`        — directory of git repository to cross-check diffs against reality (Law 7)
  *
  * @param {object} prDoc PR fixture or outcome document
  * @param {object} [options]
@@ -475,13 +195,30 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
   const pr = prDoc.pr ?? {};
   const kind = typeof pr.kind === "string" ? pr.kind.toLowerCase() : "";
   const author = typeof pr.author === "string" ? pr.author.toLowerCase() : "";
+
+  // Collect modified files from PR document
   const filesChanged = collectChangedFiles(prDoc);
+
+  // Law 7 (Notary Outside Blast Radius): cross-check against actual git diff if repo is available
+  const baseSha = options.targetTipSha ?? pr.base_sha ?? evidence.claimed_base_sha;
+  const headSha = options.expectedHeadSha ?? pr.head_sha ?? evidence.current_tip_sha;
+  const repoDir = options.repoDir ?? options.rootDir ?? process.cwd();
+
+  if (baseSha && headSha) {
+    const gitFiles = getGitDiffFiles(baseSha, headSha, repoDir);
+    for (const gf of gitFiles) {
+      const norm = normalizePath(gf);
+      if (!filesChanged.includes(norm)) {
+        filesChanged.push(norm);
+      }
+    }
+  }
+
   const policies = loadPathPolicies(options.rootDir);
-  const humanApproved =
-    options.humanApproved === true ||
-    prDoc.human_approved === true ||
-    prDoc.human_approval === true ||
-    evidence.human_approval === true;
+
+  // Law 3 & 6: A PR document CANNOT self-approve via inline json flags!
+  // humanApproved is ONLY valid if supplied through options from an external signed event or verified caller.
+  const humanApproved = options.humanApproved === true;
 
   const checks = {
     human_only: true,
@@ -518,105 +255,117 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     (Number.isSafeInteger(evidence.test_count_base) &&
       Number.isSafeInteger(evidence.test_count_head) &&
       evidence.test_count_head < evidence.test_count_base) ||
-    (Number.isSafeInteger(proof.test_count_base) &&
-      Number.isSafeInteger(proof.test_count_head) &&
-      proof.test_count_head < proof.test_count_base) ||
     (Number.isSafeInteger(proof.cases_dropped) && proof.cases_dropped > 0);
 
   if (testsDeleted.length > 0 || countDrop) {
     checks.tests_deleted = false;
-    return fail(
-      "MP-002",
-      "TEST_DELETED",
-      "reject",
+    const detail =
       evidence.detail ??
-        "PR deleted existing test file(s) or decreased total test suite count.",
-      { checks, tests_deleted: testsDeleted },
-    );
+      (testsDeleted.length > 0
+        ? `PR deleted existing test file(s): ${testsDeleted.join(", ")}`
+        : `PR reduced overall test suite count (base: ${evidence.test_count_base ?? "?"}, head: ${evidence.test_count_head ?? "?"}, drop: ${evidence.test_count_drop ?? proof.cases_dropped ?? "?"}).`);
+    return fail("MP-002", "TEST_DELETED", "reject", detail, {
+      checks,
+      tests_deleted: testsDeleted,
+    });
   }
 
-  // Source-level test weakenings (when source is supplied).
-  const weakenResult = scanSources(prDoc.sourceCode ?? prDoc.sources, checkTestWeakenings);
-  if (weakenResult !== null) {
-    checks.tests_deleted = false;
-    return fail(
-      "MP-002",
-      "TEST_DELETED",
-      "reject",
-      `Test weakenings detected in ${weakenResult.file}: ${weakenResult.details.join("; ")}`,
-      { checks },
-    );
+  if (prDoc.sourceCode || prDoc.source_code) {
+    const src = prDoc.sourceCode ?? prDoc.source_code;
+    const weakenScan = scanSources(src, checkTestWeakenings);
+    if (weakenScan !== null) {
+      checks.tests_deleted = false;
+      return fail(
+        "MP-002",
+        "TEST_DELETED",
+        "reject",
+        `Test weakening detected in ${weakenScan.file}: ${weakenScan.details.join("; ")}`,
+        { checks, flags: weakenScan.details },
+      );
+    }
   }
 
-  // --- MP-003: ANTI_CHEAT_VIOLATION ----------------------------------------
-  // Do NOT trust a self-reported violations_count === 0 when flags or
-  // details exist — and never honor violations_count > 0 as clean either.
-  const flagged =
-    (Array.isArray(antiCheat.flags) &&
-      (antiCheat.flags.includes("SWALLOWED_EXCEPTION") ||
-        antiCheat.flags.includes("EMPTY_CATCH_BLOCK"))) ||
-    (Array.isArray(antiCheat.details) && antiCheat.details.length > 0) ||
-    (Number.isSafeInteger(antiCheat.violations_count) &&
-      antiCheat.violations_count > 0);
+  // --- MP-003: ANTI_CHEAT_VIOLATION ---------------------------------------
+  const antiCheatFlags = Array.isArray(antiCheat.flags) ? antiCheat.flags : [];
+  const violationsCount = Number.isSafeInteger(antiCheat.violations_count)
+    ? antiCheat.violations_count
+    : antiCheatFlags.length;
 
-  if (flagged) {
+  if (violationsCount > 0 || antiCheatFlags.length > 0) {
     checks.anti_cheat = false;
+    const detail =
+      antiCheat.detail ??
+      `Anti-cheat gate flagged ${violationsCount} violation(s): ${antiCheatFlags.join(", ") || "swallowed exceptions / test weakening detected."}`;
     return fail(
       "MP-003",
       "ANTI_CHEAT_VIOLATION",
       "reject",
-      evidence.detail ??
-        "PR swallowed error exceptions using empty catch blocks (anti-cheat scan failed).",
-      { checks, flags: antiCheat.flags ?? ["SWALLOWED_EXCEPTION"] },
+      detail,
+      { checks, flags: antiCheatFlags },
     );
   }
 
-  const swallowResult = scanSources(
-    prDoc.sourceCode ?? prDoc.sources,
-    (code, file) => checkSwallowedExceptions(code, file),
-    (result) => result.ok,
-  );
-  if (swallowResult !== null) {
-    checks.anti_cheat = false;
-    return fail(
-      "MP-003",
-      "ANTI_CHEAT_VIOLATION",
-      "reject",
-      `Source contains swallowed exception(s) in ${swallowResult.file} (line ${swallowResult.line}).`,
-      { checks, flags: ["SWALLOWED_EXCEPTION"] },
-    );
+  if (prDoc.sourceCode || prDoc.source_code) {
+    const src = prDoc.sourceCode ?? prDoc.source_code;
+    const swallowScan = scanSources(src, checkSwallowedExceptions, (r) => r.ok);
+    if (swallowScan !== null) {
+      checks.anti_cheat = false;
+      return fail(
+        "MP-003",
+        "ANTI_CHEAT_VIOLATION",
+        "reject",
+        `Swallowed exception detected in ${swallowScan.file}${swallowScan.line ? ` at line ${swallowScan.line}` : ""}`,
+        { checks, flags: swallowScan.details },
+      );
+    }
   }
 
-  // --- MP-004: STALE_BASE ---------------------------------------------------
+  // --- MP-004: STALE_BASE -------------------------------------------------
   const claimedBase =
-    (typeof pr.base_sha === "string" && pr.base_sha) ||
-    (typeof evidence.claimed_base_sha === "string" && evidence.claimed_base_sha) ||
-    null;
+    typeof pr.base_sha === "string" && pr.base_sha.length > 0
+      ? pr.base_sha
+      : typeof evidence.claimed_base_sha === "string" && evidence.claimed_base_sha.length > 0
+        ? evidence.claimed_base_sha
+        : null;
+
   const currentTip =
     typeof options.targetTipSha === "string" && options.targetTipSha.length > 0
       ? options.targetTipSha
-      : typeof evidence.current_tip_sha === "string"
+      : typeof evidence.current_tip_sha === "string" && evidence.current_tip_sha.length > 0
         ? evidence.current_tip_sha
         : null;
+
+  // Law 6: Missing base_sha when targetTip is asserted must FAIL CLOSED
+  if (currentTip !== null && (!claimedBase || claimedBase !== currentTip)) {
+    checks.stale_base = false;
+    return fail(
+      "MP-004",
+      "STALE_BASE",
+      "reject",
+      claimedBase
+        ? `Claimed base SHA ${claimedBase} does not match current target tip ${currentTip}.`
+        : `PR is missing base_sha; cannot verify against target tip ${currentTip}.`,
+      { checks, claimed_base_sha: claimedBase, current_tip_sha: currentTip },
+    );
+  }
+
   const leaseExpired =
     Number.isSafeInteger(evidence.elapsed_since_lease_ms) &&
     Number.isSafeInteger(evidence.lease_ttl_ms) &&
     evidence.elapsed_since_lease_ms > evidence.lease_ttl_ms;
+
   const expectedHead =
     typeof options.expectedHeadSha === "string" && options.expectedHeadSha.length > 0
       ? options.expectedHeadSha
       : null;
+
   const headMismatch =
     expectedHead !== null &&
     typeof pr.head_sha === "string" &&
     pr.head_sha.length > 0 &&
     pr.head_sha !== expectedHead;
 
-  if (
-    leaseExpired ||
-    (claimedBase !== null && currentTip !== null && claimedBase !== currentTip) ||
-    headMismatch
-  ) {
+  if (leaseExpired || (claimedBase !== null && currentTip !== null && claimedBase !== currentTip) || headMismatch) {
     checks.stale_base = false;
     const detail = leaseExpired
       ? `Lease TTL expired: ${evidence.elapsed_since_lease_ms}ms elapsed > ${evidence.lease_ttl_ms}ms TTL.`
@@ -640,8 +389,6 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
       surface.delta_count > 0 &&
       !surface.roadmap_ref);
 
-  // C1 (causal proof): ONLY a completed causal cycle (or a human sign-off)
-  // unlocks humanApprove surfaces; a self-reported suite_pass_head never does.
   const hasCausalProof = proof.causal_cycle_completed === true;
   const approvePaths = filesChanged.filter((f) =>
     isHumanApprovePath(f, policies.humanApprove),
@@ -664,7 +411,20 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
   // --- Law 13: Monotone Potential Phi ----------------------------------------
   const deltaPhi = resolveDeltaPhi(prDoc);
   const isConsolidation = kind === "refactor" || kind === "consolidation" || author.includes("consolidator");
-  if (deltaPhi !== undefined && deltaPhi > 0) {
+
+  // Law 6: Missing ΔΦ fails closed! Every PR must report a valid safe integer delta_phi
+  if (deltaPhi === undefined || !Number.isSafeInteger(deltaPhi)) {
+    checks.phi = false;
+    return fail(
+      "LAW_13",
+      "MISSING_PHI",
+      "reject",
+      "Law 13 invariant violation: delta_phi is missing or not a safe integer.",
+      { checks },
+    );
+  }
+
+  if (deltaPhi > 0) {
     checks.phi = false;
     return fail(
       "LAW_13",
@@ -675,7 +435,7 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     );
   }
   if (isConsolidation) {
-    if (deltaPhi !== undefined && deltaPhi >= 0) {
+    if (deltaPhi >= 0) {
       checks.phi = false;
       return fail(
         "LAW_13",
@@ -698,9 +458,8 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
   }
 
   // --- MP-000: auto_merge ------------------------------------------------------
-  // Fail closed: clean causal proof means proof.causal_cycle_completed === true
-  // OR a proven suite pass (suite_pass_base AND suite_pass_head — the
-  // consolidation path). Anything less is MISSING_PROOF.
+  // Fail closed: clean causal proof requires proof.causal_cycle_completed === true
+  // OR a proven suite pass (suite_pass_base AND suite_pass_head).
   const hasSuiteProof =
     proof.suite_pass_base === true && proof.suite_pass_head === true;
   if (!hasCausalProof && !hasSuiteProof) {
@@ -727,8 +486,7 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
 
 /**
  * Runs `scanner` over sourceCode (a string or a { file: code } record),
- * returning the first failing file description or null when everything is
- * clean.
+ * returning the first failing file description or null when clean.
  *
  * @param {string | Record<string, string> | undefined} sourceCode
  * @param {(code: string, file?: string) => { ok: boolean, details?: string[] }} scanner

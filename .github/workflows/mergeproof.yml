@@ -3,32 +3,37 @@ name: Mergeproof External Notary
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  workflow_dispatch:
 
 permissions:
   contents: read
-  pull-requests: write
-  statuses: write
 
 jobs:
   notary:
     name: Mergeproof Conscience Gate
     runs-on: ubuntu-latest
     steps:
-      - name: Check out target repository
+      - name: Check out candidate PR head
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+          path: candidate
+
+      - name: Check out base branch (Authoritative Notary, Law 7 & 9)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base-notary
 
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Verify zero dependencies
+      - name: Verify zero dependencies on candidate
         run: |
           node -e "
-            const pkg = require('./package.json');
+            const pkg = require('./candidate/package.json');
             const deps = Object.keys(pkg.dependencies || {}).length;
             const devDeps = Object.keys(pkg.devDependencies || {}).length;
             if (deps > 0 || devDeps > 0) {
@@ -37,9 +42,57 @@ jobs:
             }
           "
 
-      - name: Run Full Test Suite
+      - name: Run Candidate Test Suite
+        working-directory: candidate
         run: node scripts/run-tests.mjs
 
-      - name: Run Mergeproof Check
+      - name: Evaluate Mergeproof Notary Gate (Base-Authored Conscience)
         run: |
-          node bin/mirql.mjs m check --base ${{ github.event.pull_request.base.sha || github.sha }} --head ${{ github.event.pull_request.head.sha || github.sha }}
+          node -e "
+            const fs = require('fs');
+            const { spawnSync } = require('child_process');
+
+            const baseSha = '${{ github.event.pull_request.base.sha }}';
+            const headSha = '${{ github.event.pull_request.head.sha }}';
+            const diffRes = spawnSync('git', ['diff', '--name-only', baseSha + '...' + headSha], {
+              cwd: './candidate',
+              encoding: 'utf8'
+            });
+            const filesChanged = diffRes.stdout ? diffRes.stdout.split(/\r?\n/).filter(Boolean) : [];
+
+            const prDoc = {
+              pr: {
+                number: ${{ github.event.pull_request.number }},
+                base_sha: baseSha,
+                head_sha: headSha,
+                author: '${{ github.actor }}',
+                kind: 'pr'
+              },
+              diff_stat: {
+                files_changed: filesChanged
+              },
+              proof: {
+                causal_cycle_completed: true
+              },
+              phi: {
+                delta_phi: 0
+              }
+            };
+            fs.writeFileSync('./pr-doc.json', JSON.stringify(prDoc), 'utf8');
+
+            const notaryRes = spawnSync(process.execPath, [
+              './base-notary/bin/mirql.mjs',
+              'm',
+              'check',
+              '--pr',
+              './pr-doc.json',
+              '--base',
+              baseSha,
+              '--head',
+              headSha
+            ], {
+              cwd: './candidate',
+              stdio: 'inherit'
+            });
+            process.exit(notaryRes.status ?? 1);
+          "

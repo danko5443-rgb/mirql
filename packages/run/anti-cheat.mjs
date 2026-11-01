@@ -1,116 +1,33 @@
-import { readFileSync, existsSync } from "node:fs";
-import { resolve, join } from "node:path";
+// packages/run/anti-cheat.mjs — AST anti-cheat gate and path policy checker for attempt execution.
+// Primitives are canonically implemented in @mirql/core (Law 13: zero duplication).
 
-/**
- * Default humanOnly patterns if policy/paths.yaml cannot be loaded.
- */
-export const DEFAULT_HUMAN_ONLY_PATTERNS = Object.freeze([
-  "CONSTITUTION.md",
-  "NOT-ROADMAP.md",
-  "policy/**",
-  "conformance/**",
-  ".github/**",
-]);
+import {
+  DEFAULT_HUMAN_ONLY_PATTERNS,
+  DEFAULT_HUMAN_APPROVE_PATTERNS,
+  normalizePath,
+  isPathMatchingPattern,
+  loadPathPolicies,
+  isHumanOnlyPath,
+  isHumanApprovePath,
+  extractBalancedBlock,
+  isEffectivelyEmpty,
+  checkSwallowedExceptions,
+  checkTestWeakenings,
+} from "../core/index.mjs";
 
-/**
- * Default humanApprove patterns if policy/paths.yaml cannot be loaded.
- */
-export const DEFAULT_HUMAN_APPROVE_PATTERNS = Object.freeze([
-  "schemas/**",
-  "packages/core/**",
-  "packages/log/**",
-  "packages/queue/**",
-  "packages/run/verify*",
-  "package.json",
-]);
-
-/**
- * Normalizes a file path:
- * - Backslashes to forward slashes
- * - Strip trailing dots from path segments (preserving . and ..)
- * - Resolve relative `.` and `..` segments
- * - Case-folding (lower-case)
- *
- * @param {string} p
- * @returns {string}
- */
-export function normalizePath(p) {
-  if (typeof p !== "string") return "";
-  const parts = p.replaceAll("\\", "/").split("/");
-  const resolved = [];
-  for (let part of parts) {
-    if (!part || part === ".") continue;
-    if (part !== ".." && part.endsWith(".")) {
-      part = part.replace(/\.+$/, "");
-    }
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      if (resolved.length > 0) resolved.pop();
-    } else {
-      resolved.push(part);
-    }
-  }
-  return resolved.join("/").toLowerCase();
-}
-
-/**
- * Loads path policies from policy/paths.yaml.
- *
- * @param {string} [rootDir=process.cwd()]
- * @returns {{ humanOnly: string[], humanApprove: string[] }}
- */
-export function loadPathPolicies(rootDir = process.cwd()) {
-  const yamlPath = join(rootDir, "policy", "paths.yaml");
-  if (!existsSync(yamlPath)) {
-    return {
-      humanOnly: [...DEFAULT_HUMAN_ONLY_PATTERNS],
-      humanApprove: [...DEFAULT_HUMAN_APPROVE_PATTERNS],
-    };
-  }
-
-  let content;
-  try {
-    content = readFileSync(yamlPath, "utf8");
-  } catch (err) {
-    throw new Error(`Failed to read policy/paths.yaml: ${err.message}`);
-  }
-
-  const lines = content.split(/\r?\n/);
-  let section = null;
-  const humanOnly = [];
-  const humanApprove = [];
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("humanOnly:")) {
-      section = "humanOnly";
-    } else if (trimmed.startsWith("humanApprove:")) {
-      section = "humanApprove";
-    } else if (trimmed.endsWith(":") && !trimmed.startsWith("#")) {
-      section = null;
-    } else if (trimmed.startsWith("-") && section !== null) {
-      const item = trimmed
-        .replace(/^-\s*["']?/, "")
-        .replace(/["']?\s*$/, "");
-      if (item.length > 0) {
-        if (section === "humanOnly") {
-          humanOnly.push(item);
-        } else if (section === "humanApprove") {
-          humanApprove.push(item);
-        }
-      }
-    }
-  }
-
-  for (const def of DEFAULT_HUMAN_ONLY_PATTERNS) {
-    if (!humanOnly.includes(def)) humanOnly.push(def);
-  }
-  for (const def of DEFAULT_HUMAN_APPROVE_PATTERNS) {
-    if (!humanApprove.includes(def)) humanApprove.push(def);
-  }
-
-  return { humanOnly, humanApprove };
-}
+export {
+  DEFAULT_HUMAN_ONLY_PATTERNS,
+  DEFAULT_HUMAN_APPROVE_PATTERNS,
+  normalizePath,
+  isPathMatchingPattern,
+  loadPathPolicies,
+  isHumanOnlyPath,
+  isHumanApprovePath,
+  extractBalancedBlock,
+  isEffectivelyEmpty,
+  checkSwallowedExceptions,
+  checkTestWeakenings,
+};
 
 /**
  * Loads humanOnly patterns from policy/paths.yaml.
@@ -120,61 +37,6 @@ export function loadPathPolicies(rootDir = process.cwd()) {
  */
 export function loadHumanOnlyPatterns(rootDir = process.cwd()) {
   return loadPathPolicies(rootDir).humanOnly;
-}
-
-/**
- * Checks if a normalized file path matches a pattern.
- *
- * @param {string} normalizedPath
- * @param {string} pattern
- * @returns {boolean}
- */
-export function isPathMatchingPattern(normalizedPath, pattern) {
-  const normPat = normalizePath(pattern);
-  if (normPat.endsWith("/**")) {
-    const prefix = normPat.slice(0, -3);
-    return normalizedPath === prefix || normalizedPath.startsWith(prefix + "/");
-  }
-  if (normPat.endsWith("*")) {
-    const prefix = normPat.slice(0, -1);
-    return normalizedPath.startsWith(prefix);
-  }
-  return (
-    normalizedPath === normPat ||
-    normalizedPath.endsWith("/" + normPat)
-  );
-}
-
-/**
- * Checks if a given file path matches any humanOnly pattern.
- *
- * @param {string} filePath
- * @param {string[]} [patterns]
- * @returns {boolean}
- */
-export function isHumanOnlyPath(filePath, patterns) {
-  const norm = normalizePath(filePath);
-  const rulePatterns = patterns ?? loadHumanOnlyPatterns();
-  for (const pattern of rulePatterns) {
-    if (isPathMatchingPattern(norm, pattern)) return true;
-  }
-  return false;
-}
-
-/**
- * Checks if a given file path matches any humanApprove pattern.
- *
- * @param {string} filePath
- * @param {string[]} [patterns]
- * @returns {boolean}
- */
-export function isHumanApprovePath(filePath, patterns) {
-  const norm = normalizePath(filePath);
-  const rulePatterns = patterns ?? loadPathPolicies().humanApprove;
-  for (const pattern of rulePatterns) {
-    if (isPathMatchingPattern(norm, pattern)) return true;
-  }
-  return false;
 }
 
 /**
@@ -214,225 +76,6 @@ export function checkHumanApprovePaths(filePaths = [], patterns) {
   return {
     ok: matched.length === 0,
     paths: matched,
-  };
-}
-
-/**
- * Scans source code for empty catch blocks that swallow exceptions (MP-003).
- * Catches:
- * - `catch(e){;}`
- * - `catch(e){ void e }`
- * - `.catch(() => {})`
- * - `catch(e){ /* ignore *\/ }`
- * - `catch(e){ if(0) throw e }`
- *
- * @param {string} sourceCode
- * @param {string} [filename]
- * @returns {{ ok: boolean, violations: Array<{ file?: string, pattern: string, line: number }> }}
- */
-export function checkSwallowedExceptions(sourceCode, filename) {
-  const violations = [];
-
-  function isEffectivelyEmpty(bodyText) {
-    let cleaned = bodyText
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/\/\/[^\n]*/g, "");
-
-    // Strip dead throws like `if (0) throw e` or `if (false) { throw e; }`
-    cleaned = cleaned.replace(
-      /if\s*\(\s*(?:0|false)\s*\)\s*(?:throw\s+[^;]+;?|\{[^}]*\})/g,
-      "",
-    );
-
-    // Strip string literals (e.g. "}", 'swallowed', etc.)
-    cleaned = cleaned.replace(/(["'`])(?:\\.|(?!\1)[\s\S])*?\1/g, "");
-
-    // Strip void expressions like `void e` or `void 0`
-    cleaned = cleaned.replace(/\bvoid\s+[a-zA-Z0-9_$.]+/g, "");
-
-    // Strip variable declarations with no-op or dead assignments
-    cleaned = cleaned.replace(/\b(?:const|let|var)\s+[a-zA-Z0-9_$]+\s*=\s*;/g, "");
-
-    // Strip semicolons, empty blocks, and whitespace
-    cleaned = cleaned.replace(/[{};]/g, "").trim();
-
-    return cleaned.length === 0;
-  }
-
-  function extractBalancedBlock(startIdx) {
-    let braceCount = 1;
-    let idx = startIdx;
-    let body = "";
-    while (idx < sourceCode.length && braceCount > 0) {
-      const ch = sourceCode[idx];
-      if (ch === '"' || ch === "'" || ch === "`") {
-        const quote = ch;
-        body += ch;
-        idx++;
-        while (idx < sourceCode.length) {
-          const qCh = sourceCode[idx];
-          body += qCh;
-          if (qCh === "\\") {
-            idx++;
-            if (idx < sourceCode.length) body += sourceCode[idx];
-          } else if (qCh === quote) {
-            break;
-          }
-          idx++;
-        }
-      } else if (ch === "/" && sourceCode[idx + 1] === "/") {
-        while (idx < sourceCode.length && sourceCode[idx] !== "\n") {
-          body += sourceCode[idx];
-          idx++;
-        }
-        if (idx < sourceCode.length) body += sourceCode[idx];
-      } else if (ch === "/" && sourceCode[idx + 1] === "*") {
-        body += "/*";
-        idx += 2;
-        while (idx < sourceCode.length - 1 && !(sourceCode[idx] === "*" && sourceCode[idx + 1] === "/")) {
-          body += sourceCode[idx];
-          idx++;
-        }
-        if (idx < sourceCode.length - 1) {
-          body += "*/";
-          idx += 2;
-          continue;
-        }
-      } else {
-        if (ch === "{") braceCount++;
-        else if (ch === "}") braceCount--;
-        if (braceCount > 0) body += ch;
-      }
-      idx++;
-    }
-    return { body, endIdx: idx };
-  }
-
-  // 1. Standard catch blocks: parse with balanced braces (ignoring strings and comments)
-  const catchStartRegex = /catch\s*(?:\([^)]*\))?\s*\{/g;
-  let match;
-  while ((match = catchStartRegex.exec(sourceCode)) !== null) {
-    const { body, endIdx: catchEnd } = extractBalancedBlock(match.index + match[0].length);
-    if (isEffectivelyEmpty(body)) {
-      const upToMatch = sourceCode.slice(0, match.index);
-      const line = upToMatch.split("\n").length;
-      violations.push({
-        file: filename,
-        pattern: sourceCode.slice(match.index, catchEnd),
-        line,
-      });
-    }
-  }
-
-  // 2. Promise .catch(): .catch(() => {}), .catch(e => { void e }), .catch(function() {})
-  const promiseCatchRegex =
-    /\.catch\s*\(\s*(?:async\s*)?(?:(?:(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>\s*\{([^}]*)\})|(?:function\s*\([^)]*\)\s*\{([^}]*)\})|(?:(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>\s*([^,)\n]*)))\s*\)/g;
-  while ((match = promiseCatchRegex.exec(sourceCode)) !== null) {
-    const arrowBody = match[1];
-    const funcBody = match[2];
-    const exprBody = match[3];
-    const body = arrowBody ?? funcBody ?? exprBody ?? "";
-
-    if (isEffectivelyEmpty(body)) {
-      const upToMatch = sourceCode.slice(0, match.index);
-      const line = upToMatch.split("\n").length;
-      violations.push({
-        file: filename,
-        pattern: match[0],
-        line,
-      });
-    }
-  }
-
-  // 3. Global uncaughtException / unhandledRejection swallowing
-  // Captures on, once, addListener, prependListener with block or concise arrow handlers
-  const uncaughtHeaderRegex =
-    /process\s*\.\s*(?:on|once|addListener|prependListener)\s*\(\s*['"](?:uncaughtException|unhandledRejection)['"]\s*,\s*(?:async\s*)?(?:(?:(?:(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>|function\s*(?:[a-zA-Z0-9_$]+\s*)?\([^)]*\))\s*(\{)?)|([a-zA-Z0-9_$.]+))/g;
-
-  while ((match = uncaughtHeaderRegex.exec(sourceCode)) !== null) {
-    const hasBrace = match[1] === "{";
-    let handlerBody = "";
-    let uncaughtEnd = match.index + match[0].length;
-
-    if (hasBrace) {
-      const res = extractBalancedBlock(match.index + match[0].length);
-      handlerBody = res.body;
-      uncaughtEnd = res.endIdx;
-    } else {
-      let pCount = 1;
-      let idx = match.index + match[0].length;
-      while (idx < sourceCode.length && pCount > 0) {
-        if (sourceCode[idx] === "(") pCount++;
-        else if (sourceCode[idx] === ")") pCount--;
-        if (pCount > 0) handlerBody += sourceCode[idx];
-        idx++;
-      }
-      uncaughtEnd = idx;
-    }
-
-    // F1 (string-concealment): comments, string literals and template
-    // literals are stripped from the handler body BEFORE the rethrow/exit
-    // test, so a `process.exit` that only exists inside a string
-    // ("call process.exit(1)") or a comment can never satisfy the gate.
-    const strippedBody = handlerBody
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/\/\/[^\n]*/g, "")
-      .replace(/(["'`])(?:\\.|(?!\1)[\s\S])*?\1/g, "");
-
-    if (isEffectivelyEmpty(handlerBody) || !/(?:process\.exit|throw\b)/.test(strippedBody)) {
-      const upToMatch = sourceCode.slice(0, match.index);
-      const line = upToMatch.split("\n").length;
-      violations.push({
-        file: filename,
-        pattern: sourceCode.slice(match.index, uncaughtEnd),
-        line,
-        detail: "Empty or non-rethrowing uncaughtException / unhandledRejection handler",
-      });
-    }
-  }
-
-  return {
-    ok: violations.length === 0,
-    violations,
-  };
-}
-
-/**
- * Scans source code for test weakenings (MP-002):
- * - `.skip`: `it.skip`, `test.skip`, `describe.skip`
- * - `.only`: `it.only`, `test.only`, `describe.only`
- * - `.todo`: `it.todo`, `test.todo`
- * - `{skip:true}` / `{skip: 1}`
- * - `t.skip()`
- * - `describe['skip']`, `it['skip']`, `test['skip']`
- * - `xit`, `xtest`, `xdescribe`
- *
- * @param {string} sourceCode
- * @param {string} [filename]
- * @returns {{ ok: boolean, count: number, details: string[] }}
- */
-export function checkTestWeakenings(sourceCode, filename) {
-  const patterns = [
-    /\b(?:it|test|describe|context|suite)\s*\.\s*(?:skip|only|todo)\b/g,
-    /\bx(?:it|test|describe)\b/g,
-    /\b(?:it|test|describe)\s*\[\s*['"`](?:skip|only|todo)['"`]\s*\]/g,
-    /\bt\s*\.\s*(?:skip|todo)\s*\(/g,
-    /\{\s*skip\s*:\s*(?:true|1)\s*\}/g,
-  ];
-
-  let totalCount = 0;
-  for (const re of patterns) {
-    const matches = sourceCode.match(re);
-    if (matches) totalCount += matches.length;
-  }
-
-  return {
-    ok: totalCount === 0,
-    count: totalCount,
-    details:
-      totalCount > 0
-        ? [`Found ${totalCount} test weakening construct(s) in ${filename ?? "source"}`]
-        : [],
   };
 }
 
@@ -501,102 +144,86 @@ export function checkAntiCheat(input = {}) {
         rule: "MP-002",
         violation: "TEST_DELETED",
         verdict: "reject",
-        detail: "Test weakenings (skipped/only/todo tests) detected in source.",
+        detail: weakenCheck.details.join("; "),
       };
     }
   }
 
-  // 3. MP-003: ANTI_CHEAT_VIOLATION (swallowed exceptions)
-  // Do NOT trust self-reported violations_count if flags or details exist!
-  const hasSwallowedFlags =
-    (Array.isArray(antiCheat.flags) &&
-      (antiCheat.flags.includes("SWALLOWED_EXCEPTION") ||
-        antiCheat.flags.includes("EMPTY_CATCH_BLOCK"))) ||
-    (Array.isArray(antiCheat.details) && antiCheat.details.length > 0);
+  // 3. MP-003: ANTI_CHEAT_VIOLATION
+  const hasAntiCheatFlags =
+    (typeof antiCheat.violations_count === "number" &&
+      antiCheat.violations_count > 0) ||
+    (Array.isArray(antiCheat.flags) && antiCheat.flags.length > 0);
 
-  if (hasSwallowedFlags) {
+  if (hasAntiCheatFlags) {
     return {
       ok: false,
       rule: "MP-003",
       violation: "ANTI_CHEAT_VIOLATION",
       verdict: "reject",
       detail:
-        evidence.detail ??
-        "PR swallowed error exceptions using empty catch blocks.",
-      flags: antiCheat.flags ?? ["SWALLOWED_EXCEPTION"],
+        antiCheat.detail ??
+        "Anti-cheat violation detected: empty catch block, swallowed exception, or illicit mock/stub.",
+      flags: antiCheat.flags ?? [],
     };
   }
 
   if (typeof input.sourceCode === "string") {
-    const catchCheck = checkSwallowedExceptions(input.sourceCode);
-    if (!catchCheck.ok) {
+    const swallowCheck = checkSwallowedExceptions(input.sourceCode);
+    if (!swallowCheck.ok) {
       return {
         ok: false,
         rule: "MP-003",
         violation: "ANTI_CHEAT_VIOLATION",
         verdict: "reject",
-        detail: "Source contains empty catch block swallowing exceptions.",
-        flags: ["SWALLOWED_EXCEPTION"],
+        detail: `Found ${swallowCheck.violations.length} swallowed exception(s)`,
+        flags: swallowCheck.violations.map((v) => v.pattern),
       };
     }
   }
 
   // 4. MP-004: STALE_BASE
-  const isStaleBase =
-    (evidence.claimed_base_sha &&
-      evidence.current_tip_sha &&
-      evidence.claimed_base_sha !== evidence.current_tip_sha) ||
-    (typeof evidence.elapsed_since_lease_ms === "number" &&
-      typeof evidence.lease_ttl_ms === "number" &&
-      evidence.elapsed_since_lease_ms > evidence.lease_ttl_ms);
-
-  if (isStaleBase) {
+  const claimedBase = evidence.claimed_base_sha ?? input.claimed_base_sha;
+  const currentTip = evidence.current_tip_sha ?? input.current_tip_sha;
+  if (claimedBase && currentTip && claimedBase !== currentTip) {
     return {
       ok: false,
       rule: "MP-004",
       violation: "STALE_BASE",
       verdict: "reject",
-      detail:
-        evidence.detail ??
-        "Claimed base SHA does not match current tip or lease TTL expired.",
+      detail: `PR base SHA ${claimedBase} is stale against target tip ${currentTip}.`,
     };
   }
 
-  // 5. MP-005: UNCITED_SURFACE / humanApprove paths
-  const isUncitedSurface =
-    (Array.isArray(surface.uncited_commands) && surface.uncited_commands.length > 0) ||
-    (typeof surface.delta_count === "number" &&
-      surface.delta_count > 0 &&
-      !surface.roadmap_ref);
+  // 5. MP-005: UNCITED_SURFACE / humanApprove
+  const hasUncitedSurface =
+    Array.isArray(surface.uncited_commands) &&
+    surface.uncited_commands.length > 0;
+
+  const approveCheck = checkHumanApprovePaths(filesChanged);
+  const touchesHumanApprove = !approveCheck.ok;
+
+  const isHumanApproved =
+    Boolean(input.human_approved || input.human_approval || evidence.human_approval);
 
   // C1: causal proof STRICTLY requires the completed triple-execution cycle.
   // A self-reported `suite_pass_head` is not causal evidence and must not
   // unlock humanApprove surfaces (MP-005).
   const hasCausalProof = proof?.causal_cycle_completed === true;
 
-  const humanApproveCheck = checkHumanApprovePaths(filesChanged);
-  const touchesHumanApproveWithoutApproval =
-    !humanApproveCheck.ok &&
-    !hasCausalProof &&
-    !input.human_approved &&
-    !input.human_approval &&
-    !evidence.human_approval;
-
-  if (isUncitedSurface || touchesHumanApproveWithoutApproval) {
+  if (hasUncitedSurface || (touchesHumanApprove && !hasCausalProof && !isHumanApproved)) {
     return {
       ok: false,
       rule: "MP-005",
       violation: "UNCITED_SURFACE",
       verdict: "needs_human",
-      detail:
-        evidence.detail ??
-        (isUncitedSurface
-          ? "PR modified public surface without cited roadmap reference."
-          : `PR touched humanApprove path(s) [${humanApproveCheck.paths.join(", ")}] without affirmative human authorization.`),
+      detail: hasUncitedSurface
+        ? `PR introduces uncited surface commands: ${surface.uncited_commands.join(", ")}`
+        : `PR touches humanApprove path(s) [${approveCheck.paths.join(", ")}] without causal proof; requires human sign-off.`,
     };
   }
 
-  // All rules satisfied: auto_merge
+  // All rules passed -> MP-000 auto_merge
   return {
     ok: true,
     rule: "MP-000",

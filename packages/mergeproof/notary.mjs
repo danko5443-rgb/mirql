@@ -156,6 +156,19 @@ function updateKeyring(mirqlDir, kp) {
     }
   }
   if (keyring[kp.keyId]?.publicKey === kp.publicKey) return;
+
+  // Law 7 / Law 3: Refuse to overwrite an existing registered notary key without owner authorization
+  const existing = keyring[NOTARY_WRITER_NS] ?? keyring[kp.keyId];
+  if (existing) {
+    const existingPub = typeof existing === "string" ? existing : existing.publicKey;
+    if (existingPub && existingPub !== kp.publicKey) {
+      throw notaryError(
+        "INTEGRITY_VIOLATION",
+        `Keyring at ${keyringPath} already registers a different notary key; refusing to overwrite without human:owner authorization.`,
+      );
+    }
+  }
+
   const entry = { ns: NOTARY_WRITER_NS, publicKey: kp.publicKey };
   keyring[kp.keyId] = entry;
   keyring[NOTARY_WRITER_NS] = entry;
