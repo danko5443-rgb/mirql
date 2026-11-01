@@ -433,5 +433,76 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
         reactive.close();
       }
     });
+
+    it("handles a burst of warrant submissions sequentially without stranding any jobs", async () => {
+      const ledgerDir = join(tempDir, "ledger");
+      mkdirSync(ledgerDir, { recursive: true });
+      const ledgerPath = join(ledgerDir, "events.jsonl");
+      writeFileSync(ledgerPath, "", "utf8");
+
+      const w1 = makeValidWarrant();
+      const w2 = makeValidWarrant();
+      const w3 = makeValidWarrant();
+      const warrantMap = new Map([
+        [w1.id, w1],
+        [w2.id, w2],
+        [w3.id, w3],
+      ]);
+
+      const reactive = await runSupervisorReactive({
+        mirqlDir: tempDir,
+        debounceMs: 10,
+        skipPidFile: true,
+        noHeartbeatTicker: true,
+        leaseJob: () => leaseNextJob(tempDir),
+        getWarrant: (wId) => warrantMap.get(wId) || null,
+        builderCommand: "exit 0",
+        verifyOptions: {
+          runCheck: ({ stage }) => ({
+            exitCode: stage === "red_on_base" || stage === "re_red_on_revert" ? 1 : 0,
+          }),
+        },
+      });
+
+      try {
+        const outcomesReceived = [];
+        const outcomePromise = new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error(`Timeout: received ${outcomesReceived.length} of 3 outcomes`));
+          }, 6000);
+          reactive.watcher.on("event", (evt) => {
+            if (evt.type === "attempt.outcome") {
+              outcomesReceived.push(evt);
+              if (outcomesReceived.length === 3) {
+                clearTimeout(timeout);
+                resolve(outcomesReceived);
+              }
+            }
+          });
+        });
+
+        // Submit 3 warrants in rapid burst
+        submitWarrant(tempDir, w1, { repoRoot: ROOT });
+        submitWarrant(tempDir, w2, { repoRoot: ROOT });
+        submitWarrant(tempDir, w3, { repoRoot: ROOT });
+
+        const outcomes = await outcomePromise;
+        assert.equal(outcomes.length, 3);
+        assert.equal(reactive.getStepsExecuted(), 3);
+
+        const outcomeWarrantIds = outcomes.map((o) => o.payload.warrant_id);
+        assert.ok(outcomeWarrantIds.includes(w1.id));
+        assert.ok(outcomeWarrantIds.includes(w2.id));
+        assert.ok(outcomeWarrantIds.includes(w3.id));
+
+        // Epochs must be strictly monotonic safe integers
+        const epochs = outcomes.map((o) => o.epoch);
+        for (let i = 1; i < epochs.length; i++) {
+          assert.ok(epochs[i] > epochs[i - 1], "Epochs must strictly increase");
+        }
+      } finally {
+        reactive.close();
+      }
+    });
   });
 });

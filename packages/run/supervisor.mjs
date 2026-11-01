@@ -407,8 +407,10 @@ export async function runSupervisorReactive(options = {}) {
     inFlight = true;
     let lastResult = null;
     try {
+      let leasedThisPass = false;
       do {
         queuedRerun = false;
+        leasedThisPass = false;
 
         let warrant = options.warrant;
         let epoch = options.epoch ?? 1;
@@ -419,6 +421,7 @@ export async function runSupervisorReactive(options = {}) {
           if (!leaseRes || !leaseRes.ok || leaseRes.status !== "leased") {
             continue;
           }
+          leasedThisPass = true;
           epoch = leaseRes.epoch ?? epoch;
           jobId = leaseRes.job_id ?? jobId;
           if (leaseRes.warrant) {
@@ -461,7 +464,7 @@ export async function runSupervisorReactive(options = {}) {
             process.stderr.write(`[mirql-supervisor-reactive] Execution error: ${stepErr.message}\n`);
           }
         }
-      } while (queuedRerun && !watcher.closed);
+      } while ((queuedRerun || leasedThisPass) && !watcher.closed);
     } finally {
       inFlight = false;
     }
