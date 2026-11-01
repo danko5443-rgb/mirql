@@ -464,7 +464,14 @@ export async function runSupervisorReactive(options = {}) {
 
         let currentEvt = triggerEvent;
         if (typeof options.leaseJob !== "function") {
-          currentEvt = pendingEvents.shift() ?? triggerEvent;
+          currentEvt = pendingEvents.shift() ?? null;
+          if (!currentEvt && !triggerEvent) {
+            break;
+          }
+          if (!currentEvt) {
+            currentEvt = triggerEvent;
+            triggerEvent = null;
+          }
         }
 
         let warrant = options.warrant;
@@ -507,7 +514,7 @@ export async function runSupervisorReactive(options = {}) {
             warrant = leaseRes.warrant;
           } else if (typeof options.getWarrant === "function") {
             try {
-              warrant = options.getWarrant(leaseRes.warrant_id);
+              warrant = await options.getWarrant(leaseRes.warrant_id);
             } catch (wErr) {
               warrant = null;
             }
