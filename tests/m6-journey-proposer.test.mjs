@@ -632,5 +632,49 @@ describe("Milestone M6: Journey Harness & 1-Tap Proposer", () => {
       assert.equal(brokenRes.gap.payload.step_failed, "mirql i genesis");
       assert.deepEqual(brokenRes.regression.payload.minimal_repro, ["mirql i genesis"]);
     });
+
+    it("B7: kill and resume repeated transitions generate unique idempotency keys in the ledger (Law 4)", () => {
+      const prop = createProposal(mirqlDir, {
+        roadmap_ref: "M6",
+        title: "Test proposal for kill/resume cycle",
+        description: "Testing repeatable sovereignty actions",
+      });
+
+      // Cycle 1: kill then resume
+      const kill1 = actOnItem(mirqlDir, {
+        decision: "kill",
+        target_id: prop.proposal_id,
+        key: humanKeyFile,
+      }, { key: humanKeyFile });
+
+      const resume1 = actOnItem(mirqlDir, {
+        decision: "resume",
+        target_id: prop.proposal_id,
+        key: humanKeyFile,
+      }, { key: humanKeyFile });
+
+      // Cycle 2: kill then resume
+      const kill2 = actOnItem(mirqlDir, {
+        decision: "kill",
+        target_id: prop.proposal_id,
+        key: humanKeyFile,
+      }, { key: humanKeyFile });
+
+      const resume2 = actOnItem(mirqlDir, {
+        decision: "resume",
+        target_id: prop.proposal_id,
+        key: humanKeyFile,
+      }, { key: humanKeyFile });
+
+      // Verify all 4 idempotency keys are unique
+      const keys = [
+        kill1.event.idempotency_key,
+        resume1.event.idempotency_key,
+        kill2.event.idempotency_key,
+        resume2.event.idempotency_key,
+      ];
+      const uniqueKeys = new Set(keys);
+      assert.equal(uniqueKeys.size, 4, "Every kill/resume event must have a distinct idempotency key");
+    });
   });
 });

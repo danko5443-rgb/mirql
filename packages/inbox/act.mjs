@@ -241,8 +241,13 @@ export function actOnItem(mirqlDir, actionInput, options = {}) {
       warrantHash = sha256(jcs(warrantDoc));
     }
 
-    // Deterministic deduplication idempotency key (B2)
-    const idempotencyKey = options.idempotencyKey || `act:${decision}:${targetId}`;
+    // B7 / Law 4: Deterministic idempotency key for single-action decisions (approve/reject),
+    // and sequence-suffixed key for multi-action repeatable transitions (kill/resume).
+    const idempotencyKey =
+      options.idempotencyKey ||
+      (decision === "approve" || decision === "reject"
+        ? `act:${decision}:${targetId}`
+        : `act:${decision}:${targetId}:${seq}`);
 
     const envelope = {
       v: 1,

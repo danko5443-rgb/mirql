@@ -70,6 +70,20 @@ export function appendEvent(mirqlDir, signedEvent) {
   mkdirSync(cacheDir, { recursive: true });
 
   const eventsPath = join(ledgerDir, "events.jsonl");
+
+  // Law 4 deduplication: if identical (writer.ns, idempotency_key) already exists, skip duplicate write
+  if (signedEvent.idempotency_key && signedEvent.writer?.ns && existsSync(eventsPath)) {
+    const { events: existing } = readEvents(mirqlDir);
+    const dup = existing.find(
+      (e) =>
+        e.idempotency_key === signedEvent.idempotency_key &&
+        e.writer?.ns === signedEvent.writer?.ns
+    );
+    if (dup) {
+      return dup;
+    }
+  }
+
   const line = jcs(signedEvent) + "\n";
   appendFileSync(eventsPath, line, "utf8");
 
