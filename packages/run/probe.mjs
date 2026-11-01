@@ -1,5 +1,6 @@
-import { join, resolve } from "node:path";
-import { readFileSync, existsSync } from "node:fs";
+import { join, resolve, dirname } from "node:path";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { EXIT_CODES } from "../core/index.mjs";
 import { computePhi } from "./phi.mjs";
 import { runMutationTesting } from "./mutant.mjs";
@@ -55,6 +56,84 @@ export function loadProbeConfig(probeName, rootDir = process.cwd()) {
     }
   }
   return config;
+}
+
+/**
+ * Lists changed non-test source files in the workspace diff (issue #14):
+ * the incremental mutation gate must measure the code a change actually
+ * touches, not files picked by hand.
+ *
+ * @param {string} workspaceDir
+ * @param {string} [base="HEAD~1"] - git ref to diff against
+ * @returns {{ ok: boolean, files?: string[], error?: string }}
+ */
+export function deriveChangedSources(workspaceDir, base = "HEAD~1") {
+  const res = spawnSync("git", ["diff", "--name-only", base], {
+    cwd: workspaceDir,
+    encoding: "utf8",
+    timeout: 15000,
+  });
+  if (res.status !== 0) {
+    const err = (res.stderr || res.stdout || `git diff exit ${res.status}`).trim();
+    return { ok: false, error: `cannot measure diff against ${base}: ${err}` };
+  }
+  const files = String(res.stdout || "")
+    .split(/\r?\n/)
+    .map((f) => f.trim())
+    .filter(Boolean)
+    .filter((f) => f.endsWith(".mjs"))
+    .filter((f) => !f.includes(".test."))
+    .filter((f) => /^(packages|bin|scripts)\//.test(f));
+  return { ok: true, files };
+}
+
+/**
+ * Finds the test files that actually IMPORT the given source (real dependency
+ * edges — not name guessing). Scans the workspace's tests/ and test/
+ * directories for static and dynamic relative imports resolving to the source.
+ *
+ * @param {string} workspaceDir
+ * @param {string} sourceRel - source path relative to workspaceDir (posix separators)
+ * @returns {string[]} absolute paths of importing test files (sorted)
+ */
+export function findImportingTests(workspaceDir, sourceRel) {
+  const sourceAbs = resolve(workspaceDir, sourceRel).toLowerCase();
+  const testDirs = ["tests", "test"]
+    .map((d) => join(workspaceDir, d))
+    .filter((d) => existsSync(d));
+
+  const importers = [];
+  for (const testDir of testDirs) {
+    let entries;
+    try {
+      entries = readdirSync(testDir, { recursive: true, withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".mjs")) continue;
+      const testAbs = join(entry.parentPath ?? testDir, entry.name);
+      let content;
+      try {
+        content = readFileSync(testAbs, "utf8");
+      } catch {
+        continue;
+      }
+      const specifiers = [...content.matchAll(/\bfrom\s*["']([^"']+)["']/g)].map((m) => m[1]);
+      for (const dyn of content.matchAll(/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g)) {
+        specifiers.push(dyn[1]);
+      }
+      for (const spec of specifiers) {
+        if (!spec.startsWith(".") && !spec.startsWith("/")) continue;
+        const resolvedSpec = resolve(dirname(testAbs), spec).toLowerCase();
+        if (resolvedSpec === sourceAbs) {
+          importers.push(testAbs);
+          break;
+        }
+      }
+    }
+  }
+  return [...new Set(importers)].sort();
 }
 
 /**
@@ -202,14 +281,14 @@ export function runProbe(options = {}) {
     }
   } else if (probeName === "mutants") {
     const minKillRateBp = Math.max(8000, config?.min_kill_rate_bp ?? 8000);
-    const sourcePath = options.source ?? options.target;
-    const testPath = options.test;
+    const startedMs = Date.now();
 
-    if (sourcePath && testPath) {
+    if (options.source && options.test) {
+      // Explicit single-file mode (mirql-run probe --type mutants --source --test)
       try {
         const mutantRes = runMutationTesting({
-          sourcePath,
-          testPath,
+          sourcePath: options.source ?? options.target,
+          testPath: options.test,
           killThresholdBp: minKillRateBp,
         });
         const passed = mutantRes.ok;
@@ -224,7 +303,8 @@ export function runProbe(options = {}) {
           mutants_killed: mutantRes.mutants_killed,
           mutants_survived: mutantRes.mutants_survived,
           failures: passed ? 0 : 1,
-          duration_ms: 50,
+          duration_ms: Date.now() - startedMs,
+          error: mutantRes.error,
         };
       } catch (err) {
         probeResult = {
@@ -235,20 +315,110 @@ export function runProbe(options = {}) {
           kill_rate_bp: 0,
           min_kill_rate_bp: minKillRateBp,
           failures: 1,
-          duration_ms: 0,
+          duration_ms: Date.now() - startedMs,
           error: err instanceof Error ? err.message : String(err),
         };
       }
     } else {
-      // Fail closed: without target source and test paths, report not_implemented
-      probeResult = {
-        name: config?.name ?? "incremental_mutation_density",
-        type: "mutants",
-        status: "not_implemented",
-        passed: false,
-        failures: 1,
-        duration_ms: 0,
-      };
+      // Incremental mode (issue #14): the declarative command in probes.toml
+      // (`probe --type mutants`, no file arguments) derives targets from the
+      // workspace diff and pairs each changed source with the test files that
+      // actually import it. Fail closed on unmeasurable or uncovered changes.
+      const base = typeof options.base === "string" && options.base.trim() !== ""
+        ? options.base.trim()
+        : "HEAD~1";
+      const diff = deriveChangedSources(workspaceDir, base);
+      if (!diff.ok) {
+        probeResult = {
+          name: config?.name ?? "incremental_mutation_density",
+          type: "mutants",
+          status: "fail",
+          passed: false,
+          kill_rate_bp: 0,
+          min_kill_rate_bp: minKillRateBp,
+          failures: 1,
+          duration_ms: Date.now() - startedMs,
+          error: diff.error,
+        };
+      } else if (diff.files.length === 0) {
+        probeResult = {
+          name: config?.name ?? "incremental_mutation_density",
+          type: "mutants",
+          status: "pass",
+          passed: true,
+          kill_rate_bp: 10000,
+          min_kill_rate_bp: minKillRateBp,
+          mutants_total: 0,
+          mutants_killed: 0,
+          mutants_survived: 0,
+          tested_files: [],
+          failures: 0,
+          duration_ms: Date.now() - startedMs,
+          summary: `No changed source files in diff against ${base}: nothing to mutate`,
+        };
+      } else {
+        const fileResults = [];
+        for (const sourceRel of diff.files) {
+          const sourceAbs = join(workspaceDir, sourceRel);
+          if (!existsSync(sourceAbs)) {
+            fileResults.push({ source: sourceRel, ok: false, error: "SOURCE_MISSING" });
+            continue;
+          }
+          const importingTests = findImportingTests(workspaceDir, sourceRel);
+          if (importingTests.length === 0) {
+            // Changed code with no test importing it cannot prove any kill
+            // rate — the M4 invariant is unmet, not unknown.
+            fileResults.push({
+              source: sourceRel,
+              ok: false,
+              error: "NO_COVERING_TEST",
+            });
+            continue;
+          }
+          try {
+            const res = runMutationTesting({
+              sourcePath: sourceAbs,
+              testPath: importingTests,
+              killThresholdBp: minKillRateBp,
+            });
+            fileResults.push({
+              source: sourceRel,
+              ok: res.ok,
+              kill_rate_bp: res.kill_rate_bp,
+              mutants_total: res.mutants_total,
+              mutants_killed: res.mutants_killed,
+              mutants_survived: res.mutants_survived,
+              error: res.error,
+            });
+          } catch (err) {
+            fileResults.push({
+              source: sourceRel,
+              ok: false,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+
+        const failing = fileResults.filter((f) => !f.ok);
+        const measured = fileResults.filter((f) => Number.isSafeInteger(f.kill_rate_bp));
+        probeResult = {
+          name: config?.name ?? "incremental_mutation_density",
+          type: "mutants",
+          status: failing.length === 0 ? "pass" : "fail",
+          passed: failing.length === 0,
+          kill_rate_bp: measured.length > 0 ? Math.min(...measured.map((f) => f.kill_rate_bp)) : 0,
+          min_kill_rate_bp: minKillRateBp,
+          mutants_total: fileResults.reduce((n, f) => n + (f.mutants_total ?? 0), 0),
+          mutants_killed: fileResults.reduce((n, f) => n + (f.mutants_killed ?? 0), 0),
+          mutants_survived: fileResults.reduce((n, f) => n + (f.mutants_survived ?? 0), 0),
+          tested_files: fileResults,
+          failures: failing.length,
+          duration_ms: Date.now() - startedMs,
+          error: failing.length > 0
+            ? `${failing.length} changed file(s) below the kill-rate floor or uncovered: ${failing.map((f) => `${f.source} (${f.error ?? `${f.kill_rate_bp} bp`})`).join(", ")}`
+            : undefined,
+        };
+      }
     }
   } else {
     // Probes that cannot be measured directly report not_implemented

@@ -431,11 +431,15 @@ export function compute(a, b) {
   });
 
   describe("7. Probe mutants wiring", () => {
-    it("fails closed with not_implemented when source and test are omitted", () => {
-      const res = runProbe({ probe: "mutants", dir: tempDir });
+    it("fails closed (fail, not not_implemented) outside a git workspace when source and test are omitted", () => {
+      // Issue #14: omitting files is no longer "not implemented" — the probe
+      // derives targets from the workspace diff. In a non-git workspace the
+      // diff is unmeasurable, so it must fail closed with a git error.
+      const res = runProbe({ probe: "mutants", dir: tempDir, workspaceDir: tempDir });
       assert.equal(res.ok, false);
-      assert.equal(res.probe.status, "not_implemented");
+      assert.equal(res.probe.status, "fail");
       assert.equal(res.probe.type, "mutants");
+      assert.match(res.probe.error, /cannot measure diff/);
     });
 
     it("runs mutants probe successfully when target source and test are provided", () => {
