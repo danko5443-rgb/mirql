@@ -47,35 +47,87 @@ jobs:
         run: node scripts/run-tests.mjs
 
       - name: Evaluate Mergeproof Notary Gate (Base-Authored Conscience)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           node -e "
             const fs = require('fs');
             const { spawnSync } = require('child_process');
 
-            const baseSha = '${{ github.event.pull_request.base.sha }}';
-            const headSha = '${{ github.event.pull_request.head.sha }}';
-            const diffRes = spawnSync('git', ['diff', '--name-only', baseSha + '...' + headSha], {
+            const baseSha = process.env.BASE_SHA;
+            const headSha = process.env.HEAD_SHA;
+            const prNumber = parseInt(process.env.PR_NUMBER || '0', 10);
+            const prAuthor = process.env.PR_AUTHOR || 'unknown';
+
+            // Authoritative git diff (Law 7): fail closed if diff command fails
+            const diffRes = spawnSync('git', ['diff', '--name-status', baseSha + '...' + headSha], {
               cwd: './candidate',
-              encoding: 'utf8'
+              encoding: 'utf8',
+              timeout: 15000
             });
-            const filesChanged = diffRes.stdout ? diffRes.stdout.split(/\r?\n/).filter(Boolean) : [];
+            if (diffRes.status !== 0) {
+              console.error('Git diff check failed against target tip:', diffRes.stderr || diffRes.stdout);
+              process.exit(1);
+            }
+
+            const lines = diffRes.stdout ? diffRes.stdout.split(/\r?\n/).filter(Boolean) : [];
+            const filesChanged = [];
+            const testsDeleted = [];
+            for (const line of lines) {
+              const parts = line.split(/\s+/);
+              const status = parts[0];
+              const file = parts[parts.length - 1];
+              if (file) {
+                filesChanged.push(file);
+                if (status.startsWith('D') && (file.startsWith('tests/') || file.includes('.test.'))) {
+                  testsDeleted.push(file);
+                }
+              }
+            }
+
+            // Real base-authored phi complexity computation (Law 13)
+            let deltaPhi = 0;
+            try {
+              const { computePhi } = require('./base-notary/packages/run/phi.mjs');
+              const phiBase = computePhi('./base-notary');
+              const phiHead = computePhi('./candidate');
+              if (Number.isSafeInteger(phiBase?.total) && Number.isSafeInteger(phiHead?.total)) {
+                deltaPhi = phiHead.total - phiBase.total;
+              }
+            } catch (_) {
+              try {
+                const { computePhi } = require('./candidate/packages/run/phi.mjs');
+                const phiBase = computePhi('./base-notary');
+                const phiHead = computePhi('./candidate');
+                if (Number.isSafeInteger(phiBase?.total) && Number.isSafeInteger(phiHead?.total)) {
+                  deltaPhi = phiHead.total - phiBase.total;
+                }
+              } catch (_) {}
+            }
 
             const prDoc = {
               pr: {
-                number: ${{ github.event.pull_request.number }},
+                number: prNumber,
                 base_sha: baseSha,
                 head_sha: headSha,
-                author: '${{ github.actor }}',
+                author: prAuthor,
                 kind: 'pr'
               },
               diff_stat: {
                 files_changed: filesChanged
               },
+              evidence: {
+                tests_deleted: testsDeleted
+              },
               proof: {
-                causal_cycle_completed: true
+                causal_cycle_completed: false,
+                suite_pass_head: true
               },
               phi: {
-                delta_phi: 0
+                delta_phi: deltaPhi
               }
             };
             fs.writeFileSync('./pr-doc.json', JSON.stringify(prDoc), 'utf8');

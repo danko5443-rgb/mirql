@@ -143,7 +143,68 @@ export function resolveDeltaPhi(doc = {}) {
 }
 
 /**
- * Queries git diff --name-only base...head if git and a repository are available.
+ * Queries git diff --name-status base...head if git and a repository are available.
+ * Returns { ok: true, files: string[], deletedFiles: string[] } on success,
+ * or { ok: false, error: string, files: [], deletedFiles: [] } on failure.
+ *
+ * @param {string} baseSha
+ * @param {string} headSha
+ * @param {string} [repoDir]
+ * @returns {{ ok: boolean, error?: string, files: string[], deletedFiles: string[] }}
+ */
+export function getGitDiffInfo(baseSha, headSha, repoDir = process.cwd()) {
+  if (!baseSha || !headSha) {
+    return { ok: true, files: [], deletedFiles: [] };
+  }
+  const gitDir = join(repoDir, ".git");
+  if (!existsSync(gitDir)) {
+    return {
+      ok: false,
+      error: `Directory ${repoDir} is not a git repository`,
+      files: [],
+      deletedFiles: [],
+    };
+  }
+  try {
+    const res = spawnSync(
+      "git",
+      ["diff", "--name-status", `${baseSha}...${headSha}`],
+      { cwd: repoDir, encoding: "utf8", timeout: 10000 },
+    );
+    if (res.status !== 0) {
+      const err = res.stderr ? res.stderr.trim() : `git exit code ${res.status}`;
+      return { ok: false, error: err, files: [], deletedFiles: [] };
+    }
+    const lines = (res.stdout || "")
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const files = [];
+    const deletedFiles = [];
+    for (const line of lines) {
+      const parts = line.split(/\s+/);
+      const status = parts[0];
+      const filePath = parts[parts.length - 1];
+      if (filePath) {
+        files.push(filePath);
+        if (status.startsWith("D")) {
+          deletedFiles.push(filePath);
+        }
+      }
+    }
+    return { ok: true, files, deletedFiles };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      files: [],
+      deletedFiles: [],
+    };
+  }
+}
+
+/**
+ * Backward compatibility alias for getGitDiffInfo.files.
  *
  * @param {string} baseSha
  * @param {string} headSha
@@ -151,23 +212,8 @@ export function resolveDeltaPhi(doc = {}) {
  * @returns {string[]}
  */
 export function getGitDiffFiles(baseSha, headSha, repoDir = process.cwd()) {
-  if (!baseSha || !headSha || !existsSync(join(repoDir, ".git"))) {
-    return [];
-  }
-  try {
-    const res = spawnSync(
-      "git",
-      ["diff", "--name-only", `${baseSha}...${headSha}`],
-      { cwd: repoDir, encoding: "utf8", timeout: 10000 },
-    );
-    if (res.status === 0 && res.stdout) {
-      return res.stdout
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .filter(Boolean);
-    }
-  } catch {}
-  return [];
+  const info = getGitDiffInfo(baseSha, headSha, repoDir);
+  return info.ok ? info.files : [];
 }
 
 /**
@@ -200,25 +246,11 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
   const filesChanged = collectChangedFiles(prDoc);
 
   // Law 7 (Notary Outside Blast Radius): cross-check against actual git diff if repo is available
-  const baseSha = options.targetTipSha ?? pr.base_sha ?? evidence.claimed_base_sha;
-  const headSha = options.expectedHeadSha ?? pr.head_sha ?? evidence.current_tip_sha;
+  const assertedBase = options.targetTipSha;
+  const assertedHead = options.expectedHeadSha;
+  const baseSha = assertedBase ?? pr.base_sha ?? evidence.claimed_base_sha;
+  const headSha = assertedHead ?? pr.head_sha ?? evidence.current_tip_sha;
   const repoDir = options.repoDir ?? options.rootDir ?? process.cwd();
-
-  if (baseSha && headSha) {
-    const gitFiles = getGitDiffFiles(baseSha, headSha, repoDir);
-    for (const gf of gitFiles) {
-      const norm = normalizePath(gf);
-      if (!filesChanged.includes(norm)) {
-        filesChanged.push(norm);
-      }
-    }
-  }
-
-  const policies = loadPathPolicies(options.rootDir);
-
-  // Law 3 & 6: A PR document CANNOT self-approve via inline json flags!
-  // humanApproved is ONLY valid if supplied through options from an external signed event or verified caller.
-  const humanApproved = options.humanApproved === true;
 
   const checks = {
     human_only: true,
@@ -229,6 +261,37 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     phi: true,
     proof: true,
   };
+
+  let gitDeletedFiles = [];
+  if (baseSha && headSha) {
+    const diffInfo = getGitDiffInfo(baseSha, headSha, repoDir);
+    if (!diffInfo.ok) {
+      if (assertedBase && assertedHead) {
+        // Law 7 & Law 6: Fail closed when authoritative --base and --head are asserted and git diff fails
+        return fail(
+          "LAW_7",
+          "GIT_DIFF_FAILED",
+          "reject",
+          `Authoritative git diff failed between ${baseSha} and ${headSha}: ${diffInfo.error}`,
+          { checks: { ...checks, git: false }, error: diffInfo.error },
+        );
+      }
+    } else {
+      for (const gf of diffInfo.files) {
+        const norm = normalizePath(gf);
+        if (!filesChanged.includes(norm)) {
+          filesChanged.push(norm);
+        }
+      }
+      gitDeletedFiles = diffInfo.deletedFiles;
+    }
+  }
+
+  const policies = loadPathPolicies(options.rootDir);
+
+  // Law 3 & 6: A PR document CANNOT self-approve via inline json flags!
+  // humanApproved is ONLY valid if supplied through options from an external signed event or verified caller.
+  const humanApproved = options.humanApproved === true;
 
   // --- MP-001: TOUCH_HUMAN_ONLY -------------------------------------------
   const forbidden = filesChanged.filter((f) =>
@@ -247,8 +310,28 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
 
   // --- MP-002: TEST_DELETED -----------------------------------------------
   const testsDeleted = Array.isArray(evidence.tests_deleted)
-    ? evidence.tests_deleted
+    ? [...evidence.tests_deleted]
     : [];
+
+  // Check test deletions discovered directly via authoritative git diff (Point 3)
+  const isTestPath = (p) => {
+    const norm = normalizePath(p);
+    return (
+      norm.startsWith("tests/") ||
+      norm.startsWith("test/") ||
+      norm.includes(".test.") ||
+      norm.includes("_test.")
+    );
+  };
+  for (const df of gitDeletedFiles) {
+    if (isTestPath(df)) {
+      const norm = normalizePath(df);
+      if (!testsDeleted.includes(norm)) {
+        testsDeleted.push(norm);
+      }
+    }
+  }
+
   const countDrop =
     (Number.isSafeInteger(evidence.test_count_drop) &&
       evidence.test_count_drop > 0) ||
@@ -365,13 +448,11 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     pr.head_sha.length > 0 &&
     pr.head_sha !== expectedHead;
 
-  if (leaseExpired || (claimedBase !== null && currentTip !== null && claimedBase !== currentTip) || headMismatch) {
+  if (leaseExpired || headMismatch) {
     checks.stale_base = false;
     const detail = leaseExpired
       ? `Lease TTL expired: ${evidence.elapsed_since_lease_ms}ms elapsed > ${evidence.lease_ttl_ms}ms TTL.`
-      : headMismatch
-        ? `PR head_sha ${pr.head_sha} does not match the actual head ${expectedHead}.`
-        : `Claimed base SHA ${claimedBase} does not match current target tip ${currentTip}.`;
+      : `PR head_sha ${pr.head_sha} does not match the actual head ${expectedHead}.`;
     return fail("MP-004", "STALE_BASE", "reject", evidence.detail ?? detail, {
       checks,
       claimed_base_sha: claimedBase,

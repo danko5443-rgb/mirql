@@ -281,8 +281,17 @@ export function isEffectivelyEmpty(bodyText) {
   // Strip void expressions like `void e` or `void 0`
   cleaned = cleaned.replace(/\bvoid\s+[a-zA-Z0-9_$.]+/g, "");
 
-  // Strip variable declarations with no-op or dead assignments
-  cleaned = cleaned.replace(/\b(?:const|let|var)\s+[a-zA-Z0-9_$]+\s*=\s*;/g, "");
+  // Strip empty if/while/for statements: e.g. if (e) {} or if (err) ;
+  cleaned = cleaned.replace(
+    /\b(?:if|while|for)\s*\([^)]*\)\s*(?:\{\s*\}|;)/g,
+    "",
+  );
+
+  // Strip variable declarations with no-op or dead assignments or empty initializers
+  cleaned = cleaned.replace(
+    /\b(?:const|let|var)\s+[a-zA-Z0-9_$]+\s*(?:=\s*(?:\{\s*\}|\[\s*\]|null|undefined|void\s+[a-zA-Z0-9_$.]+|true|false)?)?\s*;/g,
+    "",
+  );
 
   // Strip semicolons, empty blocks, and whitespace
   cleaned = cleaned.replace(/[{};]/g, "").trim();
@@ -316,23 +325,64 @@ export function checkSwallowedExceptions(sourceCode, filename) {
     }
   }
 
-  // 2. Promise .catch(): .catch(() => {}), .catch(e => { void e }), .catch(function() {})
-  const promiseCatchRegex =
-    /\.catch\s*\(\s*(?:async\s*)?(?:(?:(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>\s*\{([^}]*)\})|(?:function\s*\([^)]*\)\s*\{([^}]*)\})|(?:(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>\s*([^,)\n]*)))\s*\)/g;
-  while ((match = promiseCatchRegex.exec(sourceCode)) !== null) {
-    const arrowBody = match[1];
-    const funcBody = match[2];
-    const exprBody = match[3];
-    const body = arrowBody ?? funcBody ?? exprBody ?? "";
+  // 2. Promise .catch(): parse with balanced block extraction (never truncated by inner braces)
+  const promiseCatchRegex = /\.catch\s*\(/g;
+  let pcMatch;
+  while ((pcMatch = promiseCatchRegex.exec(sourceCode)) !== null) {
+    const afterParen = pcMatch.index + pcMatch[0].length;
+    let idx = afterParen;
+    let foundBrace = -1;
+    let pCount = 1;
+    while (idx < sourceCode.length && pCount > 0) {
+      const ch = sourceCode[idx];
+      if (ch === "(") pCount++;
+      else if (ch === ")") pCount--;
+      else if (ch === "{" && foundBrace === -1) {
+        foundBrace = idx;
+        break;
+      }
+      idx++;
+    }
 
-    if (isEffectivelyEmpty(body)) {
-      const upToMatch = sourceCode.slice(0, match.index);
-      const line = upToMatch.split("\n").length;
-      violations.push({
-        file: filename,
-        pattern: match[0],
-        line,
-      });
+    if (foundBrace !== -1) {
+      const { body, endIdx } = extractBalancedBlock(sourceCode, foundBrace + 1);
+      if (isEffectivelyEmpty(body)) {
+        const upToMatch = sourceCode.slice(0, pcMatch.index);
+        const line = upToMatch.split("\n").length;
+        violations.push({
+          file: filename,
+          pattern: sourceCode.slice(pcMatch.index, endIdx + 1),
+          line,
+          detail: "Swallowed Promise .catch() block",
+        });
+      }
+    } else {
+      let p2 = 1;
+      let j = afterParen;
+      while (j < sourceCode.length && p2 > 0) {
+        const ch = sourceCode[j];
+        if (ch === "(") p2++;
+        else if (ch === ")") {
+          p2--;
+          if (p2 === 0) break;
+        }
+        j++;
+      }
+      const argStr = sourceCode.slice(afterParen, j).trim();
+      const arrowMatch = argStr.match(/=>\s*(.*)$/);
+      if (arrowMatch) {
+        const expr = arrowMatch[1].trim();
+        if (isEffectivelyEmpty(expr)) {
+          const upToMatch = sourceCode.slice(0, pcMatch.index);
+          const line = upToMatch.split("\n").length;
+          violations.push({
+            file: filename,
+            pattern: sourceCode.slice(pcMatch.index, j + 1),
+            line,
+            detail: "Swallowed Promise .catch() expression",
+          });
+        }
+      }
     }
   }
 

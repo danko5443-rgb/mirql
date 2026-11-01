@@ -870,6 +870,45 @@ describe("mergeproof: F1 anti-cheat string-concealment patch", () => {
       assert.equal(result.violation, "TOUCH_HUMAN_ONLY");
       assert.equal(result.verdict, "reject");
     });
+
+    it("Promise .catch with empty block or empty if statement is caught (Claude Review)", () => {
+      // 1. .catch(e => { if (e) {} })
+      const nestedEmpty = "p.catch(e => { if (e) {} });";
+      assert.equal(checkSwallowedExceptions(nestedEmpty).ok, false, "Nested empty if inside .catch must be caught");
+
+      // 2. .catch(e => { const x = {}; })
+      const emptyObj = "p.catch(e => { const x = {}; });";
+      assert.equal(checkSwallowedExceptions(emptyObj).ok, false, "No-op assignment in .catch must be caught");
+
+      // 3. .catch(e => void e)
+      const voidArrow = "p.catch(e => void e);";
+      assert.equal(checkSwallowedExceptions(voidArrow).ok, false, "void expr arrow in .catch must be caught");
+
+      // 4. Genuine error handling passes
+      const validCatch = "p.catch(e => { console.error(e); process.exit(1); });";
+      assert.equal(checkSwallowedExceptions(validCatch).ok, true, "Valid error handler with exit passes");
+    });
+
+    it("Git diff failure with base and head asserted fails closed under Law 7", () => {
+      const pr = {
+        pr: { number: 995, head_sha: "a".repeat(40), base_sha: "b".repeat(40), kind: "bugfix" },
+        diff_stat: { files_changed: ["packages/core/src/index.mjs"] },
+        proof: { causal_cycle_completed: true },
+        phi: { delta_phi: 0 },
+      };
+
+      // Pass an invalid repo dir so git fails
+      const result = evaluatePullRequest(pr, {
+        rootDir: ROOT,
+        repoDir: join(tmpdir(), "non-existent-mirql-repo-" + Date.now()),
+        targetTipSha: "b".repeat(40),
+        expectedHeadSha: "a".repeat(40),
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.rule, "LAW_7");
+      assert.equal(result.violation, "GIT_DIFF_FAILED");
+      assert.equal(result.verdict, "reject");
+    });
   });
 });
 

@@ -213,9 +213,8 @@ function cliCheck(flags) {
   if (typeof flags.head === "string" && flags.head.length > 0) {
     options.expectedHeadSha = flags.head;
   }
-  if (flags["human-approved"] === true || flags.humanApproved === true) {
-    options.humanApproved = true;
-  }
+  // Law 3 & 6: Affirmative human sign-off cannot be claimed via raw CLI flag.
+  // It must come from an external verified signed event or verified programmatic caller.
 
   const verdict = evaluatePullRequest(prDoc, options);
 
