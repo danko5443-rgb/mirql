@@ -426,4 +426,201 @@ describe("Milestone M7: Keyless Canary Promotion Gauntlet & Ouroboros Self-Hosti
       assert.equal(finalState.jobs[jobId].status, "promoted");
     });
   });
+
+  describe("7. Adversarial Hardening Verification (GLM 5.3 Max Findings B1-B6, M1-M4)", () => {
+    it("B1: fails closed on forged provenance envelope lacking attestation or invalid sig", () => {
+      const prov = generateSLSAProvenance({
+        subjectName: "mirql",
+        subjectDigest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      });
+
+      // Envelope without attestation
+      const noAttestation = {
+        payloadType: prov.envelope.payloadType,
+        payload: prov.envelope.payload,
+        signatures: prov.envelope.signatures,
+      };
+      const res = verifySLSAProvenance(noAttestation);
+      assert.equal(res.valid, false, "Envelope lacking attestation must fail closed");
+      assert.ok(res.errors.some((e) => e.includes("attestation")));
+    });
+
+    it("B2: strictly rejects zero-sample force promotion (gauntlet cannot be bypassed)", () => {
+      const jobId = setupReadyJob();
+      const staged = stageCanary(mirqlDir, {
+        jobId,
+        baseSha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+        candidateVersion: "0.2.0",
+        supervisorVersion: "0.1.0",
+        probationWindowMs: 10000,
+      });
+
+      // Force evaluate with ZERO samples
+      assert.throws(
+        () => {
+          evaluateAndPromoteCanary(mirqlDir, staged.canary_id, { force: true });
+        },
+        (err) => {
+          assert.equal(err.errorCode, "INSUFFICIENT_SAMPLES");
+          assert.equal(err.exitCode, EXIT_CODES.POLICY_DENIAL);
+          return true;
+        },
+      );
+    });
+
+    it("B3: promotion evaluation is immune to forged unverified lines in raw ledger", () => {
+      const jobId = setupReadyJob();
+      const staged = stageCanary(mirqlDir, {
+        jobId,
+        baseSha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+        candidateVersion: "0.2.0",
+        supervisorVersion: "0.1.0",
+        probationWindowMs: 1000,
+      });
+
+      // Record a valid healthy sample
+      sampleCanaryHealth(mirqlDir, staged.canary_id, {
+        totalRequests: 10000,
+        errorCount: 0,
+        latencyP99Ms: 20,
+      });
+
+      // Inject forged, unsigned anomaly line directly into raw ledger file
+      const ledgerPath = join(mirqlDir, "ledger", "events.jsonl");
+      const forgedLine = JSON.stringify({
+        v: 1,
+        id: "FORGED_ANOMALY_EVENT_000000",
+        type: "job.canary_health",
+        ts: new Date().toISOString(),
+        payload: {
+          sample_id: "FORGED_SAMPLE",
+          canary_id: staged.canary_id,
+          total_requests: 10000,
+          error_count: 5000,
+          error_rate_bp: 5000,
+          anomaly_detected: true,
+          reason: "forged_exploit",
+        },
+      }) + "\n";
+      writeFileSync(ledgerPath, readFileSync(ledgerPath, "utf8") + forgedLine, "utf8");
+
+      // Evaluation must use foldQueueState (which cryptographically rejects unverified lines)
+      const evalRes = evaluateAndPromoteCanary(mirqlDir, staged.canary_id, { force: true });
+      assert.equal(evalRes.ok, true, "Evaluation must succeed and ignore forged unverified lines");
+      assert.equal(evalRes.status, "promoted");
+    });
+
+    it("B4: rejects version downgrades in canary staging (candidate <= supervisor)", () => {
+      const jobId = setupReadyJob();
+
+      assert.throws(
+        () => {
+          stageCanary(mirqlDir, {
+            jobId,
+            baseSha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+            supervisorVersion: "9.9.9",
+            candidateVersion: "0.0.1", // Downgrade attempt!
+          });
+        },
+        (err) => {
+          assert.equal(err.errorCode, "LAW_9_VIOLATION");
+          return true;
+        },
+      );
+    });
+
+    it("B5: rejects missing metrics (silence is never consent) and rejects sampling on unknown canary", () => {
+      // 1. Missing metrics
+      assert.throws(
+        () => {
+          sampleCanaryHealth(mirqlDir, "01CANARY0000000000000000", {});
+        },
+        (err) => {
+          assert.equal(err.errorCode, "MISSING_METRICS");
+          return true;
+        },
+      );
+
+      // 2. Sampling unknown canary
+      assert.throws(
+        () => {
+          sampleCanaryHealth(mirqlDir, "01UNKNOWN000000000000000", {
+            totalRequests: 1000,
+            errorCount: 0,
+            latencyP99Ms: 10,
+          });
+        },
+        (err) => {
+          assert.equal(err.errorCode, "CANARY_NOT_FOUND");
+          return true;
+        },
+      );
+    });
+
+    it("B6 & M2: rollback fails closed on unknown canary and rejects rolling back promoted canary", () => {
+      // 1. Rollback unknown canary
+      assert.throws(
+        () => {
+          rollbackCanary(mirqlDir, "01UNKNOWN000000000000000");
+        },
+        (err) => {
+          assert.equal(err.errorCode, "CANARY_NOT_FOUND");
+          return true;
+        },
+      );
+
+      // 2. Rollback already-promoted canary
+      const jobId = setupReadyJob();
+      const staged = stageCanary(mirqlDir, {
+        jobId,
+        baseSha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+        candidateVersion: "0.2.0",
+        supervisorVersion: "0.1.0",
+        probationWindowMs: 100,
+      });
+
+      sampleCanaryHealth(mirqlDir, staged.canary_id, {
+        totalRequests: 1000,
+        errorCount: 0,
+        latencyP99Ms: 10,
+      });
+
+      const promo = evaluateAndPromoteCanary(mirqlDir, staged.canary_id, { force: true });
+      assert.equal(promo.status, "promoted");
+
+      assert.throws(
+        () => {
+          rollbackCanary(mirqlDir, staged.canary_id, { reason: "late_attack" });
+        },
+        (err) => {
+          assert.equal(err.errorCode, "CANARY_ALREADY_PROMOTED");
+          return true;
+        },
+      );
+    });
+
+    it("M1: staged error thresholds are immutable during sampling", () => {
+      const jobId = setupReadyJob();
+      const staged = stageCanary(mirqlDir, {
+        jobId,
+        baseSha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+        errorThresholdBp: 1, // Strict: 1 bp max
+      });
+
+      // Attempt to override threshold to 10000 bp (100%) during sample call with 50% error rate
+      const sample = sampleCanaryHealth(
+        mirqlDir,
+        staged.canary_id,
+        {
+          totalRequests: 10000,
+          errorCount: 5000, // 5000 bp = 50% errors!
+          latencyP99Ms: 10,
+        },
+        { errorThresholdBp: 10000 }, // Caller attempts override
+      );
+
+      assert.equal(sample.healthy, false, "Must detect anomaly using staged 1 bp threshold, ignoring override");
+      assert.equal(sample.anomaly_detected, true);
+    });
+  });
 });

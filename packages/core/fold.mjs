@@ -581,6 +581,9 @@ export function foldLedger(events, policy = {}, keyring = null) {
           error_threshold_bp: p.error_threshold_bp,
           latency_p99_ceiling_ms: p.latency_p99_ceiling_ms,
           staged_at_ms: p.staged_at_ms,
+          provenance_hash: p.provenance_hash,
+          subject_digest: p.subject_digest,
+          epoch: evt.epoch || p.epoch || 1,
           status: "probation",
           samples: [],
         };
@@ -593,9 +596,12 @@ export function foldLedger(events, policy = {}, keyring = null) {
       case "job.canary_health": {
         const p = evt.payload || {};
         if (state.canaries && state.canaries[p.canary_id]) {
-          state.canaries[p.canary_id].samples.push(p);
-          if (p.anomaly_detected) {
-            state.canaries[p.canary_id].anomaly = true;
+          const canary = state.canaries[p.canary_id];
+          if (canary.status === "probation") {
+            canary.samples.push(p);
+            if (p.anomaly_detected) {
+              canary.anomaly = true;
+            }
           }
         }
         break;
@@ -606,8 +612,14 @@ export function foldLedger(events, policy = {}, keyring = null) {
       case "promotion.rollback": {
         const p = evt.payload || {};
         if (p.canary_id && state.canaries && state.canaries[p.canary_id]) {
-          state.canaries[p.canary_id].status = "rolled_back";
-          state.canaries[p.canary_id].rollback_reason = p.reason;
+          const canary = state.canaries[p.canary_id];
+          if (canary.status !== "promoted") {
+            canary.status = "rolled_back";
+            canary.rollback_reason = p.reason;
+            if (canary.job_id && state.jobs[canary.job_id]) {
+              state.jobs[canary.job_id].status = "canary_rolled_back";
+            }
+          }
         }
         break;
       }
@@ -623,6 +635,9 @@ export function foldLedger(events, policy = {}, keyring = null) {
         }
         if (p.canary_id && state.canaries && state.canaries[p.canary_id]) {
           state.canaries[p.canary_id].status = "promoted";
+        }
+        if (p.promoted_version) {
+          state.active_version = p.promoted_version;
         }
         if (p.warrant_id && state.warrants[p.warrant_id]) {
           state.warrants[p.warrant_id].status = "completed";
