@@ -2,7 +2,13 @@
 // and bing-bong multi-agent consensus orchestrator.
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { EXIT_CODES, jcs } from "../core/index.mjs";
+import {
+  EXIT_CODES,
+  jcs,
+  LedgerWatcher,
+  createLedgerWatcher,
+  waitForLedgerEvent,
+} from "../core/index.mjs";
 import { computePhi, checkPhiReduction } from "./phi.mjs";
 import {
   checkAntiCheat,
@@ -408,4 +414,7 @@ export {
   getOrGenerateSupervisorKey,
   touchHeartbeat,
   startHeartbeatTicker,
+  LedgerWatcher,
+  createLedgerWatcher,
+  waitForLedgerEvent,
 };

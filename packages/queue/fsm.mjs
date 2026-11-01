@@ -118,6 +118,22 @@ export function tick(state, policy = DEFAULT_POLICY, nowMs = Date.now(), options
 
   switch (currentMode) {
     case "BUILD": {
+      // Law 14 & Milestone M1: Concurrency enforcement for BUILD mode when configured
+      const maxBuildConcurrency = options.concurrency ?? options.max_build_concurrency ?? mergedPolicy.max_build_concurrency ?? mergedPolicy.concurrency;
+      if (maxBuildConcurrency !== undefined && maxBuildConcurrency !== null) {
+        const activeUnexpiredLeases = Object.values(state.active_leases || {}).filter(
+          (l) => nowMs <= (l.expires_at_ms ?? (l.leased_at_ms + l.ttl_ms)),
+        );
+        if (activeUnexpiredLeases.length >= maxBuildConcurrency) {
+          return {
+            action: "WAIT_IN_PROGRESS",
+            next_mode: "BUILD",
+            active_lease_count: activeUnexpiredLeases.length,
+            reason: "build_concurrency_limit_active_lease",
+          };
+        }
+      }
+
       if (availableOpenWarrants.length > 0 || availableQueuedJobs.length > 0) {
         return {
           action: "LEASE_JOB",

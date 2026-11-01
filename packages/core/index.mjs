@@ -40,4 +40,9 @@ export {
   checkSwallowedExceptions,
   checkTestWeakenings,
 } from "./anti-cheat.mjs";
+export {
+  LedgerWatcher,
+  createLedgerWatcher,
+  waitForLedgerEvent,
+} from "./watcher.mjs";
 

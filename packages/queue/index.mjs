@@ -1,7 +1,14 @@
 // packages/queue/index.mjs — Deterministic State Machine, Warrant Admission & Lease Scheduler.
 import { readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { EXIT_CODES, validateDocument, ulid } from "../core/index.mjs";
+import {
+  EXIT_CODES,
+  validateDocument,
+  ulid,
+  LedgerWatcher,
+  createLedgerWatcher,
+  waitForLedgerEvent,
+} from "../core/index.mjs";
 import {
   getOrCreateQueueKeypair,
   foldQueueState,
@@ -27,6 +34,11 @@ export {
 } from "./ledger.mjs";
 export { checkNotRoadmapGate } from "./gate.mjs";
 export { tick, DEFAULT_POLICY } from "./fsm.mjs";
+export {
+  LedgerWatcher,
+  createLedgerWatcher,
+  waitForLedgerEvent,
+} from "../core/index.mjs";
 
 /** Tool name reported by this package. */
 export const TOOL = "queue";
@@ -404,6 +416,37 @@ export function leaseNextJob(mirqlDir, options = {}) {
         state.warrants[j.warrant_id]?.status !== "needs_human" &&
         !isWarrantActiveLeased(j.warrant_id),
     );
+
+    // Law 14 & Milestone M1: Concurrency enforcement for BUILD mode when configured
+    const maxBuildConcurrency =
+      options.concurrency ??
+      options.max_build_concurrency ??
+      policy.max_build_concurrency ??
+      policy.concurrency;
+    if (
+      maxBuildConcurrency !== undefined &&
+      maxBuildConcurrency !== null &&
+      state.mode === "BUILD"
+    ) {
+      const activeUnexpiredLeases = Object.values(state.active_leases || {}).filter(
+        (l) => nowMs <= (l.expires_at_ms ?? (l.leased_at_ms + l.ttl_ms)),
+      );
+      if (activeUnexpiredLeases.length >= maxBuildConcurrency) {
+        if (availableQueuedJobs.length === 0 && availableOpenWarrants.length === 0) {
+          return {
+            ok: true,
+            status: "empty",
+            message: "No jobs available to lease",
+          };
+        }
+        return {
+          ok: true,
+          status: "concurrency_limit",
+          message: `Concurrency limit (${maxBuildConcurrency}) reached for BUILD mode; lease already in progress`,
+          active_lease: activeUnexpiredLeases[0],
+        };
+      }
+    }
 
     let targetJobId = null;
     let targetWarrantId = null;
