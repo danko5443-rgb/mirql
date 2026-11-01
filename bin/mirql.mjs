@@ -10,6 +10,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { EXIT_CODES } from "../packages/core/index.mjs";
+import { main as mergeproofMain } from "../packages/mergeproof/index.mjs";
 import { main as runMain } from "../packages/run/index.mjs";
 import { main as queueMain } from "../packages/queue/index.mjs";
 import { main as logMain } from "../packages/log/index.mjs";
@@ -20,11 +21,12 @@ const PKG = JSON.parse(
 );
 
 /**
- * Tool registry. `mergeproof` has no package in W1 (W2 lands it) — the router
- * serves its stub contract itself.
+ * Tool registry. Every tool now owns a package entrypoint; `main` receives
+ * the arguments after the tool token and keeps the W1 stub contract itself
+ * for bare `--help` / no-args / `status` calls.
  */
 const ROUTES = Object.freeze({
-  mergeproof: { name: "mergeproof", alias: "m", main: null },
+  mergeproof: { name: "mergeproof", alias: "m", main: mergeproofMain },
   inbox: { name: "inbox", alias: "i", main: inboxMain },
   run: { name: "run", alias: "r", main: runMain },
   queue: { name: "queue", alias: "q", main: queueMain },
@@ -62,7 +64,7 @@ export function main(argv = []) {
   const rest = argv.slice(1);
   if (route.main) return route.main(rest);
 
-  // mergeproof until W2 ships its package.
+  // Defensive fallback for tools without a package main (none today).
   emit({ tool: route.name, status: "stub" });
   return EXIT_CODES.OK;
 }

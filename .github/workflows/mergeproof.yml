@@ -1,0 +1,45 @@
+name: Mergeproof External Notary
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+jobs:
+  notary:
+    name: Mergeproof Conscience Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out target repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify zero dependencies
+        run: |
+          node -e "
+            const pkg = require('./package.json');
+            const deps = Object.keys(pkg.dependencies || {}).length;
+            const devDeps = Object.keys(pkg.devDependencies || {}).length;
+            if (deps > 0 || devDeps > 0) {
+              console.error('Violated Zero-Dependency Law: found dependencies in package.json');
+              process.exit(1);
+            }
+          "
+
+      - name: Run Full Test Suite
+        run: node scripts/run-tests.mjs
+
+      - name: Run Mergeproof Check
+        run: |
+          node bin/mirql.mjs m check --base ${{ github.event.pull_request.base.sha || github.sha }} --head ${{ github.event.pull_request.head.sha || github.sha }}

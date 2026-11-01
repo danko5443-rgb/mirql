@@ -370,7 +370,16 @@ export function checkSwallowedExceptions(sourceCode, filename) {
       uncaughtEnd = idx;
     }
 
-    if (isEffectivelyEmpty(handlerBody) || !/(?:process\.exit|throw\b)/.test(handlerBody)) {
+    // F1 (string-concealment): comments, string literals and template
+    // literals are stripped from the handler body BEFORE the rethrow/exit
+    // test, so a `process.exit` that only exists inside a string
+    // ("call process.exit(1)") or a comment can never satisfy the gate.
+    const strippedBody = handlerBody
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "")
+      .replace(/(["'`])(?:\\.|(?!\1)[\s\S])*?\1/g, "");
+
+    if (isEffectivelyEmpty(handlerBody) || !/(?:process\.exit|throw\b)/.test(strippedBody)) {
       const upToMatch = sourceCode.slice(0, match.index);
       const line = upToMatch.split("\n").length;
       violations.push({

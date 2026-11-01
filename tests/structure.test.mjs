@@ -42,7 +42,7 @@ const BINS = [
   "mirql-inbox.mjs",
 ];
 
-const TOOL_PACKAGES = ["run", "queue", "log", "inbox"];
+const TOOL_PACKAGES = ["run", "queue", "log", "inbox", "mergeproof"];
 
 /** Spawn `node <binRelPath> <args>` at the repo root. */
 function runBin(binRelPath, args) {
