@@ -1,6 +1,7 @@
 // packages/run — attempt supervisor, AST anti-cheat gate, 0-token probe runner,
 // and bing-bong multi-agent consensus orchestrator.
 import { readFileSync, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import {
   EXIT_CODES,
@@ -20,6 +21,18 @@ import {
   verifyClaimCheck,
   formatDriftEvent,
 } from "./drift.mjs";
+import {
+  generateMutants,
+  runMutationTesting,
+  detectFlakes,
+  quarantineTest,
+  formatMutantEvent,
+  formatKillTestNeededEvent,
+  extractChangedLines,
+  maskStringsAndComments,
+  isValidModuleSyntax,
+  MUTATION_OPERATORS,
+} from "./mutant.mjs";
 import {
   checkAntiCheat,
   checkHumanOnlyPaths,
@@ -58,6 +71,8 @@ export const SUBCOMMANDS = Object.freeze([
   "bb",
   "phi",
   "drift",
+  "mutant",
+  "flake",
   "help",
 ]);
 
@@ -260,6 +275,8 @@ export function runCli(argv = []) {
           probe: flags.probe ?? flags.type ?? "tests",
           dir: flags.dir,
           workspaceDir: flags.workspace ?? process.cwd(),
+          source: flags.source,
+          test: flags.test,
         });
         emitLine(jcs(res));
         return res.ok ? EXIT_CODES.OK : EXIT_CODES.DOMAIN_NEGATIVE;
@@ -352,6 +369,118 @@ export function runCli(argv = []) {
       return res.ok ? EXIT_CODES.OK : EXIT_CODES.REJECT;
     }
 
+    case "mutant": {
+      try {
+        const sourcePath = flags.source ?? positional[1];
+        const testPath = flags.test ?? positional[2];
+        if (!sourcePath) {
+          emitError({ error: "USAGE_ERROR", reason: "missing required --source <path>" });
+          return EXIT_CODES.USAGE_ERROR;
+        }
+        if (!testPath) {
+          emitError({ error: "USAGE_ERROR", reason: "missing required --test <path>" });
+          return EXIT_CODES.USAGE_ERROR;
+        }
+
+        let killThresholdBp = 8000;
+        if (flags.threshold !== undefined) {
+          const th = parseInt(flags.threshold, 10);
+          if (!Number.isSafeInteger(th) || th < 8000 || th > 10000) {
+            emitError({
+              error: "USAGE_ERROR",
+              reason: "threshold must be an integer between 8000 and 10000 bp (8000 bp floor)",
+            });
+            return EXIT_CODES.USAGE_ERROR;
+          }
+          killThresholdBp = th;
+        }
+
+        let maxMutants = 20;
+        if (flags["max-mutants"] !== undefined) {
+          const mm = parseInt(flags["max-mutants"], 10);
+          if (!Number.isSafeInteger(mm) || mm <= 0) {
+            emitError({
+              error: "USAGE_ERROR",
+              reason: "max-mutants must be a positive safe integer (> 0)",
+            });
+            return EXIT_CODES.USAGE_ERROR;
+          }
+          maxMutants = mm;
+        }
+
+        let changedLines = null;
+        if (flags["changed-lines"]) {
+          changedLines = new Set();
+          const parts = String(flags["changed-lines"]).split(",");
+          for (const part of parts) {
+            if (part.includes("-")) {
+              const [s, e] = part.split("-").map((n) => parseInt(n.trim(), 10));
+              if (Number.isSafeInteger(s) && Number.isSafeInteger(e)) {
+                for (let i = s; i <= e; i++) changedLines.add(i);
+              }
+            } else {
+              const n = parseInt(part.trim(), 10);
+              if (Number.isSafeInteger(n)) changedLines.add(n);
+            }
+          }
+        } else if (flags.base || flags.diff) {
+          const base = typeof flags.base === "string" ? flags.base : "HEAD~1";
+          const diffRes = spawnSync("git", ["diff", "-U0", base, "--", sourcePath], {
+            encoding: "utf8",
+            timeout: 10000,
+          });
+          if (diffRes.status === 0 && diffRes.stdout) {
+            changedLines = extractChangedLines(diffRes.stdout);
+          }
+        }
+
+        const res = runMutationTesting({
+          sourcePath,
+          testPath,
+          killThresholdBp,
+          maxMutants,
+          changedLines,
+        });
+        emitLine(jcs(res));
+        return res.ok ? EXIT_CODES.OK : EXIT_CODES.REJECT;
+      } catch (err) {
+        emitError({
+          error: "USAGE_ERROR",
+          reason: err instanceof Error ? err.message : String(err),
+        });
+        return EXIT_CODES.USAGE_ERROR;
+      }
+    }
+
+    case "flake": {
+      try {
+        const testPath = flags.test ?? positional[1];
+        if (!testPath) {
+          emitError({ error: "USAGE_ERROR", reason: "missing required --test <path>" });
+          return EXIT_CODES.USAGE_ERROR;
+        }
+        const iterations = flags.iterations ? parseInt(flags.iterations, 10) : 5;
+        if (!Number.isSafeInteger(iterations) || iterations <= 0) {
+          emitError({ error: "USAGE_ERROR", reason: "iterations must be a positive safe integer" });
+          return EXIT_CODES.USAGE_ERROR;
+        }
+
+        const res = detectFlakes(testPath, { iterations });
+        if (res.flaky && flags.quarantine) {
+          const qRes = quarantineTest(testPath, flags.quarantine);
+          res.quarantine = qRes;
+        }
+        emitLine(jcs(res));
+        return res.flaky ? EXIT_CODES.REJECT : EXIT_CODES.OK;
+      } catch (err) {
+        emitError({
+          error: "USAGE_ERROR",
+          reason: err instanceof Error ? err.message : String(err),
+        });
+        return EXIT_CODES.USAGE_ERROR;
+      }
+    }
+
     default: {
       emitError({
         error: "USAGE_ERROR",
@@ -416,6 +545,16 @@ export {
   detectDrift,
   verifyClaimCheck,
   formatDriftEvent,
+  generateMutants,
+  runMutationTesting,
+  detectFlakes,
+  quarantineTest,
+  formatMutantEvent,
+  formatKillTestNeededEvent,
+  extractChangedLines,
+  maskStringsAndComments,
+  isValidModuleSyntax,
+  MUTATION_OPERATORS,
   verifyAttempt,
   runSupervisor,
   runSupervisorReactive,

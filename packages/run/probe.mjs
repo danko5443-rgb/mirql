@@ -2,6 +2,7 @@ import { join, resolve } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
 import { EXIT_CODES } from "../core/index.mjs";
 import { computePhi } from "./phi.mjs";
+import { runMutationTesting } from "./mutant.mjs";
 import { appendSupervisorEvent, getOrGenerateSupervisorKey } from "./ledger.mjs";
 
 export const KNOWN_PROBES = Object.freeze([
@@ -149,6 +150,56 @@ export function runProbe(options = {}) {
       probeResult = {
         name: config?.name ?? "public_surface_drift",
         type: "surface",
+        status: "not_implemented",
+        passed: false,
+        failures: 1,
+        duration_ms: 0,
+      };
+    }
+  } else if (probeName === "mutants") {
+    const minKillRateBp = Math.max(8000, config?.min_kill_rate_bp ?? 8000);
+    const sourcePath = options.source ?? options.target;
+    const testPath = options.test;
+
+    if (sourcePath && testPath) {
+      try {
+        const mutantRes = runMutationTesting({
+          sourcePath,
+          testPath,
+          killThresholdBp: minKillRateBp,
+        });
+        const passed = mutantRes.ok;
+        probeResult = {
+          name: config?.name ?? "incremental_mutation_density",
+          type: "mutants",
+          status: passed ? "pass" : "fail",
+          passed,
+          kill_rate_bp: mutantRes.kill_rate_bp,
+          min_kill_rate_bp: minKillRateBp,
+          mutants_total: mutantRes.mutants_total,
+          mutants_killed: mutantRes.mutants_killed,
+          mutants_survived: mutantRes.mutants_survived,
+          failures: passed ? 0 : 1,
+          duration_ms: 50,
+        };
+      } catch (err) {
+        probeResult = {
+          name: config?.name ?? "incremental_mutation_density",
+          type: "mutants",
+          status: "fail",
+          passed: false,
+          kill_rate_bp: 0,
+          min_kill_rate_bp: minKillRateBp,
+          failures: 1,
+          duration_ms: 0,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    } else {
+      // Fail closed: without target source and test paths, report not_implemented
+      probeResult = {
+        name: config?.name ?? "incremental_mutation_density",
+        type: "mutants",
         status: "not_implemented",
         passed: false,
         failures: 1,
