@@ -4,6 +4,24 @@ import { join } from "node:path";
 import { readEvents, foldState } from "./ledger.mjs";
 
 /**
+ * Format integer micro-USD as a decimal string using pure integer math
+ * (Law 17: zero floats, zero `.toFixed`). Truncates to 2 fractional digits.
+ *
+ * @param {number} micro - integer amount in micro-USD
+ * @returns {string} e.g. "$1.50"
+ */
+export function formatMicroUsd(micro) {
+  if (!Number.isSafeInteger(micro)) {
+    throw new TypeError(`formatMicroUsd requires a safe integer (Law 17), got ${micro}`);
+  }
+  const negative = micro < 0;
+  const abs = negative ? -micro : micro;
+  const whole = Math.floor(abs / 1000000);
+  const frac = String(abs % 1000000).padStart(6, "0").slice(0, 2);
+  return `${negative ? "-" : ""}$${whole}.${frac}`;
+}
+
+/**
  * Render keyless, read-only status digest of the autonomous factory.
  * Strictly read-only: never loads private keys, never mutates ledger or cache.
  *
@@ -122,7 +140,7 @@ function formatMarkdownDigest(digest) {
     `- **Epoch:** \`${digest.epoch}\``,
     `- **Sequence:** \`${digest.seq}\``,
     `- **Halted:** \`${digest.halted}\``,
-    `- **Budget Spent:** \`$${(digest.budget_spent_micro_usd / 1_000_000).toFixed(2)}\` (${digest.budget_spent_micro_usd} micro-USD)`,
+    `- **Budget Spent:** \`${formatMicroUsd(digest.budget_spent_micro_usd)}\` (${digest.budget_spent_micro_usd} micro-USD)`,
     ``,
     `## Pending Approvals (${digest.pending_approvals.length})`,
   ];

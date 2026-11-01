@@ -1,24 +1,33 @@
 // packages/inbox/index.mjs — Cryptographic Human Sovereignty Portal (Law 6).
 import { resolve as resolvePath, join } from "node:path";
-import { EXIT_CODES, WRITER_ACL, jcs } from "../core/index.mjs";
+import { EXIT_CODES, WRITER_ACL } from "../core/index.mjs";
 
 import { runGenesis } from "./genesis.mjs";
 import { sendIntent } from "./send.mjs";
-import { renderDigest } from "./digest.mjs";
+import { renderDigest, formatMicroUsd } from "./digest.mjs";
 import { actOnItem } from "./act.mjs";
 import { createProposal } from "./propose.mjs";
-import { generateFactoryKeypairs, loadKeyring, loadWriterKey } from "./keys.mjs";
-import { readEvents, getLastEvent, foldState } from "./ledger.mjs";
+import {
+  generateFactoryKeypairs,
+  loadKeyring,
+  loadWriterKey,
+  requireHumanKey,
+  authenticateHumanWriter,
+  resolveHumanKeyPath,
+  keyringEntry,
+  derivePublicParts,
+  FACTORY_WRITERS,
+  CANONICAL_WRITERS,
+  HUMAN_WRITER_NS,
+  HUMAN_KEY_FILENAME,
+} from "./keys.mjs";
+import {
+  readEvents,
+  getLastEvent,
+  foldState,
+  requireGenesisLedger,
+} from "./ledger.mjs";
 import { validateRoadmapRef, checkNotRoadmap, checkProposalQuota } from "./gate.mjs";
-
-// Ensure human:owner supports mirql.genesis as authorized by policy/writers.yaml
-if (WRITER_ACL && WRITER_ACL["human:owner"]) {
-  const origHumanTest = WRITER_ACL["human:owner"].test.bind(WRITER_ACL["human:owner"]);
-  WRITER_ACL["human:owner"].test = function (str) {
-    if (str === "mirql.genesis" || str === "mirql.halt" || str === "mirql.resume") return true;
-    return origHumanTest(str);
-  };
-}
 
 /** Tool name reported by this package. */
 export const TOOL = "inbox";
@@ -27,20 +36,34 @@ export {
   runGenesis,
   sendIntent,
   renderDigest,
+  formatMicroUsd,
   actOnItem,
   createProposal,
   generateFactoryKeypairs,
   loadKeyring,
   loadWriterKey,
+  requireHumanKey,
+  authenticateHumanWriter,
+  resolveHumanKeyPath,
+  keyringEntry,
+  derivePublicParts,
   readEvents,
   getLastEvent,
   foldState,
+  requireGenesisLedger,
   validateRoadmapRef,
   checkNotRoadmap,
   checkProposalQuota,
 };
 
+export { FACTORY_WRITERS, CANONICAL_WRITERS, HUMAN_WRITER_NS, HUMAN_KEY_FILENAME };
+
 const SUBCOMMANDS = Object.freeze(["genesis", "send", "digest", "act", "propose"]);
+
+// Law 3 note: WRITER_ACL is imported so this module fails fast if the frozen
+// ACL table is ever absent — but it is NEVER mutated here. The canonical
+// grants live in packages/core/acl.mjs, reconciled with policy/writers.yaml.
+void WRITER_ACL;
 
 /**
  * Resolve the target .mirql directory from explicit path, MIRQL_DIR env, or <cwd>/.mirql.
@@ -56,41 +79,71 @@ export function resolveMirqlDir(dirArg) {
 }
 
 /**
- * CLI parser helper.
+ * CLI parser helper. Kebab-case flags (--signing-key, --target-id,
+ * --idempotency-key, --human-key-out, ...) populate BOTH the kebab-case and
+ * the camelCase option keys so every call site can use either form.
+ *
  * @param {string[]} args
  * @returns {{ options: Record<string, any>, positional: string[] }}
  */
 function parseArgs(args) {
   const options = {};
   const positional = [];
+  function setOpt(key, val) {
+    options[key] = val;
+    const camelKey = key.replace(/-([a-z0-9])/g, (_, c) => c.toUpperCase());
+    options[camelKey] = val;
+  }
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg.startsWith("--")) {
       const eqIdx = arg.indexOf("=");
       if (eqIdx !== -1) {
-        options[arg.slice(2, eqIdx)] = arg.slice(eqIdx + 1);
+        setOpt(arg.slice(2, eqIdx), arg.slice(eqIdx + 1));
       } else {
         const key = arg.slice(2);
         if (i + 1 < args.length && !args[i + 1].startsWith("-")) {
-          options[key] = args[i + 1];
+          setOpt(key, args[i + 1]);
           i += 1;
         } else {
-          options[key] = true;
+          setOpt(key, true);
         }
       }
     } else if (arg.startsWith("-")) {
       const key = arg.slice(1);
       if (i + 1 < args.length && !args[i + 1].startsWith("-")) {
-        options[key] = args[i + 1];
+        setOpt(key, args[i + 1]);
         i += 1;
       } else {
-        options[key] = true;
+        setOpt(key, true);
       }
     } else {
       positional.push(arg);
     }
   }
   return { options, positional };
+}
+
+/** @returns {number} exit code */
+function emitUsage() {
+  process.stdout.write(
+    JSON.stringify({
+      tool: TOOL,
+      usage: "mirql-inbox <subcommand> [options]  (or: mirql i <subcommand>)",
+      dir: "--dir <path> | MIRQL_DIR | <cwd>/.mirql",
+      subcommands: {
+        genesis:
+          "bootstrap .mirql/, provision factory keys, sign mirql.genesis; --human-key-out <path> (default: <operatorDir>/human_owner.key.private.json, mode 0600)",
+        send:
+          "submit human intent & mint a warrant; REQUIRES --key <path> or MIRQL_HUMAN_KEY (outside .mirql)",
+        digest: "keyless read-only factory digest; --format markdown|json",
+        act: "signed human decision; REQUIRES --key; --decision approve|reject|kill|resume --target-id <ULID>",
+        propose: "bounded proposer intake (--roadmap-ref M1..M7 --title --description)",
+      },
+      exit_codes: EXIT_CODES,
+    }) + "\n"
+  );
+  return EXIT_CODES.OK;
 }
 
 /**
@@ -104,6 +157,7 @@ export function runCli(argv = []) {
   const subcommand = positional[0];
 
   if (!subcommand || !SUBCOMMANDS.includes(subcommand)) {
+    if (subcommand === "help") return emitUsage();
     process.stderr.write(
       JSON.stringify({
         tool: TOOL,
@@ -160,25 +214,28 @@ export function runCli(argv = []) {
       }
     }
   } catch (err) {
-    const exitCode = err.exitCode || EXIT_CODES.USAGE_ERROR;
-    process.stderr.write(
-      JSON.stringify({
-        tool: TOOL,
-        error: err.message,
-        exit_code: exitCode,
-      }) + "\n"
-    );
+    const exitCode = typeof err.exitCode === "number" ? err.exitCode : EXIT_CODES.USAGE_ERROR;
+    const payload = {
+      tool: TOOL,
+      error: err.errorCode || err.message,
+      exit_code: exitCode,
+    };
+    if (err.hint) payload.hint = err.hint;
+    if (err.message && err.message !== err.errorCode) payload.reason = err.message;
+    process.stderr.write(JSON.stringify(payload) + "\n");
     return exitCode;
   }
 }
 
 /**
  * CLI entrypoint imported by bin/mirql-inbox.mjs and bin/mirql.mjs.
- * Preserves the W1 stub contract for bare `--help` / `-h` / `status` / no-args calls
- * and delegates every real subcommand to runCli.
+ * Preserves the W1 stub contract for bare `--help` / `-h` / `status` / no-args
+ * calls and delegates every real subcommand to runCli. Thenable/Promise
+ * return values from runCli are settled to a numeric exit code so bin
+ * wrappers can assign `process.exitCode` without ERR_INVALID_ARG_TYPE.
  *
  * @param {string[]} argv - arguments after the program name
- * @returns {number} process exit code (see EXIT_CODES)
+ * @returns {number | Promise<number>} process exit code (see EXIT_CODES)
  */
 export function main(argv = []) {
   const first = argv[0];
@@ -191,7 +248,18 @@ export function main(argv = []) {
     process.stdout.write(JSON.stringify({ tool: TOOL, status: "stub" }) + "\n");
     return EXIT_CODES.OK;
   }
-  return runCli(argv);
+  const result = runCli(argv);
+  if (result !== null && typeof result === "object" && typeof result.then === "function") {
+    return result
+      .then((code) => (typeof code === "number" ? code : EXIT_CODES.USAGE_ERROR))
+      .catch((err) => {
+        process.stderr.write(
+          JSON.stringify({ tool: TOOL, error: err?.message || String(err) }) + "\n"
+        );
+        return typeof err?.exitCode === "number" ? err.exitCode : EXIT_CODES.USAGE_ERROR;
+      });
+  }
+  return typeof result === "number" ? result : EXIT_CODES.USAGE_ERROR;
 }
 
 export default main;

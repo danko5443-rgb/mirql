@@ -1,6 +1,6 @@
 node_modules/
-.mirql/state/
-.mirql/worktrees/
-.mirql/attempts/
+.mirql/
+*.key.json
+*.private.json
 *.tmp
 .DS_Store

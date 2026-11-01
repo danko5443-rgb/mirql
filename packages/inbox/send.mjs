@@ -1,4 +1,15 @@
 // packages/inbox/send.mjs — Human Intent ingestion and Warrant issuance (Law 6 & Law 11).
+//
+// Remediation B1 (Law 6): the human:owner signing key is never loaded
+// implicitly from `.mirql/keys/`. Callers must pass `--key <path>` /
+// `--signing-key <material>` or set `MIRQL_HUMAN_KEY` (outside `.mirql/`);
+// otherwise the call fails closed with POLICY_DENIAL.
+//
+// Remediation B7 (Law 11 & 15): the human.intent event anchors the warrant
+// document cryptographically — `warrant_hash = sha256(jcs(warrantDoc))` and
+// the warrant's `semantic_fingerprint` are embedded in the event payload,
+// and the warrant file is written to disk only AFTER the ledger append
+// succeeds.
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -11,17 +22,19 @@ import {
   validateDocument,
   EXIT_CODES,
 } from "../core/index.mjs";
-import { loadWriterKey, loadKeyring } from "./keys.mjs";
-import { getLastEvent, appendEvent } from "./ledger.mjs";
+import { authenticateHumanWriter } from "./keys.mjs";
+import { getLastEvent, appendEvent, requireGenesisLedger } from "./ledger.mjs";
 
 /**
- * Submit human Product Owner intent, mint a valid warrant document in
- * <mirqlDir>/warrants/<warrant_id>.json, and append a signed human.intent event.
+ * Submit human Product Owner intent, mint a valid warrant document, append a
+ * signed human.intent event anchoring the warrant (warrant_hash +
+ * semantic_fingerprint), and only then persist the warrant document to
+ * <mirqlDir>/warrants/<warrant_id>.json.
  *
  * @param {string} mirqlDir
  * @param {object} intentInput
  * @param {object} [options]
- * @returns {{ status: "sent", intent_id: string, warrant_id: string, seq: number, event: object, warrant: object }}
+ * @returns {{ status: "sent", intent_id: string, warrant_id: string, warrant_hash: string, seq: number, event: object, warrant: object }}
  */
 export function sendIntent(mirqlDir, intentInput, options = {}) {
   if (!intentInput || typeof intentInput !== "object") {
@@ -57,21 +70,13 @@ export function sendIntent(mirqlDir, intentInput, options = {}) {
     throw err;
   }
 
-  // 1. Authenticate human:owner Ed25519 key (Law 6)
-  const humanKp = loadWriterKey(mirqlDir, "human:owner", options);
-  if (!humanKp?.privateKey) {
-    const err = new Error("Cryptographic human signature required: no valid private key for human:owner");
-    err.exitCode = EXIT_CODES.POLICY_DENIAL;
-    throw err;
-  }
+  // 0. The ledger must be initialized (first event is mirql.genesis).
+  requireGenesisLedger(mirqlDir);
 
-  const keyring = loadKeyring(mirqlDir);
-  const trustedHumanPub = keyring["human:owner"] || (humanKp.keyId ? keyring[humanKp.keyId] : null);
-  if (trustedHumanPub && humanKp.publicKey && trustedHumanPub !== humanKp.publicKey) {
-    const err = new Error("Key verification failed: signing key does not match registered human:owner public key in keyring.json");
-    err.exitCode = EXIT_CODES.POLICY_DENIAL;
-    throw err;
-  }
+  // 1. Authenticate human:owner Ed25519 key — explicit credentials only (Law 6).
+  //    authenticateHumanWriter throws credentials_required /
+  //    namespace_binding_violation / key_mismatch as POLICY_DENIAL.
+  const humanKp = authenticateHumanWriter(mirqlDir, options);
 
   const nowMs = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
   const warrantId = ulid(nowMs);
@@ -119,11 +124,8 @@ export function sendIntent(mirqlDir, intentInput, options = {}) {
     throw err;
   }
 
-  // 4. Save warrant to <mirqlDir>/warrants/<warrant_id>.json
-  const warrantsDir = join(mirqlDir, "warrants");
-  mkdirSync(warrantsDir, { recursive: true });
-  const warrantFile = join(warrantsDir, `${warrantId}.json`);
-  writeFileSync(warrantFile, JSON.stringify(warrantDoc, null, 2) + "\n", "utf8");
+  // 4. B7: anchor the warrant document cryptographically.
+  const warrantHash = sha256(jcs(warrantDoc));
 
   // 5. Append signed human.intent event to ledger
   const { lastEvent, count, lastHash } = getLastEvent(mirqlDir);
@@ -153,8 +155,10 @@ export function sendIntent(mirqlDir, intentInput, options = {}) {
       kind: warrantClass,
       red_check: redCheckCmd,
       scope: anchors,
+      semantic_fingerprint: semanticFingerprint,
       summary,
       title,
+      warrant_hash: warrantHash,
       warrant_id: warrantId,
     },
   };
@@ -169,10 +173,17 @@ export function sendIntent(mirqlDir, intentInput, options = {}) {
 
   appendEvent(mirqlDir, signedEvent);
 
+  // 6. B7: persist the warrant document only AFTER ledger.append succeeded.
+  const warrantsDir = join(mirqlDir, "warrants");
+  mkdirSync(warrantsDir, { recursive: true });
+  const warrantFile = join(warrantsDir, `${warrantId}.json`);
+  writeFileSync(warrantFile, JSON.stringify(warrantDoc, null, 2) + "\n", "utf8");
+
   return {
     status: "sent",
     intent_id: intentId,
     warrant_id: warrantId,
+    warrant_hash: warrantHash,
     seq,
     event: signedEvent,
     warrant: warrantDoc,

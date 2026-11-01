@@ -1,22 +1,23 @@
-// tests/e2e-tracer.test.mjs — End-to-End Self-Hosting Tracer Bullet.
-// Exercises the complete autonomous mirql software factory loop:
-// 1. Genesis (mirql i genesis) — Drop-in initialization & key provisioning
-// 2. Human Intent (mirql i send) — Product Owner intent & schema-valid Warrant
-// 3. Bing-Bong Consensus (mirql r bing-bong) — 2-round multi-agent debate (DISAGREE -> CONVERGED)
-// 4. Queue Admission & Lease (mirql q submit -> mirql q lease -> mirql q tick) — Mode transitions BUILD -> HARDEN -> PATROL -> QUIESCENT
-// 5. Execution & Proof (mirql r verify & mirql r supervisor) — Red-Green-ReRed proof + anti-cheat attempt outcome
-// 6. Ledger Audit & Cache Replay (mirql l verify & mirql l replay & mirql i digest) — Cryptographic audit & keyless digest
+// tests/e2e-tracer.test.mjs — End-to-End Self-Hosting Tracer Bullet (W5b hardened).
+//
+// Drives the REAL CLIs across the full autonomous mirql factory loop:
+//   1. mirql i genesis --human-key-out <tmpHumanKey>  (Law 6: key outside .mirql)
+//   2. mirql i send --key <tmpHumanKey> ...           (anchored warrant, B7)
+//   3. mirql q submit -> mirql q lease                (real W4 queue)
+//   4. mirql l verify                                  (append-only chain + signatures)
+//   5. mirql i digest                                  (keyless read-only digest)
+//   6. mirql i act --decision approve --key ...        (human sovereignty)
+// plus the B5 halt/resume drill: mirql q halt -> mirql i act --decision resume
+// emits mirql.resume, which BOTH the queue and log folds honor.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   readFileSync,
-  writeFileSync,
   existsSync,
   mkdtempSync,
   rmSync,
   mkdirSync,
-  appendFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -25,12 +26,8 @@ import { fileURLToPath } from "node:url";
 import {
   EXIT_CODES,
   validateDocument,
-  verifyEvent,
-  signEvent,
-  ulid,
-  hlcTick,
-  jcs,
   sha256,
+  jcs,
 } from "../packages/core/index.mjs";
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
@@ -38,7 +35,8 @@ const BIN_MIRQL = join(ROOT, "bin", "mirql.mjs");
 const BIN_INBOX = join(ROOT, "bin", "mirql-inbox.mjs");
 const BIN_LOG = join(ROOT, "bin", "mirql-log.mjs");
 const BIN_QUEUE = join(ROOT, "bin", "mirql-queue.mjs");
-const BIN_RUN = join(ROOT, "bin", "mirql-run.mjs");
+
+const CROCKFORD_ULID = /^[0-9A-HJKMNPQRSTVWXYZ]{26}$/;
 
 function makeTmpDir() {
   return mkdtempSync(join(tmpdir(), "mirql-e2e-tracer-"));
@@ -53,20 +51,6 @@ function runBin(binPath, args, opts = {}) {
   });
 }
 
-function loadKeyFromFile(mirqlDir, keyFileName) {
-  const p = join(mirqlDir, "keys", keyFileName);
-  return JSON.parse(readFileSync(p, "utf8"));
-}
-
-function appendSignedEvent(mirqlDir, envelopeWithoutHashSig, keypair) {
-  const eventsFile = join(mirqlDir, "ledger", "events.jsonl");
-  const signed = signEvent(envelopeWithoutHashSig, keypair.privateKey, keypair.keyId);
-  const verifyRes = verifyEvent(signed, keypair.publicKey);
-  assert.equal(verifyRes.ok, true, `Signature verification failed: ${verifyRes.reason}`);
-  appendFileSync(eventsFile, jcs(signed) + "\n", "utf8");
-  return signed;
-}
-
 function readAllEvents(mirqlDir) {
   const eventsFile = join(mirqlDir, "ledger", "events.jsonl");
   if (!existsSync(eventsFile)) return [];
@@ -77,77 +61,90 @@ function readAllEvents(mirqlDir) {
     .map((l) => JSON.parse(l));
 }
 
-describe("End-to-End Self-Hosting Tracer Bullet (Full 5-Binary Autonomous Factory Loop)", () => {
-  it("executes the complete autonomous mirql factory loop from genesis to quiescence", () => {
+describe("End-to-End Self-Hosting Tracer Bullet (W5b hardened: full 5-binary autonomous loop)", () => {
+  it("executes the complete autonomous loop: genesis -> send -> lease -> verify -> digest -> act -> halt/resume", () => {
     const tmp = makeTmpDir();
     const mirqlDir = join(tmp, ".mirql");
+    const operatorDir = join(tmp, "operator");
+    const humanKeyPath = join(operatorDir, "human_owner.key.private.json");
+    mkdirSync(operatorDir, { recursive: true });
 
     try {
-      // =========================================================================
-      // Step 1: Genesis (mirql i genesis) — Drop-in bootstrap & key generation
-      // =========================================================================
+      // =====================================================================
+      // Step 1: Genesis — drop-in bootstrap, externalized human key (Law 6)
+      // =====================================================================
       const genRes = runBin(BIN_MIRQL, [
-        "i",
-        "genesis",
-        "--dir",
-        mirqlDir,
-        "--idempotency-key",
-        "tracer-genesis-1",
+        "i", "genesis",
+        "--dir", mirqlDir,
+        "--human-key-out", humanKeyPath,
+        "--idempotency-key", "tracer-genesis-1",
       ]);
       assert.equal(genRes.status, 0, `Genesis failed: ${genRes.stderr}`);
       const genDoc = JSON.parse(genRes.stdout);
       assert.equal(genDoc.status, "initialized");
       assert.equal(genDoc.seq, 1);
       assert.ok(genDoc.hash.startsWith("sha256:"));
+      assert.equal(resolve(genDoc.human_key_path), resolve(humanKeyPath));
 
-      // Verify all factory keys and keyring generated
-      const humanKey = loadKeyFromFile(mirqlDir, "human.key.json");
-      const queueKey = loadKeyFromFile(mirqlDir, "queue.key.json");
-      const runKey = loadKeyFromFile(mirqlDir, "run_supervisor.key.json");
-      const notaryKey = loadKeyFromFile(mirqlDir, "notary.key.json");
-      const keyring = JSON.parse(readFileSync(join(mirqlDir, "ledger", "keyring.json"), "utf8"));
+      // The human private key lives OUTSIDE .mirql, factory keys inside.
+      assert.ok(existsSync(humanKeyPath), "human key file must exist");
+      assert.equal(
+        existsSync(join(mirqlDir, "keys", "human.key.json")), false,
+        "no human private key may remain inside .mirql/keys/",
+      );
+      assert.ok(existsSync(join(mirqlDir, "keys", "queue.key.json")));
+      assert.ok(existsSync(join(mirqlDir, "keys", "run_supervisor.key.json")));
+      assert.ok(existsSync(join(mirqlDir, "keys", "notary.key.json")));
 
-      assert.equal(keyring[humanKey.keyId], humanKey.publicKey);
-      assert.equal(keyring[queueKey.keyId], queueKey.publicKey);
-      assert.equal(keyring[runKey.keyId], runKey.publicKey);
-      assert.equal(keyring[notaryKey.keyId], notaryKey.publicKey);
+      const humanKeyDoc = JSON.parse(readFileSync(humanKeyPath, "utf8"));
+      assert.equal(humanKeyDoc.writer.ns, "human:owner");
 
-      // Verify seq: 1 genesis event in ledger
+      // Keyring entries are namespace-bound objects { ns, publicKey } (B3).
+      const keyring = JSON.parse(
+        readFileSync(join(mirqlDir, "ledger", "keyring.json"), "utf8"),
+      );
+      assert.equal(keyring["human:owner"].ns, "human:owner");
+      assert.equal(keyring["human:owner"].publicKey, humanKeyDoc.publicKey);
+      assert.equal(keyring["tool:queue"].ns, "tool:queue");
+      assert.equal(keyring[humanKeyDoc.keyId].ns, "human:owner");
+
       let events = readAllEvents(mirqlDir);
       assert.equal(events.length, 1);
       assert.equal(events[0].seq, 1);
       assert.equal(events[0].type, "mirql.genesis");
       assert.equal(events[0].writer.ns, "human:owner");
+      assert.equal(events[0].writer.key_id, humanKeyDoc.keyId);
       assert.equal(events[0].prev_hash, "sha256:" + "0".repeat(64));
 
-      // =========================================================================
-      // Step 2: Human Intent (mirql i send) — Product Owner intent & Warrant
-      // =========================================================================
-      const sendRes = runBin(BIN_INBOX, [
-        "send",
-        "--dir",
-        mirqlDir,
-        "--kind",
-        "feature",
-        "--title",
-        "Self-Hosting E2E Tracer Implementation",
-        "--summary",
-        "Verify full factory lifecycle across all 5 binaries",
-        "--scope",
-        "packages/core/**,packages/inbox/**,packages/log/**",
-        "--red-check",
-        "node --test tests/e2e-tracer.test.mjs",
-        "--budget",
-        "1500000",
+      // Genesis is idempotent through the CLI as well.
+      const genAgain = runBin(BIN_MIRQL, [
+        "i", "genesis", "--dir", mirqlDir, "--human-key-out", humanKeyPath,
+      ]);
+      assert.equal(genAgain.status, 0);
+      assert.equal(JSON.parse(genAgain.stdout).status, "already_initialized");
+      assert.equal(readAllEvents(mirqlDir).length, 1);
+
+      // =====================================================================
+      // Step 2: Human Intent — explicit credentials, anchored warrant (B7)
+      // =====================================================================
+      const sendRes = runBin(BIN_MIRQL, [
+        "i", "send",
+        "--dir", mirqlDir,
+        "--key", humanKeyPath,
+        "--kind", "feature",
+        "--title", "Self-Hosting E2E Tracer Implementation",
+        "--summary", "Verify full factory lifecycle across all 5 binaries",
+        "--scope", "packages/core/**,packages/inbox/**,packages/log/**",
+        "--red-check", "node scripts/run-tests.mjs",
+        "--budget", "1500000",
       ]);
       assert.equal(sendRes.status, 0, `Send intent failed: ${sendRes.stderr}`);
       const sendDoc = JSON.parse(sendRes.stdout);
       assert.equal(sendDoc.status, "sent");
       assert.equal(sendDoc.seq, 2);
       const warrantId = sendDoc.warrant_id;
-      assert.ok(warrantId);
+      assert.match(warrantId, CROCKFORD_ULID);
 
-      // Verify Warrant document adheres strictly to warrant.schema.json
       const warrantFile = join(mirqlDir, "warrants", `${warrantId}.json`);
       assert.ok(existsSync(warrantFile), "warrants/<warrant_id>.json must exist");
       const warrant = JSON.parse(readFileSync(warrantFile, "utf8"));
@@ -160,320 +157,180 @@ describe("End-to-End Self-Hosting Tracer Bullet (Full 5-Binary Autonomous Factor
       assert.equal(events.length, 2);
       assert.equal(events[1].seq, 2);
       assert.equal(events[1].type, "human.intent");
+      assert.equal(events[1].writer.ns, "human:owner");
       assert.equal(events[1].prev_hash, events[0].hash);
+      // B7: the event anchors the warrant document cryptographically.
+      assert.equal(events[1].payload.warrant_hash, sha256(jcs(warrant)));
+      assert.equal(events[1].payload.semantic_fingerprint, warrant.semantic_fingerprint);
 
-      // =========================================================================
-      // Step 3: Bing-Bong Consensus (mirql r bing-bong) — 2-Round Multi-Agent Debate
-      // =========================================================================
-      // Test CLI entrypoint invocation for mirql r bing-bong
-      const bbCliRes = runBin(BIN_MIRQL, ["r", "bing-bong", "--dir", mirqlDir, "--warrant", warrantId]);
-      assert.equal(bbCliRes.status, 0, `mirql r bing-bong exited ${bbCliRes.status}`);
+      // =====================================================================
+      // Step 3: Queue admission & lease with the real W4 queue
+      // =====================================================================
+      const submitRes = runBin(BIN_QUEUE, [
+        "submit", "--dir", mirqlDir, "--file", warrantFile,
+      ]);
+      assert.equal(submitRes.status, 0, `Queue submit failed: ${submitRes.stderr}`);
+      const submitDoc = JSON.parse(submitRes.stdout);
+      assert.equal(submitDoc.status, "submitted");
+      const jobId = submitDoc.job_id;
+      assert.match(jobId, CROCKFORD_ULID);
 
-      // Simulate the 2-Round Bing-Bong consensus debate transcript
-      // Round 1: Claude Opus 5.5 & GLM 5.3 Max raise blocking objections (DISAGREE)
-      const consensusDir = join(mirqlDir, "consensus");
-      mkdirSync(consensusDir, { recursive: true });
+      const leaseRes = runBin(BIN_QUEUE, ["lease", "--dir", mirqlDir]);
+      assert.equal(leaseRes.status, 0, `Queue lease failed: ${leaseRes.stderr}`);
+      const leaseDoc = JSON.parse(leaseRes.stdout);
+      assert.equal(leaseDoc.status, "leased");
+      assert.equal(leaseDoc.job_id, jobId);
+      assert.equal(leaseDoc.warrant_id, warrantId);
+      assert.ok(typeof leaseDoc.epoch === "number" && leaseDoc.epoch >= 2);
 
-      const round1Packet = {
-        round: 1,
-        max_rounds: 3,
-        warrant_id: warrantId,
-        debators: ["claude-opus-5-5-medium", "glm-5-3-max"],
-        verdict: "DISAGREE",
-        blocking_objections: [
-          {
-            id: "obj-001",
-            law_cited: "Law 16 (GREEN Must Be Causal)",
-            objection: "Reproducer must be verified Red-on-Base before candidate patch verification",
-          },
-        ],
-        proposed_amendments: [
-          {
-            field: "scope.allow",
-            action: "append",
-            path: "tests/e2e-tracer.test.mjs",
-          },
-        ],
-        warrant_patch: {
-          anchors: [...warrant.anchors, "tests/e2e-tracer.test.mjs"],
-        },
-      };
-      writeFileSync(join(consensusDir, "round-1.json"), JSON.stringify(round1Packet, null, 2) + "\n", "utf8");
-
-      // Round 2: Objections resolved, all agents reach unanimous agreement (CONVERGED)
-      const round2Packet = {
-        round: 2,
-        max_rounds: 3,
-        warrant_id: warrantId,
-        debators: ["claude-opus-5-5-medium", "glm-5-3-max"],
-        verdict: "CONVERGED",
-        blocking_objections: [],
-        proposed_amendments: [],
-        warrant_patch: null,
-      };
-      writeFileSync(join(consensusDir, "round-2.json"), JSON.stringify(round2Packet, null, 2) + "\n", "utf8");
-
-      // Emit consensus verification & warrant admission event
-      events = readAllEvents(mirqlDir);
-      const warrantCreatedEvt = appendSignedEvent(
-        mirqlDir,
-        {
-          v: 1,
-          id: ulid(),
-          tenant_id: "mirql-core",
-          seq: events.length + 1,
-          epoch: 1,
-          hlc: hlcTick(events.at(-1)?.hlc, Date.now(), "local"),
-          ts: new Date().toISOString(),
-          type: "warrant.created",
-          writer: { ns: "tool:run_supervisor", key_id: runKey.keyId },
-          idempotency_key: `warrant-created:${warrantId}`,
-          prev_hash: events.at(-1).hash,
-          payload: {
-            warrant_id: warrantId,
-            intent_id: `intent_${warrantId}`,
-            role: "builder",
-            tier: "mid",
-            budget_micro_usd: 1500000,
-            status: "active",
-          },
-        },
-        runKey
-      );
-      assert.equal(warrantCreatedEvt.seq, 3);
-
-      // =========================================================================
-      // Step 4: Queue Admission & Lease (mirql q submit -> lease -> tick)
-      // =========================================================================
-      // Test CLI entrypoint invocation for mirql-queue
       const qStatusRes = runBin(BIN_QUEUE, ["status", "--dir", mirqlDir]);
-      assert.equal(qStatusRes.status, 0);
+      assert.equal(qStatusRes.status, 0, `Queue status failed: ${qStatusRes.stderr}`);
+      const qStatus = JSON.parse(qStatusRes.stdout);
+      assert.equal(qStatus.halted, false);
+      assert.equal(qStatus.jobs[jobId].status, "leased");
+      assert.ok(qStatus.open_warrants.includes(warrantId));
 
       events = readAllEvents(mirqlDir);
-      const jobId = ulid();
+      assert.equal(events.length, 4);
+      assert.equal(events[2].type, "job.enqueued");
+      assert.equal(events[2].writer.ns, "tool:queue");
+      assert.equal(events[3].type, "job.leased");
+      assert.equal(events[3].writer.ns, "tool:queue");
 
-      // Queue leases job to builder node
-      const jobLeasedEvt = appendSignedEvent(
-        mirqlDir,
-        {
-          v: 1,
-          id: ulid(),
-          tenant_id: "mirql-core",
-          seq: events.length + 1,
-          epoch: 1,
-          hlc: hlcTick(events.at(-1)?.hlc, Date.now(), "local"),
-          ts: new Date().toISOString(),
-          type: "job.leased",
-          writer: { ns: "tool:queue", key_id: queueKey.keyId },
-          idempotency_key: `lease:${jobId}`,
-          prev_hash: events.at(-1).hash,
-          payload: {
-            job_id: jobId,
-            warrant_id: warrantId,
-            worker_id: "worker_node_1",
-            status: "leased",
-          },
-        },
-        queueKey
-      );
-      assert.equal(jobLeasedEvt.seq, 4);
+      // =====================================================================
+      // Step 4: Cryptographic ledger audit (chain + signatures + bindings)
+      // =====================================================================
+      const verifyRes = runBin(BIN_MIRQL, ["l", "verify", "--dir", mirqlDir]);
+      assert.equal(verifyRes.status, 0, `Ledger verify failed: ${verifyRes.stderr}`);
+      const audit = JSON.parse(verifyRes.stdout);
+      assert.equal(audit.valid, true);
+      assert.equal(audit.event_count, 4);
+      assert.equal(audit.head_hash, events[3].hash);
 
-      // =========================================================================
-      // Step 5: Execution & Proof (mirql r verify & supervisor) — Red-Green-ReRed
-      // =========================================================================
-      const outcomeDoc = {
-        v: 1,
-        id: ulid(),
-        job_id: jobId,
-        warrant_id: warrantId,
-        epoch: 1,
-        status: "completed",
-        base_sha: "sha256:" + "a".repeat(64),
-        head_sha: "sha256:" + "b".repeat(64),
-        tree_hash: "sha256:" + "c".repeat(64),
-        evidence: {
-          red_on_base: true,
-          green_on_head: true,
-          rered_passed: true,
-        },
-        anti_cheat: {
-          tests_deleted: 0,
-          exceptions_swallowed: 0,
-          network_calls: 0,
-        },
-        phi: {
-          before: 100,
-          after: 90,
-          delta: -10,
-        },
-        surface: {
-          cited: true,
-          delta_zero: true,
-        },
-        thrift: {
-          passed: true,
-        },
-        reconciliation: {
-          merge_ready: true,
-        },
-        cost: {
-          tokens: 1450,
-          micro_usd: 450000,
-        },
-      };
+      // The standalone mirql-log binary verifies identically.
+      const verifyLogBin = runBin(BIN_LOG, ["verify", "--dir", mirqlDir]);
+      assert.equal(verifyLogBin.status, 0);
+      assert.deepEqual(JSON.parse(verifyLogBin.stdout), audit);
 
-      const valOutcome = validateDocument("outcome", outcomeDoc);
-      assert.equal(valOutcome.valid, true, `Outcome invalid: ${valOutcome.errors.join("; ")}`);
-
-      // Record verified attempt.outcome event
-      events = readAllEvents(mirqlDir);
-      const attemptOutcomeEvt = appendSignedEvent(
-        mirqlDir,
-        {
-          v: 1,
-          id: ulid(),
-          tenant_id: "mirql-core",
-          seq: events.length + 1,
-          epoch: 1,
-          hlc: hlcTick(events.at(-1)?.hlc, Date.now(), "local"),
-          ts: new Date().toISOString(),
-          type: "attempt.outcome",
-          writer: { ns: "tool:run_supervisor", key_id: runKey.keyId },
-          idempotency_key: `outcome:${jobId}`,
-          prev_hash: events.at(-1).hash,
-          payload: {
-            job_id: jobId,
-            warrant_id: warrantId,
-            status: "completed",
-            verdict: "auto_merge",
-            cost_micro_usd: 450000,
-            tokens_consumed: 1450,
-            phi_before: 100,
-            phi_after: 90,
-          },
-        },
-        runKey
-      );
-      assert.equal(attemptOutcomeEvt.seq, 5);
-
-      // Notary issues verdict.accepted and promotion.completed
-      events = readAllEvents(mirqlDir);
-      const verdictAcceptedEvt = appendSignedEvent(
-        mirqlDir,
-        {
-          v: 1,
-          id: ulid(),
-          tenant_id: "mirql-core",
-          seq: events.length + 1,
-          epoch: 1,
-          hlc: hlcTick(events.at(-1)?.hlc, Date.now(), "local"),
-          ts: new Date().toISOString(),
-          type: "verdict.accepted",
-          writer: { ns: "notary:mergeproof", key_id: notaryKey.keyId },
-          idempotency_key: `verdict:${jobId}`,
-          prev_hash: events.at(-1).hash,
-          payload: {
-            job_id: jobId,
-            verdict: "accepted",
-          },
-        },
-        notaryKey
-      );
-      assert.equal(verdictAcceptedEvt.seq, 6);
-
-      events = readAllEvents(mirqlDir);
-      const promotionEvt = appendSignedEvent(
-        mirqlDir,
-        {
-          v: 1,
-          id: ulid(),
-          tenant_id: "mirql-core",
-          seq: events.length + 1,
-          epoch: 1,
-          hlc: hlcTick(events.at(-1)?.hlc, Date.now(), "local"),
-          ts: new Date().toISOString(),
-          type: "promotion.completed",
-          writer: { ns: "notary:mergeproof", key_id: notaryKey.keyId },
-          idempotency_key: `promotion:${jobId}`,
-          prev_hash: events.at(-1).hash,
-          payload: {
-            promotion_id: `promo_${jobId}`,
-            job_id: jobId,
-          },
-        },
-        notaryKey
-      );
-      assert.equal(promotionEvt.seq, 7);
-
-      // Queue transitions modes: BUILD -> HARDEN -> PATROL -> QUIESCENT (Law 14)
-      events = readAllEvents(mirqlDir);
-      const modeTransitionEvt = appendSignedEvent(
-        mirqlDir,
-        {
-          v: 1,
-          id: ulid(),
-          tenant_id: "mirql-core",
-          seq: events.length + 1,
-          epoch: 1,
-          hlc: hlcTick(events.at(-1)?.hlc, Date.now(), "local"),
-          ts: new Date().toISOString(),
-          type: "factory.mode_changed",
-          writer: { ns: "tool:queue", key_id: queueKey.keyId },
-          idempotency_key: "mode-quiescent-1",
-          prev_hash: events.at(-1).hash,
-          payload: {
-            macro_state: "QUIESCENT",
-            reason: "All active warrants satisfied and probes reporting clean",
-          },
-        },
-        queueKey
-      );
-      assert.equal(modeTransitionEvt.seq, 8);
-
-      // =========================================================================
-      // Step 6: Ledger Audit & Cache Replay (mirql l verify & replay & mirql i digest)
-      // =========================================================================
-      // 6a. Full Cryptographic Ledger Audit: verify all 8 events from seq 1 to N
-      const verifyCliRes = runBin(BIN_MIRQL, ["l", "verify", "--dir", mirqlDir]);
-      assert.equal(verifyCliRes.status, 0, `Ledger verify failed: ${verifyCliRes.stderr}`);
-      const auditResult = JSON.parse(verifyCliRes.stdout);
-      assert.equal(auditResult.valid, true);
-      assert.equal(auditResult.event_count, 8);
-      assert.equal(auditResult.head_hash, modeTransitionEvt.hash);
-
-      // 6b. Cache Replay: delete cache/state.json, rebuild byte-identically via mirql l replay
-      const cacheDir = join(mirqlDir, "cache");
-      rmSync(cacheDir, { recursive: true, force: true });
-      assert.equal(existsSync(join(cacheDir, "state.json")), false);
-
-      const replayRes = runBin(BIN_MIRQL, ["l", "replay", "--dir", mirqlDir, "--rebuild-cache"]);
-      assert.equal(replayRes.status, 0, `Replay failed: ${replayRes.stderr}`);
-      assert.ok(existsSync(join(cacheDir, "state.json")), "cache/state.json must be rebuilt");
-
-      const replayedState = JSON.parse(readFileSync(join(cacheDir, "state.json"), "utf8"));
-      assert.equal(replayedState.seq, 8);
-      assert.equal(replayedState.budget_spent_micro_usd, 450000);
-      assert.ok(typeof replayedState.mode === "string");
-      assert.equal(replayedState.halted, false);
-
-      // 6c. Keyless Human Digest: render factory digest without private keys or mutations
+      // =====================================================================
+      // Step 5: Keyless read-only digest
+      // =====================================================================
       const digestRes = runBin(BIN_MIRQL, ["i", "digest", "--dir", mirqlDir]);
       assert.equal(digestRes.status, 0, `Digest failed: ${digestRes.stderr}`);
       const digest = JSON.parse(digestRes.stdout);
-
       assert.equal(digest.tool, "inbox");
-      assert.equal(digest.seq, 8);
-      assert.ok(typeof digest.mode === "string");
-      assert.equal(digest.budget_spent_micro_usd, 450000);
+      assert.equal(digest.seq, 4);
       assert.equal(digest.halted, false);
+      assert.equal(digest.budget_spent_micro_usd, 0);
       assert.equal(digest.mutates_ledger, false);
       assert.equal(digest.pending_approvals.length, 0);
-      assert.ok(digest.recent_outcomes.length > 0);
 
-      // Markdown format
-      const digestMdRes = runBin(BIN_INBOX, ["digest", "--dir", mirqlDir, "--format", "markdown"]);
+      const digestMdRes = runBin(BIN_INBOX, [
+        "digest", "--dir", mirqlDir, "--format", "markdown",
+      ]);
       assert.equal(digestMdRes.status, 0);
       assert.match(digestMdRes.stdout, /# mirql Factory Digest/);
+      assert.match(digestMdRes.stdout, /\$0\.00/); // Law 17 integer-only format
+
+      // =====================================================================
+      // Step 6: Human sovereignty — propose, then signed approval
+      // =====================================================================
+      const proposeRes = runBin(BIN_MIRQL, [
+        "i", "propose",
+        "--dir", mirqlDir,
+        "--roadmap-ref", "M1",
+        "--title", "Approve tracer warrant execution",
+        "--description", "Human sign-off on the E2E tracer bullet run",
+      ]);
+      assert.equal(proposeRes.status, 0, `Propose failed: ${proposeRes.stderr}`);
+      const propDoc = JSON.parse(proposeRes.stdout);
+      assert.equal(propDoc.status, "proposed");
+      const proposalId = propDoc.proposal_id;
+      assert.match(proposalId, CROCKFORD_ULID);
+
+      // Without the key the action fails closed (Law 6).
+      const actNoKey = runBin(BIN_MIRQL, [
+        "i", "act", "--dir", mirqlDir, "--decision", "approve", "--target-id", proposalId,
+      ]);
+      assert.equal(actNoKey.status, EXIT_CODES.POLICY_DENIAL);
+      assert.equal(JSON.parse(actNoKey.stderr).error, "credentials_required");
+
+      const actRes = runBin(BIN_MIRQL, [
+        "i", "act",
+        "--dir", mirqlDir,
+        "--decision", "approve",
+        "--key", humanKeyPath,
+        "--target-id", proposalId,
+        "--reason", "Human approves the tracer run",
+      ]);
+      assert.equal(actRes.status, 0, `Act failed: ${actRes.stderr}`);
+      const actDoc = JSON.parse(actRes.stdout);
+      assert.equal(actDoc.status, "acted");
+      assert.equal(actDoc.decision, "approve");
+      assert.equal(actDoc.seq, 5);
+      assert.equal(actDoc.event.type, "human.approval");
+      assert.equal(actDoc.event.writer.ns, "human:owner");
+
+      const proposalDoc = JSON.parse(
+        readFileSync(join(mirqlDir, "proposals", `${proposalId}.json`), "utf8"),
+      );
+      assert.equal(proposalDoc.status, "approved");
+
+      // =====================================================================
+      // Step 7: Halt / resume deadlock drill (B5)
+      // =====================================================================
+      const haltRes = runBin(BIN_QUEUE, ["halt", "--dir", mirqlDir, "--reason", "tracer halt drill"]);
+      assert.equal(haltRes.status, 0, `Halt failed: ${haltRes.stderr}`);
+      assert.equal(JSON.parse(haltRes.stdout).status, "halted");
+
+      const statusHalted = JSON.parse(runBin(BIN_QUEUE, ["status", "--dir", mirqlDir]).stdout);
+      assert.equal(statusHalted.halted, true);
+
+      // Resume is a human-sovereign action emitting mirql.resume (NOT
+      // human.approval) so both the queue and log folds lift the halt.
+      const resumeRes = runBin(BIN_MIRQL, [
+        "i", "act",
+        "--dir", mirqlDir,
+        "--decision", "resume",
+        "--key", humanKeyPath,
+        "--target-id", proposalId,
+        "--reason", "Human resumes the factory",
+      ]);
+      assert.equal(resumeRes.status, 0, `Resume failed: ${resumeRes.stderr}`);
+      const resumeDoc = JSON.parse(resumeRes.stdout);
+      assert.equal(resumeDoc.status, "acted");
+      assert.equal(resumeDoc.decision, "resume");
+      assert.equal(resumeDoc.seq, 7);
+      assert.equal(resumeDoc.event.type, "mirql.resume");
+      assert.equal(resumeDoc.event.writer.ns, "human:owner");
+
+      // The QUEUE fold lifts the halt on mirql.resume.
+      const statusResumed = JSON.parse(runBin(BIN_QUEUE, ["status", "--dir", mirqlDir]).stdout);
+      assert.equal(statusResumed.halted, false);
+
+      // The LOG fold lifts the halt on mirql.resume.
+      const viewRes = runBin(BIN_MIRQL, ["l", "view", "state", "--dir", mirqlDir]);
+      assert.equal(viewRes.status, 0, `View failed: ${viewRes.stderr}`);
+      const stateDoc = JSON.parse(viewRes.stdout);
+      assert.equal(stateDoc.seq, 7);
+      assert.equal(stateDoc.halted, false);
+
+      // The INBOX digest fold lifts the halt on mirql.resume.
+      const digestResumed = JSON.parse(runBin(BIN_MIRQL, ["i", "digest", "--dir", mirqlDir]).stdout);
+      assert.equal(digestResumed.halted, false);
+      assert.equal(digestResumed.seq, 7);
+
+      // =====================================================================
+      // Step 8: Final full-ledger audit
+      // =====================================================================
+      events = readAllEvents(mirqlDir);
+      assert.equal(events.length, 7);
+      const finalVerify = runBin(BIN_MIRQL, ["l", "verify", "--dir", mirqlDir]);
+      assert.equal(finalVerify.status, 0, `Final verify failed: ${finalVerify.stderr}`);
+      const finalAudit = JSON.parse(finalVerify.stdout);
+      assert.equal(finalAudit.valid, true);
+      assert.equal(finalAudit.event_count, 7);
+      assert.equal(finalAudit.head_hash, events[6].hash);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

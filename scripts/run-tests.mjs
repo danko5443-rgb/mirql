@@ -15,6 +15,16 @@ if (files.length === 0) {
   process.exit(0);
 }
 
+// W5b: the inbox suite and the E2E tracer bullet are mandatory — refuse to
+// run a partial suite if either file is missing.
+const REQUIRED_SUITES = ["inbox.test.mjs", "e2e-tracer.test.mjs"];
+const present = new Set(files.map((f) => f.split(/[\\/]/).pop()));
+const missing = REQUIRED_SUITES.filter((name) => !present.has(name));
+if (missing.length > 0) {
+  console.error(`Missing required test suites: ${missing.join(", ")}`);
+  process.exit(1);
+}
+
 const extraArgs = process.argv.slice(2);
 const res = spawnSync(process.execPath, ["--test", ...extraArgs, ...files], {
   cwd: root,

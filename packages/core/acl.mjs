@@ -16,7 +16,7 @@ export const WRITER_ACL = Object.freeze(
     /** Inbox tool: human-facing events it records. */
     "tool:inbox": /^human\.[a-z_]+$/,
     /** The human owner, via any medium. */
-    "human:owner": /^human\.[a-z_]+$/,
+    "human:owner": /^(?:human\.[a-z_]+|warrant\.(?:created|revoked)|mirql\.(?:genesis|halt|resume))$/,
     /** The mergeproof notary: verdicts and promotions. */
     "notary:mergeproof": /^(verdict|promotion)\.[a-z_]+$/,
     /** Lifeguard daemon: may only ever roll things back. */

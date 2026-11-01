@@ -8,7 +8,7 @@ import {
   renameSync,
 } from "node:fs";
 import { join } from "node:path";
-import { jcs, sha256 } from "../core/index.mjs";
+import { jcs, sha256, EXIT_CODES } from "../core/index.mjs";
 
 export const GENESIS_PREV_HASH = `sha256:${"0".repeat(64)}`;
 
@@ -114,9 +114,9 @@ export function foldState(events) {
     } else if (type === "factory.mode_changed" || type === "queue.macro_transition") {
       if (typeof payload.macro_state === "string") state.mode = payload.macro_state;
       if (typeof payload.mode === "string") state.mode = payload.mode;
-    } else if (type === "factory.halted" || type === "mirql.halted" || type === "human.kill") {
+    } else if (type === "factory.halted" || type === "mirql.halted" || type === "mirql.halt" || type === "human.kill") {
       state.halted = true;
-    } else if (type === "factory.resumed" || type === "mirql.resumed" || type === "human.resume") {
+    } else if (type === "factory.resumed" || type === "mirql.resumed" || type === "mirql.resume" || type === "human.resume") {
       state.halted = false;
     } else if (type === "warrant.created") {
       const wid = payload.warrant_id;
@@ -200,4 +200,25 @@ export function updateStateCache(mirqlDir) {
   writeFileSync(tmpFile, jcs(state) + "\n", "utf8");
   renameSync(tmpFile, cacheFile);
   return state;
+}
+
+/**
+ * Fail closed unless the ledger is initialized: non-empty and anchored by a
+ * valid `mirql.genesis` first event. Human actions (send/act) must never
+ * operate on a foreign or uninitialized ledger.
+ *
+ * @param {string} mirqlDir
+ * @returns {void}
+ * @throws structured Error (not_initialized, POLICY_DENIAL)
+ */
+export function requireGenesisLedger(mirqlDir) {
+  const { events } = readEvents(mirqlDir);
+  if (events.length === 0 || events[0]?.type !== "mirql.genesis") {
+    const err = new Error(
+      `not_initialized: ${mirqlDir} has no genesis-anchored ledger; run \`mirql i genesis\` first`,
+    );
+    err.errorCode = "not_initialized";
+    err.exitCode = EXIT_CODES.POLICY_DENIAL;
+    throw err;
+  }
 }
