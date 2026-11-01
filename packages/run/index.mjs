@@ -21,6 +21,7 @@ import {
   verifyClaimCheck,
   formatDriftEvent,
 } from "./drift.mjs";
+import { runThriftTest } from "./thrift.mjs";
 import {
   generateMutants,
   runMutationTesting,
@@ -391,6 +392,23 @@ export function runCli(argv = []) {
       return res.ok ? EXIT_CODES.OK : EXIT_CODES.DOMAIN_NEGATIVE;
     }
 
+    case "thrift": {
+      // Law 13 Thrift Test producer (issue #13): MEASURES the thrift criteria
+      // from a real base...head diff. Exit 0 iff the test genuinely passed.
+      const baseRef = flags.base;
+      if (!baseRef) {
+        emitError({ error: "USAGE_ERROR", reason: "missing required --base <ref>" });
+        return EXIT_CODES.USAGE_ERROR;
+      }
+      const res = runThriftTest({
+        repoDir: flags.repo ?? flags.workspace ?? process.cwd(),
+        baseRef,
+        headRef: flags.head ?? "HEAD",
+      });
+      emitLine(jcs(res));
+      return res.thrift_test_passed === true ? EXIT_CODES.OK : EXIT_CODES.DOMAIN_NEGATIVE;
+    }
+
     case "mutant": {
       try {
         const sourcePath = flags.source ?? positional[1];
@@ -700,6 +718,7 @@ export {
   checkPhiReduction,
   evaluatePhiGate,
   verifyThrift,
+  runThriftTest,
   detectDrift,
   verifyClaimCheck,
   formatDriftEvent,

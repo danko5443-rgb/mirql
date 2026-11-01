@@ -102,9 +102,20 @@ export function collectDiff(baseSha, headSha, repoDir) {
  * @param {{ pass_base: boolean, pass_head: boolean }} input.suite
  * @param {{ delta_phi: number }} input.phi
  * @param {boolean} [input.causalCompleted=false] - only true with a VERIFIED reproducer cycle
+ * @param {{ passed: boolean, evidence?: object, reasons?: string[] }} [input.thrift]
+ *        - MEASURED thrift test verdict (issue #13). Only ever true when a
+ *          real thrift test ran; absent for non-consolidation PRs.
  * @returns {object} pr-doc consumable by `mirql m check`
  */
-export function buildPrDoc({ pr, diff, suite, phi, causalCompleted = false }) {
+export function buildPrDoc({ pr, diff, suite, phi, causalCompleted = false, thrift }) {
+  const phiBlock = { delta_phi: phi.delta_phi };
+  if (thrift) {
+    phiBlock.thrift_test_passed = thrift.passed === true;
+    if (thrift.evidence) phiBlock.thrift_evidence = thrift.evidence;
+    if (Array.isArray(thrift.reasons) && thrift.reasons.length > 0) {
+      phiBlock.thrift_reasons = thrift.reasons;
+    }
+  }
   return {
     pr: {
       number: pr.number,
@@ -124,9 +135,7 @@ export function buildPrDoc({ pr, diff, suite, phi, causalCompleted = false }) {
       suite_pass_base: suite.pass_base === true,
       suite_pass_head: suite.pass_head === true,
     },
-    phi: {
-      delta_phi: phi.delta_phi,
-    },
+    phi: phiBlock,
   };
 }
 
@@ -178,10 +187,11 @@ export async function main(env = process.env) {
 
   // 2. Law 13: base-authored phi (both sides measured by the SAME N-1 engine)
   let deltaPhi;
+  let baseComputePhi;
   try {
-    const computePhi = await loadBaseComputePhi(baseDir);
-    const phiBase = computePhi(baseDir);
-    const phiHead = computePhi(candidateDir);
+    baseComputePhi = await loadBaseComputePhi(baseDir);
+    const phiBase = baseComputePhi(baseDir);
+    const phiHead = baseComputePhi(candidateDir);
     if (!Number.isSafeInteger(phiBase?.total) || !Number.isSafeInteger(phiHead?.total)) {
       throw new Error("base or candidate phi total is not a safe integer");
     }
@@ -189,6 +199,36 @@ export async function main(env = process.env) {
   } catch (err) {
     process.stderr.write(`ci-evidence: base-authored computePhi failed: ${err.message}\n`);
     process.exit(1);
+  }
+
+  // 2b. Law 13 Thrift Test (issue #13): the evaluator fail-closes
+  // THRIFT_TEST_FAILED on consolidation PRs (delta_phi < 0) unless
+  // phi.thrift_test_passed === true — so exactly then, MEASURE it. The
+  // candidate's own producer runs against the two real checkouts with the
+  // BASE-authored phi engine injected (Law 7). Non-consolidations (ΔΦ ≥ 0)
+  // never claim a thrift pass.
+  let thrift;
+  if (deltaPhi < 0) {
+    try {
+      const thriftPath = join(candidateDir, "packages", "run", "thrift.mjs");
+      if (!existsSync(thriftPath)) {
+        throw new Error(`candidate has no thrift producer at ${thriftPath}`);
+      }
+      const { runThriftTest } = await import(pathToFileURL(thriftPath).href);
+      const result = runThriftTest({
+        repoDir: candidateDir,
+        baseRef: baseSha,
+        headRef: headSha,
+        computePhiFn: baseComputePhi,
+      });
+      thrift = {
+        passed: result.thrift_test_passed === true,
+        evidence: result.evidence,
+        reasons: result.reasons,
+      };
+    } catch (err) {
+      thrift = { passed: false, reasons: [`thrift producer failed: ${err.message}`] };
+    }
   }
 
   // 3. Honest suite outcomes (measured by the CI steps, never assumed)
@@ -201,12 +241,13 @@ export async function main(env = process.env) {
     },
     phi: { delta_phi: deltaPhi },
     causalCompleted: false, // Law 16: no verified reproducer artifact in this pipeline yet
+    thrift,
   });
 
   const outPath = resolve(env.PR_DOC_PATH ?? join(candidateDir, "pr-doc.json"));
   writeFileSync(outPath, JSON.stringify(prDoc), "utf8");
   process.stdout.write(
-    `ci-evidence: wrote ${outPath} (suite base=${prDoc.proof.suite_pass_base} head=${prDoc.proof.suite_pass_head} delta_phi=${deltaPhi} causal=false)\n`,
+    `ci-evidence: wrote ${outPath} (suite base=${prDoc.proof.suite_pass_base} head=${prDoc.proof.suite_pass_head} delta_phi=${deltaPhi} causal=false${thrift ? ` thrift=${prDoc.phi.thrift_test_passed}` : ""})\n`,
   );
 }
 
