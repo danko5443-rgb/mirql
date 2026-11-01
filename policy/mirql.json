@@ -19,5 +19,6 @@
     "PATROL",
     "QUIESCENT"
   ],
-  "quiescent_max_budget_bp": 500
+  "quiescent_max_budget_bp": 500,
+  "max_build_concurrency": 1
 }

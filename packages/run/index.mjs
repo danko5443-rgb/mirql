@@ -2,7 +2,13 @@
 // and bing-bong multi-agent consensus orchestrator.
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { EXIT_CODES, jcs } from "../core/index.mjs";
+import {
+  EXIT_CODES,
+  jcs,
+  LedgerWatcher,
+  createLedgerWatcher,
+  waitForLedgerEvent,
+} from "../core/index.mjs";
 import { computePhi, checkPhiReduction } from "./phi.mjs";
 import {
   checkAntiCheat,
@@ -20,7 +26,12 @@ import {
 } from "./anti-cheat.mjs";
 import { verifyAttempt } from "./verify.mjs";
 import { runAgent, sanitizeAgentEnv, SAFE_ENV_ALLOWLIST } from "./agent.mjs";
-import { runSupervisor, touchHeartbeat, startHeartbeatTicker } from "./supervisor.mjs";
+import {
+  runSupervisor,
+  runSupervisorReactive,
+  touchHeartbeat,
+  startHeartbeatTicker,
+} from "./supervisor.mjs";
 import { runProbe, KNOWN_PROBES } from "./probe.mjs";
 import { runBingBong, extractModelFamily } from "./bing-bong.mjs";
 import { appendSupervisorEvent, getOrGenerateSupervisorKey } from "./ledger.mjs";
@@ -385,6 +396,7 @@ export {
   checkPhiReduction,
   verifyAttempt,
   runSupervisor,
+  runSupervisorReactive,
   runAgent,
   sanitizeAgentEnv,
   SAFE_ENV_ALLOWLIST,
@@ -408,4 +420,7 @@ export {
   getOrGenerateSupervisorKey,
   touchHeartbeat,
   startHeartbeatTicker,
+  LedgerWatcher,
+  createLedgerWatcher,
+  waitForLedgerEvent,
 };
