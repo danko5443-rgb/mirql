@@ -49,7 +49,6 @@ describe("Milestone M3: Claim-Check Drift Sentinel & Surface Lock Verification",
     });
 
     it("detects missing required public binary entrypoint", () => {
-      // Create minimal fake workspace
       writeFileSync(
         join(tempDir, "surface.lock"),
         JSON.stringify({ v: 1, bins: ["mirql-missing"], schemas: [] }),
@@ -63,6 +62,30 @@ describe("Milestone M3: Claim-Check Drift Sentinel & Surface Lock Verification",
       assert.ok(binDrift, "Must flag missing bin");
       assert.equal(binDrift.drift_type, "surface");
       assert.ok(binDrift.details.includes("mirql-missing"));
+    });
+
+    it("detects missing public command declared in surface.lock", () => {
+      const pkgDir = join(tempDir, "packages", "run");
+      mkdirSync(pkgDir, { recursive: true });
+      writeFileSync(
+        join(pkgDir, "index.mjs"),
+        `export const SUBCOMMANDS = Object.freeze(["supervisor"]);\n`,
+        "utf8",
+      );
+      writeFileSync(
+        join(tempDir, "surface.lock"),
+        JSON.stringify({
+          v: 1,
+          bins: [],
+          commands: ["mirql r supervisor", "mirql r missing-cmd"],
+          schemas: [],
+        }),
+        "utf8",
+      );
+
+      const res = detectDrift(tempDir);
+      assert.equal(res.ok, false);
+      assert.ok(res.drifts.some((d) => d.details.includes("mirql r missing-cmd")));
     });
   });
 
@@ -86,10 +109,27 @@ describe("Milestone M3: Claim-Check Drift Sentinel & Surface Lock Verification",
       assert.ok(depDrift.drift_score_bp >= 5000);
       assert.ok(depDrift.details.includes("Law 0 violation"));
     });
+
+    it("flags peerDependencies and optionalDependencies in package.json", () => {
+      writeFileSync(
+        join(tempDir, "surface.lock"),
+        JSON.stringify({ v: 1, bins: [], schemas: [] }),
+        "utf8",
+      );
+      writeFileSync(
+        join(tempDir, "package.json"),
+        JSON.stringify({ name: "illicit-peers", peerDependencies: { "react": "^18.0.0" } }),
+        "utf8",
+      );
+
+      const res = detectDrift(tempDir);
+      assert.equal(res.ok, false);
+      assert.ok(res.drifts.some((d) => d.details.includes("peerDependencies: 1")));
+    });
   });
 
   describe("4. Architectural Boundary Checks", () => {
-    it("flags unauthorized bare specifier imports in packages", () => {
+    it("flags unauthorized bare specifier imports, re-exports, dynamic imports, and require", () => {
       writeFileSync(
         join(tempDir, "surface.lock"),
         JSON.stringify({ v: 1, bins: [], schemas: [] }),
@@ -105,18 +145,26 @@ describe("Milestone M3: Claim-Check Drift Sentinel & Surface Lock Verification",
       mkdirSync(pkgDir, { recursive: true });
       writeFileSync(
         join(pkgDir, "index.mjs"),
-        `import express from "express";\nexport const x = 1;\n`,
+        `// Safe comment mentioning "express"
+export * from "lodash";
+const chalk = require("chalk");
+async function load() { await import("left-pad"); }
+import express from "express";
+export const x = 1;
+`,
         "utf8",
       );
 
       const res = detectDrift(tempDir);
       assert.equal(res.ok, false);
-      const archDrift = res.drifts.find((d) => d.drift_type === "architecture");
-      assert.ok(archDrift, "Must detect bare specifier architecture drift");
-      assert.ok(archDrift.details.includes("express"));
+      const archDrifts = res.drifts.filter((d) => d.drift_type === "architecture");
+      assert.ok(archDrifts.some((d) => d.details.includes("lodash")));
+      assert.ok(archDrifts.some((d) => d.details.includes("chalk")));
+      assert.ok(archDrifts.some((d) => d.details.includes("left-pad")));
+      assert.ok(archDrifts.some((d) => d.details.includes("express")));
     });
 
-    it("flags Law 1 privilege boundary leak (unprivileged package importing supervisor)", () => {
+    it("flags Law 2 privilege boundary leak (unprivileged package importing supervisor)", () => {
       writeFileSync(
         join(tempDir, "surface.lock"),
         JSON.stringify({ v: 1, bins: [], schemas: [] }),
@@ -128,18 +176,18 @@ describe("Milestone M3: Claim-Check Drift Sentinel & Surface Lock Verification",
         "utf8",
       );
 
-      const agentDir = join(tempDir, "packages", "agent");
-      mkdirSync(agentDir, { recursive: true });
+      const mergeproofDir = join(tempDir, "packages", "mergeproof");
+      mkdirSync(mergeproofDir, { recursive: true });
       writeFileSync(
-        join(agentDir, "index.mjs"),
-        `import { runSupervisor } from "../run/supervisor.mjs";\n`,
+        join(mergeproofDir, "index.mjs"),
+        `import { getOrGenerateSupervisorKey } from "../run/keys.mjs";\n`,
         "utf8",
       );
 
       const res = detectDrift(tempDir);
       assert.equal(res.ok, false);
-      const leakDrift = res.drifts.find((d) => d.details.includes("Law 1 privilege boundary leak"));
-      assert.ok(leakDrift, "Must flag Law 1 privilege boundary leak");
+      const leakDrift = res.drifts.find((d) => d.details.includes("Law 2 privilege boundary leak"));
+      assert.ok(leakDrift, "Must flag Law 2 privilege boundary leak");
     });
   });
 

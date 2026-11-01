@@ -10,6 +10,7 @@ import {
   checkSwallowedExceptions,
   checkTestWeakenings,
 } from "./anti-cheat.mjs";
+import { evaluatePhiGate } from "./phi.mjs";
 
 /**
  * Verifies a candidate fix/feature across the deterministic checks (Laws 10, 13, 16):

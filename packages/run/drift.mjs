@@ -1,7 +1,7 @@
 // packages/run/drift.mjs — Milestone M3: Claim-Check Drift Sentinel & Surface Lock Verification.
 import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { ulid, sha256 } from "../core/index.mjs";
+import { ulid } from "../core/index.mjs";
 
 /**
  * Law 12 & Milestone M3 — Detects architectural divergence, surface drift,
@@ -74,6 +74,50 @@ export function detectDrift(workspaceDir = process.cwd(), options = {}) {
           }
         }
       }
+
+      // Check public commands alignment between surface.lock and code
+      if (Array.isArray(surfaceLock.commands)) {
+        const lockCommandsSet = new Set(surfaceLock.commands);
+        const runIndex = join(root, "packages", "run", "index.mjs");
+        if (existsSync(runIndex)) {
+          const runContent = readFileSync(runIndex, "utf8");
+          const subMatch = runContent.match(/export const SUBCOMMANDS = Object\.freeze\(\[([\s\S]*?)\]\);/);
+          if (subMatch) {
+            const rawSubs = subMatch[1]
+              .split(",")
+              .map((s) => s.replace(/["'\s]/g, ""))
+              .filter(Boolean);
+            // Skip help, aliases, or non-canonical shortcuts
+            const primarySubs = rawSubs.filter((s) => !["help", "bb"].includes(s));
+
+            for (const sub of primarySubs) {
+              const fullCmd = `mirql r ${sub}`;
+              if (!lockCommandsSet.has(fullCmd)) {
+                drifts.push({
+                  subsystem: "packages/run",
+                  drift_type: "surface",
+                  drift_score_bp: 2500,
+                  details: `Uncited public command implemented in code but missing from surface.lock: "${fullCmd}"`,
+                });
+              }
+            }
+
+            for (const lockCmd of surfaceLock.commands) {
+              if (lockCmd.startsWith("mirql r ")) {
+                const sub = lockCmd.slice("mirql r ".length).trim();
+                if (!rawSubs.includes(sub)) {
+                  drifts.push({
+                    subsystem: "packages/run",
+                    drift_type: "surface",
+                    drift_score_bp: 2500,
+                    details: `Missing public command declared in surface.lock but not found in packages/run SUBCOMMANDS: "${lockCmd}"`,
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
     } catch (err) {
       drifts.push({
         subsystem: "surface.lock",
@@ -91,13 +135,19 @@ export function detectDrift(workspaceDir = process.cwd(), options = {}) {
       const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
       const depCount = Object.keys(pkg.dependencies ?? {}).length;
       const devDepCount = Object.keys(pkg.devDependencies ?? {}).length;
+      const peerDepCount = Object.keys(pkg.peerDependencies ?? {}).length;
+      const optDepCount = Object.keys(pkg.optionalDependencies ?? {}).length;
+      const bundleDepCount = Object.keys(pkg.bundledDependencies ?? {}).length;
 
-      if (depCount > 0 || devDepCount > 0) {
+      const totalExternalDeps =
+        depCount + devDepCount + peerDepCount + optDepCount + bundleDepCount;
+
+      if (totalExternalDeps > 0) {
         drifts.push({
           subsystem: "package.json",
           drift_type: "dependency",
           drift_score_bp: 5000,
-          details: `Law 0 violation: external dependencies detected (dependencies: ${depCount}, devDependencies: ${devDepCount})`,
+          details: `Law 0 violation: external dependencies detected in package.json (dependencies: ${depCount}, devDependencies: ${devDepCount}, peerDependencies: ${peerDepCount}, optionalDependencies: ${optDepCount})`,
         });
       }
     } catch (err) {
@@ -122,43 +172,43 @@ export function detectDrift(workspaceDir = process.cwd(), options = {}) {
       const mjsFiles = collectMjsFiles(currentPkgPath);
 
       for (const filePath of mjsFiles) {
-        const content = readFileSync(filePath, "utf8");
+        const rawContent = readFileSync(filePath, "utf8");
+        // Strip comments to prevent false positives from string examples in comments
+        const content = stripComments(rawContent);
         const relPath = filePath.replace(root, "").replace(/^[\\/]/, "");
 
-        // A. Disallow bare specifiers: must only import node:* or relative paths
-        const bareMatches = content.match(/import\s+(?:[^"';]+\s+from\s+)?["']([^"']+)["']/g) || [];
-        for (const imp of bareMatches) {
-          const specMatch = imp.match(/["']([^"']+)["']/);
-          if (specMatch) {
-            const spec = specMatch[1];
-            if (
-              !spec.startsWith("node:") &&
-              !spec.startsWith("./") &&
-              !spec.startsWith("../") &&
-              !spec.startsWith("/")
-            ) {
-              drifts.push({
-                subsystem: `packages/${pkgName}`,
-                drift_type: "architecture",
-                drift_score_bp: 2500,
-                details: `Illegal bare specifier "${spec}" imported in ${relPath} (must use node:* or relative paths)`,
-              });
-            }
+        // A. Disallow bare specifiers: catch import, re-export, dynamic import, and require
+        const specifiers = extractSpecifiers(content);
+        for (const spec of specifiers) {
+          if (
+            !spec.startsWith("node:") &&
+            !spec.startsWith("./") &&
+            !spec.startsWith("../") &&
+            !spec.startsWith("/")
+          ) {
+            drifts.push({
+              subsystem: `packages/${pkgName}`,
+              drift_type: "architecture",
+              drift_score_bp: 2500,
+              details: `Illegal bare specifier "${spec}" imported in ${relPath} (must use node:* or relative paths)`,
+            });
           }
         }
 
-        // B. Law 1 Privileged Separation: Unprivileged agent/workers cannot import daemons/supervisor keys
-        if (pkgName === "agent" || pkgName === "mergeproof") {
+        // B. Privilege Separation: unprivileged packages cannot import supervisor private keys or daemons
+        const unprivilegedPackages = ["mergeproof", "queue", "inbox", "log"];
+        if (unprivilegedPackages.includes(pkgName)) {
           if (
             content.includes("daemons/llm-gateway") ||
-            content.includes("run/supervisor") ||
-            content.includes("getOrGenerateSupervisorKey")
+            content.includes("packages/run/supervisor") ||
+            content.includes("getOrGenerateSupervisorKey") ||
+            content.includes("supervisor_key")
           ) {
             drifts.push({
               subsystem: `packages/${pkgName}`,
               drift_type: "architecture",
               drift_score_bp: 4000,
-              details: `Law 1 privilege boundary leak: unprivileged ${pkgName} imports privileged supervisor/daemon modules in ${relPath}`,
+              details: `Law 2 privilege boundary leak: unprivileged ${pkgName} imports privileged supervisor/daemon modules in ${relPath}`,
             });
           }
         }
@@ -188,6 +238,55 @@ export function detectDrift(workspaceDir = process.cwd(), options = {}) {
 }
 
 /**
+ * Extracts import/export/require specifiers from JavaScript/MJS source code.
+ *
+ * @param {string} code - code with comments stripped
+ * @returns {string[]}
+ */
+function extractSpecifiers(code) {
+  const specs = [];
+
+  // 1. static import or export specifiers
+  const fromMatches = code.matchAll(/(?:import|export)\s+[\s\S]*?\s+from\s+["']([^"']+)["']/g);
+  for (const m of fromMatches) {
+    specs.push(m[1]);
+  }
+
+  // 2. wildcard export specifiers
+  const exportAllMatches = code.matchAll(/export\s+\*\s+from\s+["']([^"']+)["']/g);
+  for (const m of exportAllMatches) {
+    specs.push(m[1]);
+  }
+
+  // 3. side-effect import specifiers
+  const bareImportMatches = code.matchAll(/import\s+["']([^"']+)["']/g);
+  for (const m of bareImportMatches) {
+    specs.push(m[1]);
+  }
+
+  // 4. dynamic import call specifiers
+  const dynamicImportMatches = code.matchAll(/import\s*\(\s*["']([^"']+)["']\s*\)/g);
+  for (const m of dynamicImportMatches) {
+    specs.push(m[1]);
+  }
+
+  // 5. require call specifiers
+  const requireMatches = code.matchAll(/require\s*\(\s*["']([^"']+)["']\s*\)/g);
+  for (const m of requireMatches) {
+    specs.push(m[1]);
+  }
+
+  return specs;
+}
+
+/** Strips single-line and multi-line comments from JS source */
+function stripComments(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
+}
+
+/**
  * Verifies a formal claim against active repository state.
  *
  * @param {object|string} claimInput
@@ -207,13 +306,16 @@ export function verifyClaimCheck(claimInput, workspaceDir = process.cwd()) {
         const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
         const deps = Object.keys(pkg.dependencies ?? {}).length;
         const devDeps = Object.keys(pkg.devDependencies ?? {}).length;
-        const verified = deps === 0 && devDeps === 0;
+        const peerDeps = Object.keys(pkg.peerDependencies ?? {}).length;
+        const optDeps = Object.keys(pkg.optionalDependencies ?? {}).length;
+        const total = deps + devDeps + peerDeps + optDeps;
+        const verified = total === 0;
         return {
           verified,
           claim: claimType,
           details: verified
             ? "Verified zero external dependencies"
-            : `Failed: found ${deps} dependencies and ${devDeps} devDependencies`,
+            : `Failed: found ${total} external dependencies (dependencies: ${deps}, devDependencies: ${devDeps}, peerDependencies: ${peerDeps}, optionalDependencies: ${optDeps})`,
         };
       } catch (err) {
         return { verified: false, claim: claimType, details: err.message };

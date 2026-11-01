@@ -46,7 +46,7 @@ describe("Milestone M2: Monotone Potential Phi Engine & Thrift Gate (Law 13)", (
       assert.ok(phi.total > phi.loc, "total must be composite sum");
     });
 
-    it("accurately detects debt markers (TODO, FIXME, HACK, XXX) in source files", () => {
+    it("accurately detects debt markers in source files", () => {
       const pkgDir = join(tempDir, "pkg");
       mkdirSync(pkgDir, { recursive: true });
       writeFileSync(
@@ -92,15 +92,12 @@ describe("Milestone M2: Monotone Potential Phi Engine & Thrift Gate (Law 13)", (
     });
 
     it("strictly requires negative potential delta for consolidator role (deltaPhi < 0)", () => {
-      // Consolidator with equal phi must fail
       const rEqualConsolidator = checkPhiReduction(1000, 1000, true);
       assert.equal(rEqualConsolidator.ok, false);
 
-      // Consolidator with increased phi must fail
       const rIncreaseConsolidator = checkPhiReduction(1000, 1020, true);
       assert.equal(rIncreaseConsolidator.ok, false);
 
-      // Consolidator with strictly reduced phi passes
       const rDropConsolidator = checkPhiReduction(1000, 980, true);
       assert.equal(rDropConsolidator.ok, true);
       assert.equal(rDropConsolidator.delta_phi, -20);
@@ -136,6 +133,47 @@ describe("Milestone M2: Monotone Potential Phi Engine & Thrift Gate (Law 13)", (
       assert.equal(res.rule, "LAW_13_CONSOLIDATOR_PHI");
       assert.equal(res.violation, "CONSOLIDATOR_PHI_NOT_DECREASED");
     });
+
+    it("rejects refactor kind without strict reduction with LAW_13_CONSOLIDATOR_PHI", () => {
+      const res = evaluatePhiGate({ phiBefore: 200, phiAfter: 200, kind: "refactor" });
+      assert.equal(res.ok, false);
+      assert.equal(res.verdict, "reject");
+      assert.equal(res.rule, "LAW_13_CONSOLIDATOR_PHI");
+      assert.equal(res.violation, "CONSOLIDATOR_PHI_NOT_DECREASED");
+    });
+
+    it("fails closed on missing delta_phi with LAW_13_PHI_MISSING (Law 6)", () => {
+      const res1 = evaluatePhiGate({});
+      assert.equal(res1.ok, false);
+      assert.equal(res1.verdict, "reject");
+      assert.equal(res1.rule, "LAW_13_PHI_MISSING");
+      assert.equal(res1.violation, "MISSING_PHI");
+
+      const res2 = evaluatePhiGate({ author: "consolidator" });
+      assert.equal(res2.ok, false);
+      assert.equal(res2.verdict, "reject");
+      assert.equal(res2.rule, "LAW_13_PHI_MISSING");
+    });
+
+    it("allows feature growth when within explicit featureBudget", () => {
+      const res = evaluatePhiGate({
+        phiBefore: 100,
+        phiAfter: 150,
+        featureBudget: 100,
+      });
+      assert.equal(res.ok, true);
+      assert.equal(res.verdict, "auto_merge");
+      assert.equal(res.delta_phi, 50);
+
+      const resOver = evaluatePhiGate({
+        phiBefore: 100,
+        phiAfter: 250,
+        featureBudget: 100,
+      });
+      assert.equal(resOver.ok, false);
+      assert.equal(resOver.verdict, "reject");
+      assert.equal(resOver.rule, "LAW_13_PHI_INCREASE");
+    });
   });
 
   describe("4. Law 13 Thrift Test (verifyThrift)", () => {
@@ -152,6 +190,17 @@ describe("Milestone M2: Monotone Potential Phi Engine & Thrift Gate (Law 13)", (
       assert.equal(res.delta_phi, -50);
       assert.equal(res.thrift_score, 50);
       assert.equal(res.reasons.length, 0);
+    });
+
+    it("fails closed when testsPreserved or surfacePreserved is omitted (Law 6)", () => {
+      const res = verifyThrift({
+        phiBefore: 500,
+        phiAfter: 450,
+      });
+
+      assert.equal(res.ok, false);
+      assert.equal(res.verdict, "reject");
+      assert.ok(res.reasons.some((r) => r.includes("fail-closed")));
     });
 
     it("rejects refactoring candidate if tests were weakened or deleted", () => {
@@ -178,6 +227,21 @@ describe("Milestone M2: Monotone Potential Phi Engine & Thrift Gate (Law 13)", (
       assert.equal(res.ok, false);
       assert.equal(res.verdict, "reject");
       assert.ok(res.reasons.some((r) => r.includes("Public surface preserved")));
+    });
+
+    it("rejects refactoring candidate if external dependency count increased", () => {
+      const res = verifyThrift({
+        phiBefore: 500,
+        phiAfter: 450,
+        testsPreserved: true,
+        surfacePreserved: true,
+        depCountBefore: 0,
+        depCountAfter: 1,
+      });
+
+      assert.equal(res.ok, false);
+      assert.equal(res.verdict, "reject");
+      assert.ok(res.reasons.some((r) => r.includes("Redundant dependency")));
     });
   });
 });

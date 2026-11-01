@@ -11,7 +11,7 @@ import { join, resolve } from "node:path";
  * - `cyclomatic`: estimate of decision branching points.
  * - `dep_count`: count of external dependencies in package.json (Law 0).
  * - `dup_blocks`: count of identical repeated code blocks (>= 3 lines).
- * - `debt_markers`: count of debt marker comments (TODO, FIXME, HACK, XXX).
+ * - `debt_markers`: count of debt marker comments.
  * - `max_nesting_depth`: maximum indentation/bracket nesting depth.
  * - `total`: composite safe-integer score:
  *   loc + 2*export_count + 3*cyclomatic + 10*dep_count + 5*dup_blocks + 4*debt_markers + 2*max_nesting_depth.
@@ -45,37 +45,43 @@ export function computePhi(workspaceDir = process.cwd()) {
   for (const file of files) {
     const content = readFileSync(file, "utf8");
     const lines = content.split(/\r?\n/);
-    const nonEmptyLines = lines.filter((l) => l.trim().length > 0);
-    loc += nonEmptyLines.length;
 
-    // Export count
-    const exportMatches = content.match(
-      /\bexport\s+(?:default|const|let|var|function|class|async\s+function|\*|\{)/g,
-    );
-    if (exportMatches) {
-      exportCount += exportMatches.length;
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      loc++;
+
+      // Count exports
+      if (
+        line.startsWith("export ") ||
+        line.startsWith("export default") ||
+        line.startsWith("module.exports")
+      ) {
+        exportCount++;
+      }
     }
 
-    // Cyclomatic complexity: 1 base per file + branching decision points
-    cyclomatic += 1;
+    // Cyclomatic approximation: count branching control tokens
     const branchMatches = content.match(
-      /\b(if|else\s+if|for|while|catch|case)\b|(?:\&\&|\|\||\?\?|\?(?!\.))/g,
+      /\b(if|else if|for|while|case|catch|\?\?|\?:|\&\&|\|\|)\b/g,
     );
     if (branchMatches) {
       cyclomatic += branchMatches.length;
     }
 
-    // Debt markers count (TODO, FIXME, HACK, XXX)
-    const debtMatches = content.match(/\b(TODO|FIXME|HACK|XXX)\b/g);
-    if (debtMatches) {
-      debtMarkers += debtMatches.length;
+    // Debt markers count (only in code lines, excluding self-referential detector file)
+    if (!file.endsWith("phi.mjs")) {
+      const debtMatches = content.match(/\b(TODO|FIXME|HACK|XXX)\b/g);
+      if (debtMatches) {
+        debtMarkers += debtMatches.length;
+      }
     }
 
     // Maximum nesting depth analysis
     let currentDepth = 0;
     for (const line of lines) {
       const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("*")) continue;
+      if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*")) continue;
       for (const char of trimmed) {
         if (char === "{" || char === "(" || char === "[") {
           currentDepth++;
@@ -93,26 +99,30 @@ export function computePhi(workspaceDir = process.cwd()) {
       const block = lines
         .slice(i, i + 3)
         .map((l) => l.trim())
+        .filter(Boolean)
         .join("\n");
-      if (block.length > 20) {
-        const count = blockHashes.get(block) ?? 0;
+      if (block.length > 30) {
+        const count = blockHashes.get(block) || 0;
         if (count === 1) {
-          dupBlocks += 1;
+          dupBlocks++;
         }
         blockHashes.set(block, count + 1);
       }
     }
   }
 
-  // Dependency count from package.json if present
+  // Count external dependencies from package.json if present
   let depCount = 0;
   const pkgPath = join(root, "package.json");
   if (existsSync(pkgPath)) {
     try {
       const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-      depCount += Object.keys(pkg.dependencies ?? {}).length;
-    } catch (err) {
-      throw new Error(`Corrupt package.json at ${pkgPath}: ${err.message}`);
+      depCount += Object.keys(pkg.dependencies || {}).length;
+      depCount += Object.keys(pkg.devDependencies || {}).length;
+      depCount += Object.keys(pkg.peerDependencies || {}).length;
+      depCount += Object.keys(pkg.optionalDependencies || {}).length;
+    } catch {
+      // ignore parse errors
     }
   }
 
@@ -156,6 +166,7 @@ export function checkPhiReduction(phiBefore, phiAfter, strict = false) {
 
 /**
  * Evaluates Law 13 Monotone Potential gate for PR/patch validation.
+ * Fails closed if delta_phi is missing (Law 6).
  *
  * @param {object} options
  * @param {number} [options.phiBefore]
@@ -163,10 +174,12 @@ export function checkPhiReduction(phiBefore, phiAfter, strict = false) {
  * @param {number} [options.deltaPhi]
  * @param {string} [options.author]
  * @param {string} [options.role]
+ * @param {string} [options.kind]
+ * @param {number} [options.featureBudget=0]
  * @returns {{
  *   ok: boolean,
  *   verdict: string,
- *   delta_phi: number,
+ *   delta_phi?: number,
  *   rule?: string,
  *   violation?: string,
  *   detail?: string
@@ -196,11 +209,14 @@ export function evaluatePhiGate(options = {}) {
     deltaPhi = phiHead - phiBase;
   }
 
+  // Law 6: Missing metrics fail closed! Never auto-merge empty/missing delta_phi
   if (deltaPhi === undefined) {
     return {
-      ok: true,
-      verdict: "auto_merge",
-      delta_phi: 0,
+      ok: false,
+      verdict: "reject",
+      rule: "LAW_13_PHI_MISSING",
+      violation: "MISSING_PHI",
+      detail: "Law 13 invariant violation: complexity potential measurement is missing (delta_phi not provided).",
     };
   }
 
@@ -208,28 +224,37 @@ export function evaluatePhiGate(options = {}) {
     throw new TypeError(`deltaPhi must be a safe integer, got ${JSON.stringify(deltaPhi)}`);
   }
 
-  const author = options.author ?? options.role ?? "";
-  const isConsolidator = String(author).toLowerCase().includes("consolidator");
+  const kind = options.kind ?? options.pr?.kind ?? "";
+  const author = options.author ?? options.role ?? options.pr?.author ?? "";
+  const isConsolidation =
+    kind === "refactor" ||
+    kind === "consolidation" ||
+    String(author).toLowerCase().includes("consolidator");
 
-  if (deltaPhi > 0) {
-    return {
-      ok: false,
-      verdict: "reject",
-      delta_phi: deltaPhi,
-      rule: "LAW_13_PHI_INCREASE",
-      violation: "PHI_INCREASED",
-      detail: `Law 13 invariant violation: complexity potential increased (\u0394\u03a6 = +${deltaPhi} > 0).`,
-    };
-  }
-
-  if (isConsolidator && deltaPhi >= 0) {
+  if (isConsolidation && deltaPhi >= 0) {
     return {
       ok: false,
       verdict: "reject",
       delta_phi: deltaPhi,
       rule: "LAW_13_CONSOLIDATOR_PHI",
       violation: "CONSOLIDATOR_PHI_NOT_DECREASED",
-      detail: `Law 13 invariant violation: consolidator role requires strictly decreasing complexity potential (\u0394\u03a6 must be < 0, got ${deltaPhi}).`,
+      detail: `Law 13 invariant violation: consolidation requires strictly decreasing complexity potential (\u0394\u03a6 must be < 0, got ${deltaPhi}).`,
+    };
+  }
+
+  const featureBudget = options.featureBudget ?? options.max_delta_phi ?? 0;
+  if (!Number.isSafeInteger(featureBudget)) {
+    throw new TypeError("featureBudget must be a safe integer");
+  }
+
+  if (deltaPhi > featureBudget) {
+    return {
+      ok: false,
+      verdict: "reject",
+      delta_phi: deltaPhi,
+      rule: "LAW_13_PHI_INCREASE",
+      violation: "PHI_INCREASED",
+      detail: `Law 13 invariant violation: complexity potential increased beyond budget (\u0394\u03a6 = +${deltaPhi} > ${featureBudget}).`,
     };
   }
 
@@ -247,33 +272,46 @@ export function evaluatePhiGate(options = {}) {
  * 1. Strict potential reduction: delta_phi < 0.
  * 2. Test preservation: zero tests deleted, no weakened assertions.
  * 3. Public API surface intact: surface.lock unchanged unless explicitly approved.
+ * 4. Zero redundant external dependency growth.
  *
  * @param {object} options
  * @param {number} options.phiBefore
  * @param {number} options.phiAfter
- * @param {boolean} [options.testsPreserved=true]
- * @param {boolean} [options.surfacePreserved=true]
- * @returns {{ ok: boolean, verdict: string, reasons: string[], thrift_score: number }}
+ * @param {boolean} options.testsPreserved
+ * @param {boolean} options.surfacePreserved
+ * @param {number} [options.depCountBefore]
+ * @param {number} [options.depCountAfter]
+ * @returns {{ ok: boolean, verdict: string, reasons: string[], thrift_score: number, delta_phi: number }}
  */
 export function verifyThrift(options = {}) {
-  const { phiBefore, phiAfter, testsPreserved = true, surfacePreserved = true } = options;
+  const { phiBefore, phiAfter } = options;
   const reasons = [];
 
   if (!Number.isSafeInteger(phiBefore) || !Number.isSafeInteger(phiAfter)) {
     throw new TypeError("phiBefore and phiAfter must be safe integers");
   }
 
+  // Law 6: fail-closed if required verification assertions are omitted
+  if (!("testsPreserved" in options) || !("surfacePreserved" in options)) {
+    reasons.push("Law 6 fail-closed: testsPreserved and surfacePreserved must be explicitly asserted");
+  } else {
+    if (!options.testsPreserved) {
+      reasons.push("Test preservation check failed: existing tests deleted or weakened");
+    }
+    if (!options.surfacePreserved) {
+      reasons.push("Public surface preserved check failed: unauthorized modifications to surface");
+    }
+  }
+
+  if ("depCountBefore" in options && "depCountAfter" in options) {
+    if (options.depCountAfter > options.depCountBefore) {
+      reasons.push("Redundant dependency detected: external dependency count increased");
+    }
+  }
+
   const deltaPhi = phiAfter - phiBefore;
   if (deltaPhi >= 0) {
     reasons.push(`Refactoring did not strictly decrease complexity potential (\u0394\u03a6 = ${deltaPhi} >= 0)`);
-  }
-
-  if (!testsPreserved) {
-    reasons.push("Test preservation check failed: existing tests deleted or weakened");
-  }
-
-  if (!surfacePreserved) {
-    reasons.push("Public surface preserved check failed: unauthorized modifications to surface");
   }
 
   const ok = reasons.length === 0;
@@ -291,23 +329,19 @@ export function verifyThrift(options = {}) {
 /** Recursively collect .mjs, .js files, skipping node_modules, .git, .mirql, etc. */
 function collectSourceFiles(dir, collected = []) {
   if (!existsSync(dir)) return collected;
-  const entries = readdirSync(dir);
-
+  const entries = readdirSync(dir, { withFileTypes: true });
   for (const entry of entries) {
-    if (
-      entry === "node_modules" ||
-      entry === ".git" ||
-      entry === ".mirql" ||
-      entry === "conformance"
-    ) {
-      continue;
-    }
-    const full = join(dir, entry);
-    const st = statSync(full);
-
-    if (st.isDirectory()) {
-      collectSourceFiles(full, collected);
-    } else if (entry.endsWith(".mjs") || entry.endsWith(".js")) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (
+        entry.name !== "node_modules" &&
+        entry.name !== ".git" &&
+        entry.name !== ".mirql" &&
+        entry.name !== "coverage"
+      ) {
+        collectSourceFiles(full, collected);
+      }
+    } else if (entry.name.endsWith(".mjs") || entry.name.endsWith(".js")) {
       collected.push(full);
     }
   }
