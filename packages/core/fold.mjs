@@ -568,6 +568,62 @@ export function foldLedger(events, policy = {}, keyring = null) {
         break;
       }
 
+      case "job.canary_staged": {
+        const p = evt.payload || {};
+        if (!state.canaries) state.canaries = {};
+        state.canaries[p.canary_id] = {
+          canary_id: p.canary_id,
+          job_id: p.job_id,
+          warrant_id: p.warrant_id,
+          candidate_version: p.candidate_version,
+          supervisor_version: p.supervisor_version,
+          probation_window_ms: p.probation_window_ms,
+          error_threshold_bp: p.error_threshold_bp,
+          latency_p99_ceiling_ms: p.latency_p99_ceiling_ms,
+          staged_at_ms: p.staged_at_ms,
+          provenance_hash: p.provenance_hash,
+          subject_digest: p.subject_digest,
+          epoch: evt.epoch || p.epoch || 1,
+          status: "probation",
+          samples: [],
+        };
+        if (p.job_id && state.jobs[p.job_id]) {
+          state.jobs[p.job_id].status = "canary_probation";
+        }
+        break;
+      }
+
+      case "job.canary_health": {
+        const p = evt.payload || {};
+        if (state.canaries && state.canaries[p.canary_id]) {
+          const canary = state.canaries[p.canary_id];
+          if (canary.status === "probation") {
+            canary.samples.push(p);
+            if (p.anomaly_detected) {
+              canary.anomaly = true;
+            }
+          }
+        }
+        break;
+      }
+
+      case "job.canary_rollback":
+      case "mirql.rollback":
+      case "promotion.rollback": {
+        const p = evt.payload || {};
+        if (p.canary_id && state.canaries && state.canaries[p.canary_id]) {
+          const canary = state.canaries[p.canary_id];
+          if (canary.status !== "promoted") {
+            canary.status = "rolled_back";
+            canary.rollback_reason = p.reason;
+            if (canary.job_id && state.jobs[canary.job_id]) {
+              state.jobs[canary.job_id].status = "canary_rolled_back";
+            }
+          }
+        }
+        break;
+      }
+
       case "job.promoted": {
         const p = evt.payload || {};
         const jId = p.job_id;
@@ -576,6 +632,12 @@ export function foldLedger(events, policy = {}, keyring = null) {
           if (state.jobs[jId]) {
             state.jobs[jId].status = "promoted";
           }
+        }
+        if (p.canary_id && state.canaries && state.canaries[p.canary_id]) {
+          state.canaries[p.canary_id].status = "promoted";
+        }
+        if (p.promoted_version) {
+          state.active_version = p.promoted_version;
         }
         if (p.warrant_id && state.warrants[p.warrant_id]) {
           state.warrants[p.warrant_id].status = "completed";

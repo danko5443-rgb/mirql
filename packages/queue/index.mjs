@@ -26,6 +26,15 @@ import {
   isLeaseLive,
   validateConcurrencyLimit,
 } from "./fsm.mjs";
+import {
+  CANARY_DEFAULTS,
+  generateSLSAProvenance,
+  verifySLSAProvenance,
+  stageCanary,
+  sampleCanaryHealth,
+  evaluateAndPromoteCanary,
+  rollbackCanary,
+} from "./canary.mjs";
 
 export {
   foldLedger,
@@ -49,6 +58,15 @@ export {
   createLedgerWatcher,
   waitForLedgerEvent,
 } from "../core/index.mjs";
+export {
+  CANARY_DEFAULTS,
+  generateSLSAProvenance,
+  verifySLSAProvenance,
+  stageCanary,
+  sampleCanaryHealth,
+  evaluateAndPromoteCanary,
+  rollbackCanary,
+} from "./canary.mjs";
 
 /** Tool name reported by this package. */
 export const TOOL = "queue";
@@ -849,6 +867,7 @@ function parseArgv(argv) {
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    if (typeof arg !== "string") continue;
     if (arg === "--dir" && i + 1 < argv.length) {
       flags.dir = argv[++i];
     } else if (arg.startsWith("--dir=")) {
@@ -887,6 +906,26 @@ function parseArgv(argv) {
       flags.concurrency = arg.slice("--concurrency=".length);
     } else if (arg === "--help" || arg === "-h") {
       flags.help = true;
+    } else if (arg.startsWith("--")) {
+      const eqIdx = arg.indexOf("=");
+      if (eqIdx !== -1) {
+        const rawKey = arg.slice(2, eqIdx);
+        const val = arg.slice(eqIdx + 1);
+        flags[rawKey] = val;
+        const camel = rawKey.replace(/-([a-z])/g, (_, g) => g.toUpperCase());
+        flags[camel] = val;
+      } else {
+        const rawKey = arg.slice(2);
+        const camel = rawKey.replace(/-([a-z])/g, (_, g) => g.toUpperCase());
+        const isBool = ["force", "canary", "sample-health", "evaluate-canary", "evaluate", "sample", "stage", "rollback"].includes(rawKey);
+        if (!isBool && i + 1 < argv.length && !argv[i + 1].startsWith("-")) {
+          flags[rawKey] = argv[++i];
+          flags[camel] = flags[rawKey];
+        } else {
+          flags[rawKey] = true;
+          flags[camel] = true;
+        }
+      }
     } else if (!arg.startsWith("-")) {
       positionals.push(arg);
     }
@@ -1011,7 +1050,101 @@ export function main(argv = []) {
       return EXIT_CODES.OK;
     }
 
+    case "canary": {
+      const canaryAction = positionals[0] || flags.action;
+      try {
+        if (canaryAction === "stage") {
+          const jobId = flags.jobId || flags["job-id"] || positionals[1];
+          const baseSha = flags.baseSha || flags["base-sha"] || positionals[2];
+          const candidateVersion = flags.candidateVersion || flags["candidate-version"];
+          const supervisorVersion = flags.supervisorVersion || flags["supervisor-version"];
+          const res = stageCanary(mirqlDir, { ...options, jobId, baseSha, candidateVersion, supervisorVersion });
+          process.stdout.write(JSON.stringify(res) + "\n");
+          return EXIT_CODES.OK;
+        }
+        if (canaryAction === "sample" || canaryAction === "health") {
+          const canaryId = flags.canaryId || flags["canary-id"] || positionals[1];
+          const totalRequests = (flags.totalRequests ?? flags["total-requests"]) !== undefined ? Number(flags.totalRequests ?? flags["total-requests"]) : undefined;
+          const errorCount = (flags.errorCount ?? flags["error-count"]) !== undefined ? Number(flags.errorCount ?? flags["error-count"]) : undefined;
+          const latencyP99Ms = (flags.latencyP99 ?? flags["latency-p99"]) !== undefined ? Number(flags.latencyP99 ?? flags["latency-p99"]) : undefined;
+          const res = sampleCanaryHealth(mirqlDir, canaryId, { totalRequests, errorCount, latencyP99Ms }, options);
+          process.stdout.write(JSON.stringify(res) + "\n");
+          return EXIT_CODES.OK;
+        }
+        if (canaryAction === "evaluate" || canaryAction === "promote") {
+          const canaryId = flags.canaryId || flags["canary-id"] || positionals[1];
+          const res = evaluateAndPromoteCanary(mirqlDir, canaryId, { ...options, force: Boolean(flags.force) });
+          process.stdout.write(JSON.stringify(res) + "\n");
+          return res.ok ? EXIT_CODES.OK : (res.exit_code ?? EXIT_CODES.POLICY_DENIAL);
+        }
+        if (canaryAction === "rollback") {
+          const canaryId = flags.canaryId || flags["canary-id"] || positionals[1];
+          const reason = flags.reason || positionals.slice(2).join(" ");
+          const res = rollbackCanary(mirqlDir, canaryId, { ...options, reason });
+          process.stdout.write(JSON.stringify(res) + "\n");
+          return EXIT_CODES.OK;
+        }
+        process.stderr.write(JSON.stringify({ tool: TOOL, error: "unknown_canary_action", canaryAction }) + "\n");
+        return EXIT_CODES.USAGE_ERROR;
+      } catch (err) {
+        process.stderr.write(JSON.stringify({ ok: false, error: err.errorCode || err.name, message: err.message }) + "\n");
+        return err.exitCode ?? EXIT_CODES.POLICY_DENIAL;
+      }
+    }
+
     case "promote": {
+      if (flags.canary || flags.stage) {
+        try {
+          const jobId = flags.jobId || flags["job-id"] || positionals[0];
+          const baseSha = flags.baseSha || flags["base-sha"] || positionals[1];
+          const candidateVersion = flags.candidateVersion || flags["candidate-version"];
+          const supervisorVersion = flags.supervisorVersion || flags["supervisor-version"];
+          const res = stageCanary(mirqlDir, { ...options, jobId, baseSha, candidateVersion, supervisorVersion });
+          process.stdout.write(JSON.stringify(res) + "\n");
+          return EXIT_CODES.OK;
+        } catch (err) {
+          process.stderr.write(JSON.stringify({ ok: false, error: err.errorCode || err.name, message: err.message }) + "\n");
+          return err.exitCode ?? EXIT_CODES.POLICY_DENIAL;
+        }
+      }
+      if (flags.sampleHealth || flags["sample-health"] || flags.sample) {
+        try {
+          const canaryId = flags.canaryId || flags["canary-id"] || positionals[0];
+          const totalRequests = (flags.totalRequests ?? flags["total-requests"]) !== undefined ? Number(flags.totalRequests ?? flags["total-requests"]) : undefined;
+          const errorCount = (flags.errorCount ?? flags["error-count"]) !== undefined ? Number(flags.errorCount ?? flags["error-count"]) : undefined;
+          const latencyP99Ms = (flags.latencyP99 ?? flags["latency-p99"]) !== undefined ? Number(flags.latencyP99 ?? flags["latency-p99"]) : undefined;
+          const res = sampleCanaryHealth(mirqlDir, canaryId, { totalRequests, errorCount, latencyP99Ms }, options);
+          process.stdout.write(JSON.stringify(res) + "\n");
+          return EXIT_CODES.OK;
+        } catch (err) {
+          process.stderr.write(JSON.stringify({ ok: false, error: err.errorCode || err.name, message: err.message }) + "\n");
+          return err.exitCode ?? EXIT_CODES.POLICY_DENIAL;
+        }
+      }
+      if (flags.evaluateCanary || flags["evaluate-canary"] || flags.evaluate) {
+        try {
+          const canaryId = flags.canaryId || flags["canary-id"] || positionals[0];
+          const res = evaluateAndPromoteCanary(mirqlDir, canaryId, { ...options, force: Boolean(flags.force) });
+          process.stdout.write(JSON.stringify(res) + "\n");
+          return res.ok ? EXIT_CODES.OK : (res.exit_code ?? EXIT_CODES.POLICY_DENIAL);
+        } catch (err) {
+          process.stderr.write(JSON.stringify({ ok: false, error: err.errorCode || err.name, message: err.message }) + "\n");
+          return err.exitCode ?? EXIT_CODES.POLICY_DENIAL;
+        }
+      }
+      if (flags.rollback) {
+        try {
+          const canaryId = flags.canaryId || flags["canary-id"] || positionals[0];
+          const reason = flags.reason || positionals.slice(1).join(" ");
+          const res = rollbackCanary(mirqlDir, canaryId, { ...options, reason });
+          process.stdout.write(JSON.stringify(res) + "\n");
+          return EXIT_CODES.OK;
+        } catch (err) {
+          process.stderr.write(JSON.stringify({ ok: false, error: err.errorCode || err.name, message: err.message }) + "\n");
+          return err.exitCode ?? EXIT_CODES.POLICY_DENIAL;
+        }
+      }
+
       const jobId = flags.jobId || positionals[0];
       const baseSha = flags.baseSha || positionals[1];
       const res = promoteJob(mirqlDir, { ...options, jobId, baseSha });
