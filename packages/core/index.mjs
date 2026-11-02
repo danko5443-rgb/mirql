@@ -55,3 +55,8 @@ export {
   PRIVILEGED_EVENTS,
   getTrustedPublicKey,
 } from "./fold.mjs";
+export {
+  foldBreakerStateFromLedger,
+  isCircuitBreakerTripped,
+  getActiveTrippedBreakers,
+} from "./breaker.mjs";

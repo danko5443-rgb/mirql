@@ -40,6 +40,7 @@ test("EXIT_CODES matches the canonical table and is frozen", () => {
     STALE_EPOCH: 5,
     HALTED: 6,
     BUDGET_EXHAUSTED: 7,
+    BREAKER_OPEN: 8,
     NEEDS_HUMAN: 10,
     TRANSIENT: 75,
     TIMEOUT: 124,
