@@ -82,3 +82,13 @@ export function git(repoDir, ...args) {
   );
   return res.stdout;
 }
+
+
+/** A real committed baseline for worker-execution fixtures. */
+export function initEmptyRepo(repoDir) {
+  git(repoDir, "init", "-q");
+  git(repoDir, "config", "user.email", "test@mirql.local");
+  git(repoDir, "config", "user.name", "test");
+  git(repoDir, "config", "core.autocrlf", "false");
+  git(repoDir, "commit", "--allow-empty", "-q", "-m", "fixture base");
+}

@@ -1,9 +1,10 @@
+import { captureWorkerBase, measureWorkerChanges } from "./worker-diff.mjs";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { EXIT_CODES } from "../core/index.mjs";
-import { checkHumanOnlyPaths } from "./anti-cheat.mjs";
+import { checkHumanOnlyPaths, loadHumanOnlyPatterns } from "./anti-cheat.mjs";
 
 /**
  * Strict safe allowlist for environment variables passed to unprivileged agents.
@@ -92,8 +93,15 @@ export function runAgent(options = {}) {
     }
   }
 
-  // If a command is specified, spawn it in the clean sandbox environment
+  // If a command is specified, spawn it in the sanitized worker environment
   if (typeof options.command === "string" && options.command.length > 0) {
+    let baseline;
+    const patterns = loadHumanOnlyPatterns();
+    try { baseline = captureWorkerBase(options.cwd ?? process.cwd()); }
+    catch (error) {
+      return { ok: false, exitCode: EXIT_CODES.POLICY_DENIAL, violation: "WORKSPACE_UNVERIFIED",
+        rule: "MP-001", detail: error.message, strippedEnv: stripped };
+    }
     const workerHome = mkdtempSync(join(tmpdir(), "mirql-agent-home-"));
     for (const key of Object.keys(cleanEnv)) {
       const u = key.toUpperCase();
@@ -138,7 +146,7 @@ export function runAgent(options = {}) {
       exitCode = res.error ? 1 : 1;
     }
 
-    return {
+    const result = {
       exitCode: cleanupError ? EXIT_CODES.POLICY_DENIAL : exitCode,
       ok: exitCode === 0 && !res.signal && !cleanupError,
       ...(cleanupError ? { workerExitCode: exitCode, cleanupError, workerHome } : {}),
@@ -147,6 +155,17 @@ export function runAgent(options = {}) {
       strippedEnv: stripped,
       signal: res.signal ?? null,
     };
+    try {
+      const changedFiles = measureWorkerChanges(baseline);
+      const policy = checkHumanOnlyPaths(changedFiles, patterns);
+      if (!policy.ok) return { ...result, ok: false, exitCode: EXIT_CODES.POLICY_DENIAL,
+        workerExitCode: exitCode, rule: "MP-001", violation: "TOUCH_HUMAN_ONLY",
+        forbidden: policy.forbidden, changedFiles, baseSha: baseline.baseSha };
+      return { ...result, changedFiles, baseSha: baseline.baseSha };
+    } catch (error) {
+      return { ...result, ok: false, exitCode: EXIT_CODES.POLICY_DENIAL, workerExitCode: exitCode,
+        rule: "MP-001", violation: "WORKSPACE_UNVERIFIED", detail: error.message };
+    }
   }
 
   return {

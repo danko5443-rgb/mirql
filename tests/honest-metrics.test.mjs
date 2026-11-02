@@ -1,6 +1,6 @@
 import { authorizeTestWarrant } from "./helpers/warrant.mjs";
 import { provisionTestTrust, authorizeTestKey } from "./helpers/keyring.mjs";
-import { git } from "./helpers/git.mjs";
+import { git, initEmptyRepo } from "./helpers/git.mjs";
 // tests/honest-metrics.test.mjs — measured-or-flagged telemetry (issue #16).
 // The ledger is honest that an event happened; its payload must not lie.
 // Pins: the supervisor never invents thrift/cost/surface numbers (unmeasured
@@ -58,18 +58,20 @@ describe("supervisor telemetry honesty (issue #16)", () => {
     tempDir = mkdtempSync(join(tmpdir(), "mirql-honest-"));
     provisionTestTrust(tempDir);
     authorizeTestWarrant(tempDir, RUN.warrantId);
+    initEmptyRepo(tempDir);
     RUN.mirqlDir = tempDir;
     RUN.workspaceDir = tempDir;
   });
   afterEach(() => rmSync(tempDir, { recursive: true, force: true }));
 
-  it("unmeasured thrift/cost/surface are flagged, never invented", () => {
+  it("unmeasured thrift and cost stay flagged while Git surface is measured", () => {
     const res = supervisorRun({ workspaceDir: tempDir });
     assert.equal(res.outcome.thrift.measured, 0);
     assert.deepEqual(Object.keys(res.outcome.thrift), ["measured"]);
     assert.equal(res.outcome.cost.measured, 0);
     assert.equal(res.outcome.cost.micro_usd, undefined);
-    assert.equal(res.outcome.surface.measured, 0);
+    assert.equal(res.outcome.surface.measured, 1);
+    assert.equal(res.outcome.surface.files_changed, 0);
 
     // The ledger payload carries null — downstream folds treat it as 0, and
     // anyone auditing sees "not measured" instead of a fabricated number.

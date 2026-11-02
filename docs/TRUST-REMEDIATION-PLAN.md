@@ -5,8 +5,9 @@ Item 1.4, disposable worker homes, and the breaker recovery follow-up have also 
 Item 1.1 is implemented on the external-trust-root branch and requires review.
 Item 1.2 is implemented on the signed-key-enrollment branch for review. Item 1.3, Windows ACL enforcement, is implemented on the private-credential-permissions
 branch for review. Item 2.1, signed warrant authority, is implemented on the
-signed-warrant-authority branch for review. Signed merge approvals, post-run path
-enforcement and the later proof, telemetry, isolation and consolidation work remain open. The owner chose
+signed-warrant-authority branch for review. Item 2.3, post-run protected-path
+checking, is implemented on the worker-postrun-policy branch for review. Signed
+merge approvals and the later proof, telemetry, isolation and consolidation work remain open. The owner chose
 to keep the repository private and leave the unavailable main ruleset requirement open.
 The historical status table below records the original audit, rather than current completion.
 

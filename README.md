@@ -183,5 +183,13 @@ expired grants stop execution before worker dispatch.
 
 Both `mirql i send` and proposal approval issue explicit signed grants.
 Queue admission accepts a verified grant once. Historical intent-only warrants
-need a new human authorization before execution. Signed merge approvals and
-post-run path enforcement remain separate pending plan items.
+need a new human authorization before execution. Signed merge approvals remain a separate pending plan item.
+
+
+Worker commands require a readable, committed Git baseline. After execution,
+protected-path checks use measured tree changes, staged content, untracked files
+(including ignored files), and fingerprints of the physical files captured before
+execution. Worker-supplied file lists cannot exempt an edit. Missing or failed
+measurement refuses success and preserves worker diagnostics. Git index flags and
+clean filters cannot hide changed physical bytes. This guard checks workspace
+changes. Process and network isolation remain separate requirements.
