@@ -1,3 +1,4 @@
+import { requireTrustForKeyCreation } from "../core/trust-root.mjs";
 import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 // packages/inbox/keys.mjs — Key Management & Keyring Provisioning for mirql-inbox.
 //
@@ -204,8 +205,7 @@ export function resolveHumanKeyPath(mirqlDir, options = {}) {
   if (typeof explicit === "string" && explicit.length > 0) {
     return assertExternalTrustPath(explicit, mirqlDir);
   }
-  const operatorDir = resolveTrustRoot(mirqlDir);
-  return join(operatorDir, HUMAN_KEY_FILENAME);
+  return trustFile(mirqlDir, HUMAN_KEY_FILENAME);
 }
 
 /** Remove any stale human private key files left inside `.mirql/keys/` (Law 6). */
@@ -238,6 +238,7 @@ function purgeStaleHumanKeys(keysDir) {
  * @returns {Record<string, { publicKey: string, privateKey: string, keyId: string, writer: { ns: string, key_id: string } }>}
  */
 export function generateFactoryKeypairs(mirqlDir, options = {}) {
+  requireTrustForKeyCreation(mirqlDir);
   const keysDir = trustFile(mirqlDir, "keys");
   const ledgerDir = resolveTrustRoot(mirqlDir);
   // H4: private-key material lives only under 0o700 directories.

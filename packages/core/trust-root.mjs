@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
@@ -64,13 +64,21 @@ export function resolveTrustRoot(mirqlDir, options = {}) {
   }
   if (linked) throw new Error("UNSAFE_TRUST_ROOT: a ledger trust directory cannot be a symlink");
   const root = assertExternalTrustPath(candidate, workspace);
+  return root;
+}
+
+/** Creation must not replace an initialized ledger's missing credentials. */
+export function requireTrustForKeyCreation(mirqlDir) {
+  const ledger = canonicalPath(mirqlDir);
+  const root = resolveTrustRoot(mirqlDir);
   const legacyKeyring = [
     join(ledger, "ledger", "keyring.json"),
     join(ledger, "keys", "keyring.json"),
     join(ledger, "keyring.json"),
   ].some(path => existsSync(path));
-  if (existsSync(join(ledger, "ledger", "events.jsonl")) &&
-      legacyKeyring &&
+  const events = join(ledger, "ledger", "events.jsonl");
+  if (existsSync(events) &&
+      (legacyKeyring || statSync(events).size > 0) &&
       !existsSync(join(root, "keyring.json"))) {
     throw new Error("TRUST_MIGRATION_REQUIRED: move the existing keys and keyring to " + root + " before using this ledger");
   }

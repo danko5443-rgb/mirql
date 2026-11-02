@@ -959,7 +959,7 @@ describe("Work Package W5b: mirql-inbox test suite (hardened)", () => {
       assert.ok(existsSync(aliasPath), "notary alias key must exist");
       if (process.platform !== "win32") {
         assert.equal(statSync(aliasPath).mode & 0o777, 0o600);
-        assert.equal(statSync(join(mirqlDir, "keys")).mode & 0o777, 0o700);
+        assert.equal(statSync(trustFile(mirqlDir, "keys")).mode & 0o777, 0o700);
       }
     } finally {
       rmSync(tmp, { recursive: true, force: true });

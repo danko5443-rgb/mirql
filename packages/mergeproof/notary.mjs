@@ -1,3 +1,4 @@
+import { requireTrustForKeyCreation } from "../core/trust-root.mjs";
 import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 // packages/mergeproof/notary.mjs — the mergeproof notary (Law 7: the notary
 // sits OUTSIDE the blast radius of the agents whose work it judges).
@@ -218,6 +219,7 @@ export function loadOrCreateNotaryKey(mirqlDir, options = {}) {
     }
   }
 
+  requireTrustForKeyCreation(mirqlDir);
   const generated = generateEd25519Keypair();
   const keyPath = trustFile(mirqlDir, "keys", NOTARY_KEY_FILE);
   writePrivateFile(keyPath, JSON.stringify(generated, null, 2) + "\n");

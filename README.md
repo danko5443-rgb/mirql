@@ -131,6 +131,9 @@ move ledger/keyring.json to keyring.json in that destination. Publish the keyrin
 last. Retain the workspace event log. Run mirql l verify before resuming work.
 Do not initialize fresh keys for an existing ledger. Changing the metadata path
 changes its storage identifier, so a relocated ledger needs the same migration.
+For an already externalized ledger, move credentials from its previous external
+trust directory to the newly reported destination. Loading an existing private
+key remains possible; creating a replacement for an initialized ledger is refused.
 
 This storage placement implements trust remediation item 1.1. Signed key enrollment,
 Windows ACL enforcement, and worker process isolation remain later plan requirements.

@@ -1,3 +1,4 @@
+import { requireTrustForKeyCreation } from "../core/trust-root.mjs";
 import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 import {
   existsSync,
@@ -63,6 +64,7 @@ export function appendSupervisorEvent(mirqlDir, eventInput, keypair) {
         : GENESIS_PREV_HASH;
 
   const kp = keypair ?? getOrGenerateSupervisorKey(mirqlDir);
+  updateKeyring(mirqlDir, kp);
   const keyId = kp.keyId;
 
   const unsigned = {
@@ -103,8 +105,6 @@ export function appendSupervisorEvent(mirqlDir, eventInput, keypair) {
   const signed = signEvent(unsigned, kp.privateKey, keyId);
   appendFileSync(eventsFile, jcs(signed) + "\n", "utf8");
 
-  // Keep keyring in sync if needed
-  updateKeyring(mirqlDir, kp);
 
   return signed;
   });
@@ -163,6 +163,7 @@ export function getOrGenerateSupervisorKey(mirqlDir, options = {}) {
     }
   }
 
+  requireTrustForKeyCreation(mirqlDir);
   const kp = generateEd25519Keypair();
   mkdirSync(keysDir, { recursive: true, mode: 0o700 });
   writeFileSync(keyPath, jcs(kp) + "\n", { encoding: "utf8", mode: 0o600 });

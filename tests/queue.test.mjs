@@ -1855,7 +1855,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
 
       if (process.platform !== "win32") {
         assert.equal(statSync(keyPath).mode & 0o777, 0o600);
-        assert.equal(statSync(join(tempDir, "keys")).mode & 0o777, 0o700);
+        assert.equal(statSync(trustFile(tempDir, "keys")).mode & 0o777, 0o700);
       }
     });
   });

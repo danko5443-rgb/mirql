@@ -1,3 +1,4 @@
+import { requireTrustForKeyCreation } from "../core/trust-root.mjs";
 import { trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 // packages/queue/ledger.mjs — Ledger I/O, Key Management, Event Folding, and Concurrency Lockfile.
 import {
@@ -115,6 +116,7 @@ export function getOrCreateQueueKeypair(mirqlDir, customKeyFile) {
   }
 
   if (!kp) {
+    requireTrustForKeyCreation(mirqlDir);
     const generated = generateEd25519Keypair();
     kp = {
       ...generated,

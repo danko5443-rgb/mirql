@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, existsSync, rmSync, symlinkSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, existsSync, rmSync, symlinkSync, cpSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -107,6 +107,50 @@ test("one ledger cannot redirect its trust directory to another ledger", () => {
     mkdirSync(other, { recursive: true });
     symlinkSync(other, root, process.platform === "win32" ? "junction" : "dir");
     assert.throws(() => resolveTrustRoot(metadata), /UNSAFE_TRUST_ROOT/);
+  } finally {
+    if (prior === undefined) delete process.env.MIRQL_TRUST_ROOT;
+    else process.env.MIRQL_TRUST_ROOT = prior;
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("a relocated ledger keeps its identity instead of minting new credentials", () => {
+  const temp = mkdtempSync(join(tmpdir(), "mirql-trust-move-"));
+  const prior = process.env.MIRQL_TRUST_ROOT;
+  process.env.MIRQL_TRUST_ROOT = join(temp, "trust");
+  try {
+    const original = join(temp, "original", ".mirql");
+    runGenesis(original);
+    const relocated = join(temp, "relocated", ".mirql");
+    cpSync(original, relocated, { recursive: true });
+    assert.equal(existsSync(join(relocated, "ledger", "keyring.json")), false);
+    assert.throws(() => getOrCreateQueueKeypair(relocated), /TRUST_MIGRATION_REQUIRED/);
+    assert.equal(existsSync(join(relocated, "keys")), false);
+    assert.equal(existsSync(trustFile(relocated, "keys", "queue.key.json")), false);
+    assert.ok(getOrCreateQueueKeypair(original).publicKey);
+  } finally {
+    if (prior === undefined) delete process.env.MIRQL_TRUST_ROOT;
+    else process.env.MIRQL_TRUST_ROOT = prior;
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("the default human key cannot follow a symlink into the workspace", {
+  skip: process.platform === "win32",
+}, () => {
+  const temp = mkdtempSync(join(tmpdir(), "mirql-human-link-"));
+  const prior = process.env.MIRQL_TRUST_ROOT;
+  process.env.MIRQL_TRUST_ROOT = join(temp, "trust");
+  try {
+    const metadata = join(temp, "workspace", ".mirql");
+    const root = resolveTrustRoot(metadata);
+    mkdirSync(root, { recursive: true });
+    mkdirSync(join(temp, "workspace"), { recursive: true });
+    const victim = join(temp, "workspace", "private.json");
+    writeFileSync(victim, "original");
+    symlinkSync(victim, join(root, "human_owner.key.private.json"));
+    assert.throws(() => runGenesis(metadata), /UNSAFE_TRUST_ROOT/);
+    assert.equal(readFileSync(victim, "utf8"), "original");
   } finally {
     if (prior === undefined) delete process.env.MIRQL_TRUST_ROOT;
     else process.env.MIRQL_TRUST_ROOT = prior;
