@@ -1,3 +1,4 @@
+import { git } from "./helpers/git.mjs";
 // tests/ci-evidence.test.mjs — honest Notary evidence builder (Law 6 & 7).
 // Pins the contract that scripts/ci-evidence.mjs only ever reports MEASURED
 // facts: suite outcomes mirror CI step conclusions, the diff is authoritative,
@@ -23,11 +24,7 @@ import {
 } from "../scripts/ci-evidence.mjs";
 import { verifyThrift } from "../packages/run/index.mjs";
 
-function git(repoDir, ...args) {
-  const res = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", timeout: 15000 });
-  assert.equal(res.status, 0, `git ${args.join(" ")} failed: ${res.stderr}`);
-  return res.stdout;
-}
+
 
 describe("ci-evidence: honest notary evidence builder", () => {
   describe("1. parseBoolEnv", () => {

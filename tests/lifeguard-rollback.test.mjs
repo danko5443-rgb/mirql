@@ -1,3 +1,4 @@
+import { git } from "./helpers/git.mjs";
 // tests/lifeguard-rollback.test.mjs — quarantine-first rollback (Law 14, issue #11).
 // Pins the contract that executeRollback NEVER silently destroys uncommitted
 // work: everything `git reset --hard` + `git clean -fd` would remove is first
@@ -17,11 +18,7 @@ import {
   listDestructiblePaths,
 } from "../packages/daemons/index.mjs";
 
-function git(repoDir, ...args) {
-  const res = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", timeout: 15000 });
-  assert.equal(res.status, 0, `git ${args.join(" ")} failed: ${res.stderr}`);
-  return res.stdout;
-}
+
 
 /** Creates a real git repo with a base commit and returns { dir, baseSha }. */
 function makeRepo(dirty = false) {

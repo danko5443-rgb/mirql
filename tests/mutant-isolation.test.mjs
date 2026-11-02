@@ -1,3 +1,4 @@
+import { git } from "./helpers/git.mjs";
 // tests/mutant-isolation.test.mjs — sandboxed mutation + incremental kill gate
 // (issue #14). Two contracts:
 //   1. The mutation engine NEVER writes the real workspace — mutants live in a
@@ -25,11 +26,7 @@ import { spawnSync } from "node:child_process";
 import { runMutationTesting } from "../packages/run/mutant.mjs";
 import { runProbe, deriveChangedSources, findImportingTests } from "../packages/run/probe.mjs";
 
-function git(repoDir, ...args) {
-  const res = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", timeout: 15000 });
-  assert.equal(res.status, 0, `git ${args.join(" ")} failed: ${res.stderr}`);
-  return res.stdout;
-}
+
 
 function makeWorkspace() {
   const ws = mkdtempSync(join(tmpdir(), "mirql-mutant-iso-"));
