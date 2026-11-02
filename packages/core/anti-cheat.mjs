@@ -63,6 +63,23 @@ export function normalizePath(p) {
 }
 
 /**
+ * Canonical test file path check (Phase 3.6).
+ * Matches test directory prefix or test file suffix.
+ *
+ * @param {string} p
+ * @returns {boolean}
+ */
+export function isTestFilePath(p) {
+  if (typeof p !== "string") return false;
+  const norm = normalizePath(p);
+  return (
+    /(?:^|\/)tests?(?:\/|$)/.test(norm) ||
+    norm.includes("/__tests__/") ||
+    /\.(?:test|spec)\.[cm]?[jt]s$/.test(norm)
+  );
+}
+
+/**
  * Checks if a normalized file path matches a pattern.
  *
  * @param {string} normalizedPath
