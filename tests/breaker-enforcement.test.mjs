@@ -91,13 +91,13 @@ describe("circuit breakers are binding, not advisory (issue #15)", () => {
     assert.match(res.error, /worker/);
   });
 
-  for (const recovery of ["expiry", "reset"]) {
+  for (const recovery of ["expiry", "reset", "throttle"]) {
     it(`reactive leasing resumes after breaker ${recovery} without a new job`, { timeout: 5000 }, async (t) => {
       const { runSupervisorReactive } = await targetImport("packages/run/supervisor.mjs");
       submitWarrant(tempDir, makeValidWarrant(), { repoRoot: ROOT });
       tickQueue(tempDir);
       const store = new BreakerStore(tempDir);
-      store.trip("worker", "test_trip", recovery === "reset" ? 60000 : 600);
+      store.trip("worker", "test_trip", recovery === "expiry" ? 600 : 60000);
       const attempts = [];
       let onLease;
       const leased = new Promise(resolveLease => { onLease = resolveLease; });
@@ -115,6 +115,7 @@ describe("circuit breakers are binding, not advisory (issue #15)", () => {
       t.after(() => reactive.close());
       assert.deepEqual(attempts, ["breaker_tripped"]);
       if (recovery === "reset") store.reset("worker");
+      else if (recovery === "throttle") store.throttle("worker", 60000);
       await leased;
       assert.equal(attempts.at(-1), "leased");
     });

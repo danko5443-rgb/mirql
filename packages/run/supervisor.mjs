@@ -620,9 +620,16 @@ export async function runSupervisorReactive(options = {}) {
 
           if (leaseRes?.status === "breaker_tripped") {
             // All active trips must expire before leasing is possible. A signed
-            // doctor reset can release the queue earlier and has its own wake.
-            const deadlines = leaseRes.breakers.map(breaker => breaker.expires_at_ms);
-            scheduleExpiryWake(Math.max(...deadlines));
+            // doctor reset or throttle can release the queue earlier and has its own wake.
+            const deadlines = Array.isArray(leaseRes.breakers)
+              ? leaseRes.breakers.map((b) => b?.expires_at_ms).filter(Number.isSafeInteger)
+              : [];
+            if (deadlines.length > 0) {
+              scheduleExpiryWake(Math.max(...deadlines));
+            }
+            if (queuedRerun) {
+              continue;
+            }
             break;
           }
           if (!leaseRes || !leaseRes.ok) {
@@ -723,9 +730,23 @@ export async function runSupervisorReactive(options = {}) {
   };
 
   if (typeof options.leaseJob === "function") {
+    const isBreakerReleaseEvent = (event) => {
+      if (!event) return false;
+      const p = event.payload || {};
+      if (p.probe === "doctor" && p.breaker) {
+        // Reset or throttle removes binding trips; cooldown changes adjust deadlines
+        return true;
+      }
+      return event.type === "doctor_breaker";
+    };
     watcher.on("probe.completed", (event) => {
-      if (event.payload?.probe === "doctor" && event.payload.breaker?.action === "reset") {
+      if (isBreakerReleaseEvent(event)) {
         // Events only wake the scheduler. Lease admission rechecks the signed ledger.
+        runStep(null).catch((err) => watcher.emit("error", err));
+      }
+    });
+    watcher.on("doctor_breaker", (event) => {
+      if (isBreakerReleaseEvent(event)) {
         runStep(null).catch((err) => watcher.emit("error", err));
       }
     });

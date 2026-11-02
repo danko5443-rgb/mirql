@@ -1,5 +1,5 @@
 {
-  "description": "Issue #15: submit pending work, trip a worker breaker, then assert the queue refuses to lease. The advisory-only base grants the lease.",
+  "description": "Issue #15 recovery: verify reactive supervisor resumes queued leasing after circuit breakers clear or expire without requiring unrelated wake events.",
   "entry": "reproducer/breaker-enforcement.mjs",
   "expect_base": "fail",
   "expect_head": "pass"
