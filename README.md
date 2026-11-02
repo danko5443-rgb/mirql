@@ -171,3 +171,17 @@ directory permissions are preserved. Existing credentials are checked before use
 and cached checks are invalidated by metadata changes, including NTFS ACL changes.
 These file permissions protect against other OS identities. Worker process
 isolation remains a separate requirement.
+
+
+Supervisor execution now requires a human-signed `warrant.created` event in
+its ledger. A warrant ID selects existing authority. It cannot create a warrant
+or supply its class, scope, or budget. The selected document must match the
+signed content hash and the human owner pinned in the external keyring.
+Authorization verifies one complete ledger snapshot, including signatures,
+writer bindings and the hash chain. Missing, altered, revoked or explicitly
+expired grants stop execution before worker dispatch.
+
+Both `mirql i send` and proposal approval issue explicit signed grants.
+Queue admission accepts a verified grant once. Historical intent-only warrants
+need a new human authorization before execution. Signed merge approvals and
+post-run path enforcement remain separate pending plan items.

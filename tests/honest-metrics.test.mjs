@@ -1,3 +1,4 @@
+import { authorizeTestWarrant } from "./helpers/warrant.mjs";
 import { provisionTestTrust, authorizeTestKey } from "./helpers/keyring.mjs";
 import { git } from "./helpers/git.mjs";
 // tests/honest-metrics.test.mjs — measured-or-flagged telemetry (issue #16).
@@ -56,6 +57,7 @@ describe("supervisor telemetry honesty (issue #16)", () => {
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "mirql-honest-"));
     provisionTestTrust(tempDir);
+    authorizeTestWarrant(tempDir, RUN.warrantId);
     RUN.mirqlDir = tempDir;
     RUN.workspaceDir = tempDir;
   });
@@ -71,7 +73,7 @@ describe("supervisor telemetry honesty (issue #16)", () => {
 
     // The ledger payload carries null — downstream folds treat it as 0, and
     // anyone auditing sees "not measured" instead of a fabricated number.
-    const evt = JSON.parse(readFileSync(join(tempDir, "ledger", "events.jsonl"), "utf8"));
+    const evt = JSON.parse(readFileSync(join(tempDir, "ledger", "events.jsonl"), "utf8").trim().split(/\r?\n/).at(-1));
     assert.equal(evt.payload.tokens_consumed, null);
     assert.equal(evt.payload.cost_micro_usd, null);
   });
@@ -84,7 +86,7 @@ describe("supervisor telemetry honesty (issue #16)", () => {
     assert.equal(res.outcome.cost.measured, 1);
     assert.equal(res.outcome.cost.micro_usd, 42_500);
 
-    const evt = JSON.parse(readFileSync(join(tempDir, "ledger", "events.jsonl"), "utf8"));
+    const evt = JSON.parse(readFileSync(join(tempDir, "ledger", "events.jsonl"), "utf8").trim().split(/\r?\n/).at(-1));
     assert.equal(evt.payload.tokens_consumed, 1540);
     assert.equal(evt.payload.cost_micro_usd, 42_500);
   });
@@ -135,7 +137,7 @@ describe("supervisor telemetry honesty (issue #16)", () => {
   it("signed outcome events stay valid and fold without NaN from nulls", () => {
     const kp = generateEd25519Keypair();
     const res = supervisorRun({ workspaceDir: tempDir, signingKey: kp.privateKey, keyId: kp.keyId, keypair: kp });
-    const evt = JSON.parse(readFileSync(join(tempDir, "ledger", "events.jsonl"), "utf8"));
+    const evt = JSON.parse(readFileSync(join(tempDir, "ledger", "events.jsonl"), "utf8").trim().split(/\r?\n/).at(-1));
     assert.equal(verifyEvent(evt, kp.publicKey).ok, true);
 
     const events = readLedgerEvents(tempDir);

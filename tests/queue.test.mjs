@@ -1,3 +1,4 @@
+import { authorizeTestWarrant } from "./helpers/warrant.mjs";
 import { provisionTestTrust, authorizeTestKey, saveTestKeyring } from "./helpers/keyring.mjs";
 import { trustFile } from "../packages/core/trust-root.mjs";
 // tests/queue.test.mjs — Comprehensive test suite for Work Package W4: mirql-queue
@@ -1775,6 +1776,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
         id: ulid(1_700_001_000_000),
         semantic_fingerprint: sha256("warrant-h1-epoch-threading"),
       });
+      authorizeTestWarrant(tempDir, warrant);
       submitWarrant(tempDir, warrant, { repoRoot: ROOT });
 
       // Lease the job — the first lease bumps the epoch from 1 to 2.
@@ -1819,6 +1821,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
         id: ulid(1_700_001_100_000),
         semantic_fingerprint: sha256("warrant-h1-stale-fence-preserved"),
       });
+      authorizeTestWarrant(tempDir, warrant);
       submitWarrant(tempDir, warrant, { repoRoot: ROOT });
 
       const leased = leaseNextJob(tempDir);

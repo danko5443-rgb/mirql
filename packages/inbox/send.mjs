@@ -175,6 +175,27 @@ export function sendIntent(mirqlDir, intentInput, options = {}) {
 
   appendEvent(mirqlDir, signedEvent);
 
+  // Execution authority is a separate signed event, never an inferred intent.
+  const warrantEvent = signEvent({
+    ...envelope,
+    id: ulid(nowMs + 1),
+    seq: seq + 1,
+    hlc: hlcTick(signedEvent.hlc, nowMs, options.node || "local"),
+    type: "warrant.created",
+    idempotency_key: envelope.idempotency_key + ":warrant",
+    prev_hash: signedEvent.hash,
+    payload: {
+      warrant_id: warrantId,
+      warrant_hash: warrantHash,
+      semantic_fingerprint: semanticFingerprint,
+      anchors, scope: warrantDoc.scope, evidence: warrantDoc.evidence,
+      red_check: warrantDoc.red_check, budget_micro_usd: budget,
+      created_by: "human:owner", role: "builder", tier: "flash", status: "active",
+      intent_id: intentId,
+    },
+  }, humanKp.privateKey, humanKp.keyId);
+  appendEvent(mirqlDir, warrantEvent);
+
   // 6. B7: persist the warrant document only AFTER ledger.append succeeded.
   const warrantsDir = join(mirqlDir, "warrants");
   mkdirSync(warrantsDir, { recursive: true });
@@ -188,6 +209,7 @@ export function sendIntent(mirqlDir, intentInput, options = {}) {
     warrant_hash: warrantHash,
     seq,
     event: signedEvent,
+    warrant_event: warrantEvent,
     warrant: warrantDoc,
   };
 });

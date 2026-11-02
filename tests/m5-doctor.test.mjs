@@ -1,3 +1,4 @@
+import { authorizeTestWarrant } from "./helpers/warrant.mjs";
 import { provisionTestTrust } from "./helpers/keyring.mjs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -747,6 +748,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
         created_by: "human:owner",
       };
 
+      authorizeTestWarrant(tmpDir, warrant);
       assert.throws(() => {
         runSupervisor({
           mirqlDir: tmpDir,

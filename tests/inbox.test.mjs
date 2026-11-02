@@ -305,7 +305,9 @@ describe("Work Package W5b: mirql-inbox test suite (hardened)", () => {
 
       // Event verifies against the keyring-registered human:owner public key
       const events = readAllEvents(mirqlDir);
-      assert.equal(events.length, 2);
+      assert.equal(events.length, 3);
+      assert.equal(events[2].type, "warrant.created");
+      assert.equal(events[2].payload.warrant_hash, sendRes.warrant_hash);
       const evt2 = events[1];
       assert.equal(evt2.type, "human.intent");
       assert.equal(evt2.writer.ns, "human:owner");
@@ -678,7 +680,7 @@ describe("Work Package W5b: mirql-inbox test suite (hardened)", () => {
       );
       const verdict = verifyLedger(mirqlDir);
       assert.equal(verdict.valid, true);
-      assert.equal(verdict.event_count, 2);
+      assert.equal(verdict.event_count, 3);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -722,7 +724,7 @@ describe("Work Package W5b: mirql-inbox test suite (hardened)", () => {
       const digest = renderDigest(mirqlDir);
       assert.equal(digest.tool, "inbox");
       assert.equal(digest.mode, "BUILD");
-      assert.equal(digest.seq, 2);
+      assert.equal(digest.seq, 3);
       assert.equal(digest.mutates_ledger, false);
       assert.ok(Array.isArray(digest.pending_approvals));
       assert.ok(Array.isArray(digest.pending_proposals));
@@ -881,7 +883,7 @@ describe("Work Package W5b: mirql-inbox test suite (hardened)", () => {
       const resDigest = runBin(BIN_MIRQL, ["i", "digest", "--dir", mirqlDir]);
       assert.equal(resDigest.status, 0, `Digest failed: ${resDigest.stderr}`);
       const digDoc = JSON.parse(resDigest.stdout);
-      assert.equal(digDoc.seq, 2);
+      assert.equal(digDoc.seq, 3);
       assert.equal(digDoc.pending_proposals.length, 1);
 
       // 5. Act via mirql-inbox act with --key and --target-id (kebab flags).
@@ -896,7 +898,7 @@ describe("Work Package W5b: mirql-inbox test suite (hardened)", () => {
       assert.equal(resAct.status, 0, `Act failed: ${resAct.stderr}`);
       const actDoc = JSON.parse(resAct.stdout);
       assert.equal(actDoc.status, "acted");
-      assert.equal(actDoc.seq, 3);
+      assert.equal(actDoc.seq, 4);
 
       // 6. Without the key the same act fails closed with exit 4.
       const resNoKey = runBin(BIN_INBOX, [

@@ -1,4 +1,5 @@
-import { readSignedKeyring } from "../core/keyring.mjs";
+import { eventHashOf, verifyLedgerLines } from "../core/ledger-verify.mjs";
+import { resolveRegisteredPublicKey, readSignedKeyring } from "../core/keyring.mjs";
 import { trustFile } from "../core/trust-root.mjs";
 /**
  * mirql-log — the factory's cryptographic append-only ledger (Law 4).
@@ -193,11 +194,6 @@ function readLedgerSafe(mirqlDir) {
  * @param {boolean} [allowRawLine=false]
  * @returns {string}
  */
-function eventHashOf(event, rawLine, allowRawLine = false) {
-  if (typeof event?.hash === "string") return event.hash;
-  if (allowRawLine && typeof rawLine === "string") return sha256(rawLine);
-  return jcsHash(event);
-}
 
 // ---------------------------------------------------------------------------
 // Key material
@@ -239,49 +235,9 @@ function loadKeyring(mirqlDir) {
  * @returns {string | null} base64url raw public key, or null when unresolvable
  */
 function resolvePublicKey(event, mirqlDir, options = {}) {
-  const keyId = event?.writer?.key_id;
-  if (typeof keyId !== "string" || keyId.length === 0) return null;
-  const kFile = keyringFile(mirqlDir);
-  const hasKeyring = options.keyring !== undefined || existsSync(kFile);
-  if (hasKeyring) {
-    const keyring = options.keyring ?? loadKeyring(mirqlDir);
-    const raw = keyring[keyId];
-    if (raw === undefined || raw === null) {
-      return null; // key not registered in keyring: fail closed (B3)
-    }
-    let trustedKey = raw;
-    if (typeof trustedKey === "object" && !Array.isArray(trustedKey)) {
-      // Namespace-bound keyring entry: { ns, publicKey }.
-      if (
-        typeof trustedKey.ns === "string" &&
-        trustedKey.ns.length > 0 &&
-        typeof event?.writer?.ns === "string" &&
-        trustedKey.ns !== event.writer.ns
-      ) {
-        return null; // Namespace binding violation!
-      }
-      trustedKey = trustedKey.publicKey ?? trustedKey.pubkey;
-    }
-    if (typeof trustedKey !== "string" || trustedKey.length === 0) {
-      return null;
-    }
-    if (typeof options.publicKey === "string" && options.publicKey.length > 0) {
-      if (options.publicKey !== trustedKey) {
-        return null;
-      }
-    }
-    return trustedKey;
-  }
-  if (typeof options.publicKey === "string" && options.publicKey.length > 0) {
-    return options.publicKey;
-  }
-  const embeddedAllowed =
-    options.conformance === true || options.allowEmbeddedKey === true;
-  if (embeddedAllowed && keyId.startsWith("ed25519:")) {
-    const embedded = keyId.slice("ed25519:".length);
-    if (/^[A-Za-z0-9_-]{43}$/.test(embedded)) return embedded;
-  }
-  return null;
+  const present = options.keyring !== undefined || existsSync(keyringFile(mirqlDir));
+  const ring = present ? (options.keyring ?? loadKeyring(mirqlDir)) : undefined;
+  return resolveRegisteredPublicKey(event, ring, options);
 }
 
 /** Derive `ed25519:<pubkey-b64url>` from a base64url PKCS#8 private key. */
@@ -961,124 +917,19 @@ function buildAndSignEvent(dir, input, events, rawLines, signingKey, options) {
  *           { valid: false, error: string, seq: number }}
  */
 export function verifyLedger(mirqlDir, options = {}) {
-  const isConformance = options.conformance === true;
   const dir = resolveMirqlDir(mirqlDir);
   const file = eventsFile(dir);
-  if (!existsSync(file)) {
-    return { valid: true, event_count: 0, head_hash: GENESIS_PREV_HASH };
+  const rawLines = existsSync(file)
+    ? readFileSync(file, "utf8").split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+    : [];
+  try {
+    return verifyLedgerLines(rawLines, { ...options, resolvePublicKey: event => resolvePublicKey(event, dir, options) });
+  } catch (error) {
+    if (error.code === "USAGE_ERROR") throw new LedgerError(error.code, error.message);
+    throw error;
   }
-
-  const rawLines = [];
-  for (const line of readFileSync(file, "utf8").split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length > 0) rawLines.push(trimmed);
-  }
-
-  /** @type {object[]} */
-  const events = [];
-  for (let i = 0; i < rawLines.length; i++) {
-    const raw = rawLines[i];
-    const seqNo = i + 1;
-    let event;
-    try {
-      event = JSON.parse(raw);
-    } catch {
-      return { valid: false, error: "json_parse", seq: seqNo };
-    }
-    try {
-      jcs(event);
-    } catch {
-      return { valid: false, error: "law17_violation", seq: seqNo };
-    }
-    if (event === null || typeof event !== "object" || Array.isArray(event)) {
-      return { valid: false, error: "not_an_object", seq: seqNo };
-    }
-    if (event.seq !== seqNo) {
-      return { valid: false, error: "seq_break", seq: seqNo };
-    }
-    const expectedPrev =
-      i === 0 ? GENESIS_PREV_HASH : eventHashOf(events[i - 1], rawLines[i - 1], isConformance);
-    if (event.prev_hash !== expectedPrev) {
-      return { valid: false, error: "chain_break", seq: seqNo };
-    }
-    const writer = event.writer;
-    if (
-      writer !== null &&
-      typeof writer === "object" &&
-      !Array.isArray(writer) &&
-      !canWriteEvent(writer.ns, event.type)
-    ) {
-      return { valid: false, error: "acl_denial", seq: seqNo };
-    }
-    if (!isConformance) {
-      if (typeof event.hash !== "string" || event.hash.length === 0) {
-        return { valid: false, error: "unhashed_line", seq: seqNo };
-      }
-      if (event.hash !== computeEventHash(event)) {
-        return { valid: false, error: "hash_mismatch", seq: seqNo };
-      }
-      if (typeof event.sig !== "string" || event.sig.length === 0) {
-        return {
-          valid: false,
-          error: "missing signature or unresolvable public key",
-          seq: seqNo,
-        };
-      }
-      const publicKey = resolvePublicKey(event, dir, options);
-      if (publicKey === null) {
-        return {
-          valid: false,
-          error: "missing signature or unresolvable public key",
-          seq: seqNo,
-        };
-      }
-      if (!verifyEvent(event, publicKey).ok) {
-        return { valid: false, error: "signature_invalid", seq: seqNo };
-      }
-    } else {
-      if (typeof event.hash === "string") {
-        if (event.hash !== computeEventHash(event)) {
-          return { valid: false, error: "hash_mismatch", seq: seqNo };
-        }
-      }
-      if (typeof event.sig === "string") {
-        const publicKey = resolvePublicKey(event, dir, options);
-        if (publicKey !== null && !verifyEvent(event, publicKey).ok) {
-          return { valid: false, error: "signature_invalid", seq: seqNo };
-        }
-      }
-    }
-    events.push(event);
-  }
-
-  const headHash = events.length
-    ? eventHashOf(events.at(-1), rawLines.at(-1), isConformance)
-    : GENESIS_PREV_HASH;
-  const expectedHead = options.expectHead ?? options["expect-head"];
-  if (expectedHead !== undefined) {
-    if (
-      typeof expectedHead !== "string" ||
-      expectedHead.trim().length === 0 ||
-      !/^(?:sha256:)?[a-f0-9]{64}$/.test(expectedHead)
-    ) {
-      throw new LedgerError(
-        "USAGE_ERROR",
-        `expectHead must be a valid 64-hex SHA-256 hash, got ${JSON.stringify(expectedHead)}`,
-      );
-    }
-    const normHead = headHash.startsWith("sha256:") ? headHash : `sha256:${headHash}`;
-    const normExpected = expectedHead.startsWith("sha256:") ? expectedHead : `sha256:${expectedHead}`;
-    if (normHead !== normExpected) {
-      return {
-        valid: false,
-        error: "head_hash_mismatch",
-        expected: expectedHead,
-        actual: headHash,
-      };
-    }
-  }
-  return { valid: true, event_count: events.length, head_hash: headHash };
 }
+
 
 // ---------------------------------------------------------------------------
 // foldEvents / getView — pure projections

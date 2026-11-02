@@ -266,10 +266,10 @@ export function runCli(argv = []) {
         return res.verified ? EXIT_CODES.OK : EXIT_CODES.DOMAIN_NEGATIVE;
       } catch (err) {
         emitError({
-          error: "USAGE_ERROR",
+          error: err.code ?? "USAGE_ERROR",
           reason: err instanceof Error ? err.message : String(err),
         });
-        return EXIT_CODES.USAGE_ERROR;
+        return err.exitCode ?? EXIT_CODES.USAGE_ERROR;
       }
     }
 
