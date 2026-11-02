@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -96,8 +96,17 @@ export function runAgent(options = {}) {
   if (typeof options.command === "string" && options.command.length > 0) {
     const workerHome = mkdtempSync(join(tmpdir(), "mirql-agent-home-"));
     for (const key of Object.keys(cleanEnv)) {
-      if (key.toUpperCase() === "HOME" || key.toUpperCase() === "USERPROFILE") {
+      const u = key.toUpperCase();
+      if (u === "HOME" || u === "USERPROFILE" || u === "HOMEDRIVE" || u === "HOMEPATH") {
         delete cleanEnv[key];
+      }
+    }
+    const workerEnv = { ...cleanEnv, HOME: workerHome, USERPROFILE: workerHome };
+    if (process.platform === "win32") {
+      const match = workerHome.match(/^([a-zA-Z]:)(.*)$/);
+      if (match) {
+        workerEnv.HOMEDRIVE = match[1];
+        workerEnv.HOMEPATH = match[2];
       }
     }
     let res;
@@ -105,7 +114,7 @@ export function runAgent(options = {}) {
     try {
       res = spawnSync(options.command, {
         shell: true,
-        env: { ...cleanEnv, HOME: workerHome, USERPROFILE: workerHome },
+        env: workerEnv,
         cwd: options.cwd ?? process.cwd(),
         timeout: options.timeout_ms ?? 30000,
         encoding: "utf8",
@@ -114,7 +123,10 @@ export function runAgent(options = {}) {
       try {
         rmSync(workerHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
       } catch (error) {
-        cleanupError = error.message;
+        cleanupError = error.code ? `${error.code}: ${error.message}` : error.message;
+      }
+      if (!cleanupError && existsSync(workerHome)) {
+        cleanupError = "EEXIST: workerHome path retained after cleanup";
       }
     }
 

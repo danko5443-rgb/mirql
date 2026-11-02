@@ -1533,7 +1533,9 @@ test("each worker receives an empty temporary home and removes it after exit", (
   const script = join(workspace, "inspect-home.mjs");
   writeFileSync(script, `import {readdirSync,writeFileSync} from "node:fs";
     const home=process.env.HOME;
-    console.log(JSON.stringify({home,profile:process.env.USERPROFILE,files:readdirSync(home)}));
+    const drive=process.env.HOMEDRIVE;
+    const path=process.env.HOMEPATH;
+    console.log(JSON.stringify({home,profile:process.env.USERPROFILE,drive,path,files:readdirSync(home)}));
     writeFileSync(home+"/private-marker","test");
     process.exit(Number(process.argv[2]));`);
   try {
@@ -1543,12 +1545,15 @@ test("each worker receives an empty temporary home and removes it after exit", (
         command: `"${process.execPath}" "${script}" ${exit}`,
         cwd: workspace,
         env: { ...process.env, HOME: workspace, USERPROFILE: workspace, home: workspace },
-        allowedEnv: ["HOME", "USERPROFILE"],
+        allowedEnv: ["HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"],
       });
       const report = JSON.parse(result.stdout.trim());
       assert.equal(result.exitCode, exit);
       assert.equal(report.home, report.profile);
       assert.notEqual(report.home, workspace);
+      if (process.platform === "win32" && report.drive && report.path) {
+        assert.equal(report.home.toLowerCase(), (report.drive + report.path).toLowerCase());
+      }
       assert.deepEqual(report.files, []);
       assert.equal(existsSync(report.home), false);
       homes.push(report.home);
