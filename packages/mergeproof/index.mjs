@@ -370,8 +370,8 @@ export function runCli(argv = []) {
         return EXIT_CODES.USAGE_ERROR;
     }
   } catch (err) {
-    if (err instanceof Error && (err.code === "USAGE_ERROR" || err.name === "NotaryError" || err.code === "KEYRING_INTEGRITY")) {
-      const notary = err.name === "NotaryError" || err.code === "KEYRING_INTEGRITY";
+    if (err instanceof Error && (err.code === "USAGE_ERROR" || err.name === "NotaryError" || (err.code === "KEYRING_INTEGRITY" || err.code === "PRIVATE_PERMISSIONS"))) {
+      const notary = err.name === "NotaryError" || (err.code === "KEYRING_INTEGRITY" || err.code === "PRIVATE_PERMISSIONS");
       process.stderr.write(
         jcs({
           tool: TOOL,

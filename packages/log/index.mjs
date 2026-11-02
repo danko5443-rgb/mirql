@@ -1377,7 +1377,7 @@ export function runCli(argv = []) {
         return EXIT_CODES.USAGE_ERROR;
     }
   } catch (err) {
-    if (err instanceof LedgerError || err?.code === "KEYRING_INTEGRITY") {
+    if (err instanceof LedgerError || (err?.code === "KEYRING_INTEGRITY" || err?.code === "PRIVATE_PERMISSIONS")) {
       process.stderr.write(jcs({ error: err.code, reason: err.message }) + "\n");
       return err.exitCode;
     }

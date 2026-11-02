@@ -1,3 +1,4 @@
+import { writePrivateFile, protectPrivatePaths } from "../core/private-files.mjs";
 import { requireTrustForKeyCreation } from "../core/trust-root.mjs";
 import { assertKeyEnrolled } from "../core/keyring.mjs";
 import { trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
@@ -16,14 +17,8 @@ import { trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 // - Append signed verdicts (verdict.issued / verdict.rejected /
 //   verdict.needs_human / verdict.accepted) to <mirqlDir>/ledger/events.jsonl
 //   under withLedgerLock, hash-chained onto the ledger head.
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, join, resolve as resolvePath } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve as resolvePath } from "node:path";
 import {
   EXIT_CODES,
   generateEd25519Keypair,
@@ -79,26 +74,6 @@ export function notaryError(code, message) {
 }
 
 /**
- * Write a file containing private key material with mode 0o600 (H4); the
- * parent directory is created 0o700 (best-effort re-chmod on platforms that
- * ignore directory mode bits).
- *
- * @param {string} filePath
- * @param {string} contents
- */
-function writePrivateFile(filePath, contents) {
-  const dir = dirname(filePath);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  try {
-    chmodSync(dir, 0o700);
-  } catch {}
-  writeFileSync(filePath, contents, { encoding: "utf8", mode: 0o600 });
-  try {
-    chmodSync(filePath, 0o600);
-  } catch {}
-}
-
-/**
  * Read and structurally validate a keypair JSON document.
  *
  * @param {string} filePath
@@ -106,6 +81,7 @@ function writePrivateFile(filePath, contents) {
  */
 function readKeypairFile(filePath) {
   try {
+    protectPrivatePaths([filePath]);
     const parsed = JSON.parse(readFileSync(filePath, "utf8"));
     if (
       parsed !== null &&
@@ -116,7 +92,9 @@ function readKeypairFile(filePath) {
     ) {
       return parsed;
     }
-  } catch {}
+  } catch (error) {
+    if (error.code === "PRIVATE_PERMISSIONS") throw error;
+  }
   return null;
 }
 

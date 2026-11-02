@@ -1,3 +1,4 @@
+import { writePrivateFile, writePrivateFiles, protectPrivatePaths } from "../core/private-files.mjs";
 import { requireTrustForKeyCreation } from "../core/trust-root.mjs";
 import { readSignedKeyring, sealKeyring, readOwnerPin } from "../core/keyring.mjs";
 import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
@@ -17,16 +18,8 @@ import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/tr
 //   writer namespace: `{ "<keyId>": { "ns": "<namespace>", "publicKey": "<pub>" } }`
 //   (legacy plain-string entries are still readable). A key registered for one
 //   namespace can never authenticate events claiming another namespace.
-import {
-  readFileSync,
-  writeFileSync,
-  existsSync,
-  mkdirSync,
-  chmodSync,
-  statSync,
-  rmSync,
-} from "node:fs";
-import { join, dirname, sep as pathSep, resolve as resolvePath } from "node:path";
+import { readFileSync, existsSync, mkdirSync, chmodSync, statSync, rmSync } from "node:fs";
+import { join, sep as pathSep, resolve as resolvePath } from "node:path";
 import { createPrivateKey, createPublicKey } from "node:crypto";
 import { generateEd25519Keypair, EXIT_CODES } from "../core/index.mjs";
 
@@ -161,30 +154,19 @@ export function keyringEntry(entry, entryKey) {
  * @param {string} filePath
  * @param {string} contents
  */
-export function writePrivateFile(filePath, contents) {
-  const dir = dirname(filePath);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  try {
-    chmodSync(dir, 0o700);
-  } catch {
-    // Some platforms ignore directory mode bits; best effort only.
-  }
-  writeFileSync(filePath, contents, { encoding: "utf8", mode: 0o600 });
-  try {
-    chmodSync(filePath, 0o600);
-  } catch {
-    // Some platforms ignore mode bits; the explicit 0o600 above is best effort.
-  }
-}
+export { writePrivateFile };
 
 /** Read and validate a keypair JSON document. @returns {object | null} */
 function readKeypairFile(filePath) {
   try {
+    protectPrivatePaths([filePath]);
     const parsed = JSON.parse(readFileSync(filePath, "utf8"));
     if (parsed && typeof parsed === "object" && typeof parsed.privateKey === "string") {
       return parsed;
     }
-  } catch {}
+  } catch (error) {
+    if (error.code === "PRIVATE_PERMISSIONS") throw error;
+  }
   return null;
 }
 
@@ -265,6 +247,7 @@ export function generateFactoryKeypairs(mirqlDir, options = {}) {
   const keyring = {};
 
   const result = {};
+  const privateFiles = [];
 
   // Human:owner — reuse the operator-held key file when it exists, else generate.
   let humanKp = null;
@@ -329,9 +312,9 @@ export function generateFactoryKeypairs(mirqlDir, options = {}) {
         writer: { ns: item.ns, key_id: generated.keyId },
       };
       // H4: every private key file (including aliases) is written 0o600.
-      writePrivateFile(keyPath, JSON.stringify(kp, null, 2) + "\n");
+      privateFiles.push({ path: keyPath, contents: JSON.stringify(kp, null, 2) + "\n" });
       for (const alias of item.aliases) {
-        writePrivateFile(trustFile(mirqlDir, "keys", alias), JSON.stringify(kp, null, 2) + "\n");
+        privateFiles.push({ path: trustFile(mirqlDir, "keys", alias), contents: JSON.stringify(kp, null, 2) + "\n" });
       }
     }
 
@@ -339,7 +322,8 @@ export function generateFactoryKeypairs(mirqlDir, options = {}) {
     registerKeyringEntry(keyring, item.ns, kp);
   }
 
-  writePrivateFile(resolveHumanKeyPath(mirqlDir, options), JSON.stringify(humanEntry, null, 2) + "\n");
+  privateFiles.push({ path: resolveHumanKeyPath(mirqlDir, options), contents: JSON.stringify(humanEntry, null, 2) + "\n" });
+  writePrivateFiles(privateFiles, { directories: [resolveTrustRoot(mirqlDir), keysDir] });
   sealKeyring(mirqlDir, keyring, humanEntry, { initialize: true });
   return result;
 }
@@ -496,6 +480,7 @@ export function requireHumanKey(mirqlDir, options = {}) {
         );
       }
       sourceFile = abs;
+      protectPrivatePaths([abs]);
       material = readFileSync(abs, "utf8");
     } else if (/^\{/.test(candidate) || /^[A-Za-z0-9_-]{40,}$/.test(candidate)) {
       // MIRQL_HUMAN_KEY may carry inline material rather than a path.
