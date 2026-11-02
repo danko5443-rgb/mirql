@@ -1,3 +1,4 @@
+import { git } from "./helpers/git.mjs";
 // tests/ci-evidence.test.mjs — honest Notary evidence builder (Law 6 & 7).
 // Pins the contract that scripts/ci-evidence.mjs only ever reports MEASURED
 // facts: suite outcomes mirror CI step conclusions, the diff is authoritative,
@@ -23,22 +24,7 @@ import {
 } from "../scripts/ci-evidence.mjs";
 import { verifyThrift } from "../packages/run/index.mjs";
 
-function git(repoDir, ...args) {
-  let res;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    res = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", timeout: 15000 });
-    if (res.status === 0) return res.stdout;
-    if (process.platform === "win32" && (res.stderr?.includes("Permission denied") || res.stderr?.includes("unable to write file") || res.stderr?.includes("failed to write commit object"))) {
-      const waitMs = 50 * (attempt + 1);
-      const start = Date.now();
-      while (Date.now() - start < waitMs) { /* backoff busy wait */ }
-      continue;
-    }
-    break;
-  }
-  assert.equal(res.status, 0, `git ${args.join(" ")} failed: ${res.stderr}`);
-  return res.stdout;
-}
+
 
 describe("ci-evidence: honest notary evidence builder", () => {
   describe("1. parseBoolEnv", () => {
