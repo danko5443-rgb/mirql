@@ -1,9 +1,8 @@
-import { readFileSync, readdirSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { resolve, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { EXIT_CODES, isTestFilePath, normalizePath } from "../core/index.mjs";
+import { EXIT_CODES, isTestFilePath } from "../core/index.mjs";
 import { sanitizeAgentEnv } from "./agent.mjs";
 import {
   checkAntiCheat,
@@ -13,6 +12,8 @@ import {
 } from "./anti-cheat.mjs";
 import { evaluatePhiGate } from "./phi.mjs";
 import { extractChangedLines } from "./mutant.mjs";
+import { parseTapOutput, checkV8Coverage } from "./causal-evidence.mjs";
+export { parseTapOutput, checkV8Coverage } from "./causal-evidence.mjs";
 
 /**
  * Verifies a candidate fix/feature across the deterministic checks (Laws 10, 13, 16):
@@ -225,99 +226,6 @@ function evaluateCheckResult(check, fixture = {}) {
  * "needs_human", rule: "MP-001" }`; deleted test files reject under MP-002;
  * other anti-cheat violations reject or escalate per their rule.
  */
-/**
- * Canonical TAP reporter output parser (Phase 3.5).
- */
-export function parseTapOutput(output, exitCode) {
-  const text = String(output ?? "");
-  const hasNotOk = /not ok \d+/i.test(text);
-  const hasOk = /ok \d+/i.test(text);
-  const hasFailCount = /# fail\s+[1-9]\d*/i.test(text);
-  const isCrash = /TypeError|ReferenceError|SyntaxError|RangeError|Cannot find module|MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND/i.test(text);
-  const isAssertion = /AssertionError|ERR_ASSERTION|operator:\s*['"]?[a-zA-Z]+['"]?|expected:\s*/i.test(text);
-  const isAssertionFailure = exitCode === 1 && !isCrash && (isAssertion || hasNotOk);
-  return {
-    exitCode,
-    isAssertionFailure,
-    isCrash,
-    hasNotOk,
-    hasOk,
-    hasFailCount,
-  };
-}
-
-/**
- * V8 Coverage line execution mapper (Phase 3.3).
- */
-export function checkV8Coverage(coverageDir, workspaceDir, changedLinesPerFile) {
-  if (!existsSync(coverageDir)) return { executedChangedLines: false, coveredFiles: [], totalCovered: 0 };
-  const coveredFiles = new Set();
-  const coveredLinesMap = new Map();
-
-  let covFiles = [];
-  try {
-    covFiles = readdirSync(coverageDir).filter(f => f.endsWith(".json"));
-  } catch {
-    return { executedChangedLines: false, coveredFiles: [], totalCovered: 0 };
-  }
-
-  for (const covFile of covFiles) {
-    try {
-      const data = JSON.parse(readFileSync(join(coverageDir, covFile), "utf8"));
-      if (!Array.isArray(data.result)) continue;
-      for (const entry of data.result) {
-        if (!entry.url || !Array.isArray(entry.functions)) continue;
-        let filePath = entry.url;
-        if (filePath.startsWith("file:///")) {
-          try { filePath = fileURLToPath(filePath); } catch { filePath = filePath.slice(8); }
-        } else if (filePath.startsWith("file://")) {
-          filePath = filePath.slice(7);
-        }
-        filePath = normalizePath(filePath);
-
-        for (const [targetRel, targetLines] of changedLinesPerFile.entries()) {
-          const normTarget = normalizePath(targetRel);
-          if (filePath.endsWith(normTarget)) {
-            const absPath = join(workspaceDir, targetRel);
-            if (!existsSync(absPath)) continue;
-            coveredFiles.add(targetRel);
-            const srcContent = readFileSync(absPath, "utf8");
-            const lineOffsets = [0];
-            for (let i = 0; i < srcContent.length; i++) {
-              if (srcContent[i] === "\n") lineOffsets.push(i + 1);
-            }
-
-            for (const fn of entry.functions) {
-              if (!Array.isArray(fn.ranges)) continue;
-              for (const range of fn.ranges) {
-                if (!range || range.count <= 0) continue;
-                for (const lineNum of targetLines) {
-                  if (lineNum < 1 || lineNum > lineOffsets.length) continue;
-                  const startOffset = lineOffsets[lineNum - 1];
-                  const endOffset = lineNum < lineOffsets.length ? lineOffsets[lineNum] - 1 : srcContent.length;
-                  if (Math.max(range.startOffset, startOffset) < Math.min(range.endOffset, endOffset)) {
-                    if (!coveredLinesMap.has(targetRel)) coveredLinesMap.set(targetRel, new Set());
-                    coveredLinesMap.get(targetRel).add(lineNum);
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    } catch {}
-  }
-
-  let totalCovered = 0;
-  for (const set of coveredLinesMap.values()) totalCovered += set.size;
-  return {
-    executedChangedLines: totalCovered > 0,
-    coveredFiles: [...coveredFiles],
-    coveredLinesMap: Object.fromEntries([...coveredLinesMap.entries()].map(([k, v]) => [k, [...v]])),
-    totalCovered,
-  };
-}
-
 /**
  * Executes honest causal proof against a real git repository (Phase 3).
  */
