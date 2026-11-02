@@ -711,8 +711,8 @@ export function evaluateAndPromoteCanary(mirqlDir, canaryId, options = {}) {
     const nowMs = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
     const elapsedMs = nowMs - canary.staged_at_ms;
 
-    // 1. Verify probation window has elapsed (force can waive remaining time if authorized)
-    if (elapsedMs < canary.probation_window_ms && options.force !== true) {
+    // 1. Require the full probation window for every promotion.
+    if (elapsedMs < canary.probation_window_ms) {
       return {
         ok: false,
         status: "probation_active",
@@ -767,7 +767,7 @@ export function evaluateAndPromoteCanary(mirqlDir, canaryId, options = {}) {
       prior_version: canary.supervisor_version,
       samples_evaluated: healthSamples.length,
       probation_elapsed_ms: elapsedMs,
-      forced_waiver: options.force === true,
+      forced_waiver: false,
       promoted_at_ms: nowMs,
       status: "promoted",
     };

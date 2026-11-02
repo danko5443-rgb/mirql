@@ -280,6 +280,13 @@ describe("Milestone M7: Keyless Canary Promotion Gauntlet & Ouroboros Self-Hosti
       assert.equal(prematureRes.status, "probation_active");
       assert.equal(prematureRes.remaining_ms, 7000);
 
+      const forced = evaluateAndPromoteCanary(mirqlDir, staged.canary_id, {
+        nowMs: startTime + 9999,
+        force: true,
+      });
+      assert.equal(forced.status, "probation_active");
+      assert.equal(forced.remaining_ms, 1);
+
       // Attempt promotion after probation window elapsed (t + 11000ms)
       const promotedRes = evaluateAndPromoteCanary(mirqlDir, staged.canary_id, {
         nowMs: startTime + 11000,
@@ -339,13 +346,13 @@ describe("Milestone M7: Keyless Canary Promotion Gauntlet & Ouroboros Self-Hosti
       }
     });
 
-    it("supports sampling health and promoting via CLI router flags", () => {
+    it("samples health and refuses premature forced promotion via the CLI", () => {
       const jobId = setupReadyJob();
 
       const staged = stageCanary(mirqlDir, {
         jobId,
         baseSha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
-        probationWindowMs: 500,
+        probationWindowMs: 600000,
       });
 
       const oldStdout = process.stdout.write;
@@ -382,9 +389,9 @@ describe("Milestone M7: Keyless Canary Promotion Gauntlet & Ouroboros Self-Hosti
           "--dir",
           mirqlDir,
         ]);
-        assert.equal(evalExit, EXIT_CODES.OK);
+        assert.equal(evalExit, EXIT_CODES.POLICY_DENIAL);
         const evalParsed = JSON.parse(stdoutData.trim());
-        assert.equal(evalParsed.status, "promoted");
+        assert.equal(evalParsed.status, "probation_active");
       } finally {
         process.stdout.write = oldStdout;
       }
@@ -418,7 +425,7 @@ describe("Milestone M7: Keyless Canary Promotion Gauntlet & Ouroboros Self-Hosti
       });
 
       // Complete probation and evaluate
-      const promoRes = evaluateAndPromoteCanary(mirqlDir, stageRes.canary_id, { force: true });
+      const promoRes = evaluateAndPromoteCanary(mirqlDir, stageRes.canary_id, { force: true, nowMs: stageRes.staged_at_ms + stageRes.probation_window_ms });
       assert.equal(promoRes.status, "promoted");
       assert.equal(promoRes.version, "0.2.0");
 
@@ -470,7 +477,7 @@ describe("Milestone M7: Keyless Canary Promotion Gauntlet & Ouroboros Self-Hosti
       // Force evaluate with ZERO samples
       assert.throws(
         () => {
-          evaluateAndPromoteCanary(mirqlDir, staged.canary_id, { force: true });
+          evaluateAndPromoteCanary(mirqlDir, staged.canary_id, { force: true, nowMs: staged.staged_at_ms + staged.probation_window_ms });
         },
         (err) => {
           assert.equal(err.errorCode, "INSUFFICIENT_SAMPLES");
@@ -517,7 +524,7 @@ describe("Milestone M7: Keyless Canary Promotion Gauntlet & Ouroboros Self-Hosti
       writeFileSync(ledgerPath, readFileSync(ledgerPath, "utf8") + forgedLine, "utf8");
 
       // Evaluation must use foldQueueState (which cryptographically rejects unverified lines)
-      const evalRes = evaluateAndPromoteCanary(mirqlDir, staged.canary_id, { force: true });
+      const evalRes = evaluateAndPromoteCanary(mirqlDir, staged.canary_id, { force: true, nowMs: staged.staged_at_ms + staged.probation_window_ms });
       assert.equal(evalRes.ok, true, "Evaluation must succeed and ignore forged unverified lines");
       assert.equal(evalRes.status, "promoted");
     });
@@ -597,7 +604,7 @@ describe("Milestone M7: Keyless Canary Promotion Gauntlet & Ouroboros Self-Hosti
         latencyP99Ms: 10,
       });
 
-      const promo = evaluateAndPromoteCanary(mirqlDir, staged.canary_id, { force: true });
+      const promo = evaluateAndPromoteCanary(mirqlDir, staged.canary_id, { force: true, nowMs: staged.staged_at_ms + staged.probation_window_ms });
       assert.equal(promo.status, "promoted");
 
       assert.throws(
