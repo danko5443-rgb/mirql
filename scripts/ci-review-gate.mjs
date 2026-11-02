@@ -13,6 +13,8 @@
 //   - the reviewer's latest decisive review is APPROVED
 //   - that review was submitted on the exact head commit (a new push voids it)
 //   - no aiReviewers account has an outstanding CHANGES_REQUESTED
+//   - no human comment on the PR commands a bot to approve or resolve
+//     (`@coderabbitai approve`), since that skips the bot's own review
 //
 // Zero external dependencies. Environment contract:
 //   BASE_NOTARY_DIR - base-notary checkout root (policy source)
@@ -20,6 +22,8 @@
 //                     (`gh api --paginate .../pulls/N/reviews --jq '.[]'`)
 //   HEAD_SHA        - authoritative candidate head SHA
 //   PR_AUTHOR       - PR author login
+//   COMMENTS_PATH   - JSON lines, one GitHub issue comment per line
+//                     (`gh api --paginate .../issues/N/comments --jq '.[]'`)
 //   GITHUB_OUTPUT   - (optional) receives `approver=<login>`
 //
 // Exit codes: 0 always when inputs parse (no approval is not an error);
@@ -30,6 +34,14 @@ import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const DECISIVE_STATES = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
+const APPROVE_COMMAND_RE = /@coderabbit(?:ai)?\b[^\n]*\b(?:approve|resolve)\b/i;
+
+/** True when a non-bot comment commands a reviewer bot to approve or resolve. */
+export function hasApproveCommand(comments) {
+  return (comments ?? []).some(
+    (c) => c?.user?.type !== "Bot" && APPROVE_COMMAND_RE.test(String(c?.body ?? "")),
+  );
+}
 
 /** Parses JSON-lines review output; blank lines are skipped. */
 export function parseReviews(text) {
@@ -72,18 +84,20 @@ export function findAiApproval(reviews, { reviewers, headSha, author }) {
 }
 
 export async function main(env = process.env) {
-  const { BASE_NOTARY_DIR, REVIEWS_PATH, HEAD_SHA, PR_AUTHOR } = env;
-  for (const [name, value] of Object.entries({ BASE_NOTARY_DIR, REVIEWS_PATH, HEAD_SHA, PR_AUTHOR })) {
+  const { BASE_NOTARY_DIR, REVIEWS_PATH, COMMENTS_PATH, HEAD_SHA, PR_AUTHOR } = env;
+  for (const [name, value] of Object.entries({ BASE_NOTARY_DIR, REVIEWS_PATH, COMMENTS_PATH, HEAD_SHA, PR_AUTHOR })) {
     if (!value) {
       console.error(`ci-review-gate: ${name} is required`);
       return 1;
     }
   }
   let reviews;
+  let comments;
   try {
     reviews = parseReviews(readFileSync(REVIEWS_PATH, "utf8"));
+    comments = parseReviews(readFileSync(COMMENTS_PATH, "utf8"));
   } catch (err) {
-    console.error(`ci-review-gate: cannot read reviews: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`ci-review-gate: cannot read reviews or comments: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
   const baseRoot = resolve(BASE_NOTARY_DIR);
@@ -92,8 +106,11 @@ export async function main(env = process.env) {
   );
   const reviewers = loadPathPolicies(baseRoot).aiReviewers ?? [];
 
-  const approver = findAiApproval(reviews, { reviewers, headSha: HEAD_SHA, author: PR_AUTHOR });
-  console.log(JSON.stringify({ tool: "ci-review-gate", reviewers, approver }));
+  const commanded = hasApproveCommand(comments);
+  const approver = commanded
+    ? null
+    : findAiApproval(reviews, { reviewers, headSha: HEAD_SHA, author: PR_AUTHOR });
+  console.log(JSON.stringify({ tool: "ci-review-gate", reviewers, approver, approve_command_seen: commanded }));
   if (approver && env.GITHUB_OUTPUT) {
     appendFileSync(env.GITHUB_OUTPUT, `approver=${approver}\n`);
   }

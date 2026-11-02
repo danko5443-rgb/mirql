@@ -1,7 +1,11 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 # humanOnly (policy/paths.yaml): CodeRabbit is an aiReviewers account, so its
-# Approve review can clear MP-001 in CI. request_changes_workflow makes it
-# submit a real Approve once its comments are resolved, and Request changes
-# while they are open.
+# Approve review can clear MP-001 in CI. Automatic approvals make it submit a
+# real Approve once its comments are resolved, and Request changes while they
+# are open. allow_author_approval: false stops a PR author from forcing an
+# approval with `@coderabbitai approve`; CI also ignores any approval on a PR
+# where someone posted that command (scripts/ci-review-gate.mjs).
 reviews:
-  request_changes_workflow: true
+  auto_approvals:
+    enabled: true
+    allow_author_approval: false

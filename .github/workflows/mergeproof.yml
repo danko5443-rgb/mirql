@@ -115,9 +115,11 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_NOTARY_DIR: ./base-notary
           REVIEWS_PATH: ./reviews.jsonl
+          COMMENTS_PATH: ./comments.jsonl
         run: |
           if [ -f base-notary/scripts/ci-review-gate.mjs ]; then
             gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews" --jq '.[]' > "$REVIEWS_PATH"
+            gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[]' > "$COMMENTS_PATH"
             node base-notary/scripts/ci-review-gate.mjs
           else
             echo "::notice::base-notary has no ci-review-gate.mjs yet; AI approvals are not considered"

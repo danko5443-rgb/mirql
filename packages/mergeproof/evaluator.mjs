@@ -158,7 +158,10 @@ export function isTestFilePath(p) {
   );
 }
 
-const REVIEWER_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/;
+/** humanOnly paths an AI approval can never clear (reviewer configuration). */
+const AI_REVIEWER_CONFIG_PATHS = new Set([".coderabbit.yaml"]);
+
+const REVIEWER_LOGIN_RE =/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/;
 
 /** Returns the reviewer login if it is a plausible GitHub login, else null. */
 function validReviewerLogin(login) {
@@ -337,7 +340,10 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
   const forbidden = filesChanged.filter((f) =>
     isHumanOnlyPath(f, policies.humanOnly),
   );
-  const humanOnlyReviewer = validReviewerLogin(options.humanOnlyReviewer);
+  // A PR that changes an AI reviewer's own config may be reviewed under that
+  // config, so its approval cannot clear MP-001; a human must merge it.
+  const touchesReviewerConfig = forbidden.some((f) => AI_REVIEWER_CONFIG_PATHS.has(f));
+  const humanOnlyReviewer = touchesReviewerConfig ? null : validReviewerLogin(options.humanOnlyReviewer);
   if (forbidden.length > 0) {
     checks.human_only = false;
   }
