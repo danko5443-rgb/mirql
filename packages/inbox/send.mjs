@@ -1,3 +1,4 @@
+import { readVerifiedLedger } from "../core/ledger-verify.mjs";
 // packages/inbox/send.mjs — Human Intent ingestion and Warrant issuance (Law 6 & Law 11).
 //
 // Remediation B1 (Law 6): the human:owner signing key is never loaded
@@ -80,8 +81,28 @@ export function sendIntent(mirqlDir, intentInput, options = {}) {
   //    namespace_binding_violation / key_mismatch as POLICY_DENIAL.
   const humanKp = authenticateHumanWriter(mirqlDir, options);
 
+  const conflict = () => {
+    const error = new Error("Idempotency conflict: this key already names a different signed submission");
+    error.code = error.errorCode = "IDEMPOTENCY_CONFLICT";
+    error.exitCode = EXIT_CODES.POLICY_DENIAL;
+    return error;
+  };
+  if (options.idempotencyKey !== undefined && (typeof options.idempotencyKey !== "string" || !options.idempotencyKey.trim())) {
+    const error = new Error("Idempotency key must be a nonempty string");
+    error.exitCode = EXIT_CODES.USAGE_ERROR;
+    throw error;
+  }
+  const events = readVerifiedLedger(mirqlDir);
+  const previous = options.idempotencyKey ? events.find(event =>
+    event.writer.ns === "human:owner" && event.idempotency_key === options.idempotencyKey) : null;
+  if (previous && previous.type !== "human.intent") throw conflict();
+  if (!previous && options.idempotencyKey && events.some(event =>
+      event.writer.ns === "human:owner" && event.idempotency_key === options.idempotencyKey + ":warrant")) {
+    throw conflict();
+  }
+
   const nowMs = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
-  const warrantId = ulid(nowMs);
+  const warrantId = previous?.payload.warrant_id ?? ulid(nowMs);
   const warrantClass = kind === "bug" ? "surgical" : (/^[a-z][a-z0-9_]{1,63}$/.test(kind) ? kind : "feature");
 
   // 2. Compute semantic fingerprint over canonical intent statement
@@ -128,10 +149,13 @@ export function sendIntent(mirqlDir, intentInput, options = {}) {
 
   // 4. B7: anchor the warrant document cryptographically.
   const warrantHash = sha256(jcs(warrantDoc));
+  if (previous && (previous.payload.warrant_hash !== warrantHash ||
+      previous.payload.semantic_fingerprint !== semanticFingerprint ||
+      previous.payload.intent_id !== `intent_${warrantId}`)) throw conflict();
 
   // 5. Append signed human.intent event to ledger
   const { lastEvent, count, lastHash } = getLastEvent(mirqlDir);
-  const seq = count + 1;
+  const seq = previous?.seq ?? count + 1;
   const epoch = typeof lastEvent?.epoch === "number" ? lastEvent.epoch : 1;
   const tenantId = typeof lastEvent?.tenant_id === "string" ? lastEvent.tenant_id : "mirql-core";
   const intentId = `intent_${warrantId}`;
@@ -165,7 +189,7 @@ export function sendIntent(mirqlDir, intentInput, options = {}) {
     },
   };
 
-  const signedEvent = signEvent(envelope, humanKp.privateKey, humanKp.keyId);
+  const signedEvent = previous ?? signEvent(envelope, humanKp.privateKey, humanKp.keyId);
   const verifyRes = verifyEvent(signedEvent, humanKp.publicKey);
   if (!verifyRes.ok) {
     const err = new Error(`Signature verification failed for human.intent: ${verifyRes.reason}`);
@@ -173,28 +197,42 @@ export function sendIntent(mirqlDir, intentInput, options = {}) {
     throw err;
   }
 
-  appendEvent(mirqlDir, signedEvent);
+  if (!previous) {
+    const validation = validateDocument("event", signedEvent);
+    if (!validation.valid) throw new Error("Invalid intent envelope: " + validation.errors.join(", "));
+    appendEvent(mirqlDir, signedEvent);
+  }
 
-  // Execution authority is a separate signed event, never an inferred intent.
-  const warrantEvent = signEvent({
-    ...envelope,
-    id: ulid(nowMs + 1),
-    seq: seq + 1,
-    hlc: hlcTick(signedEvent.hlc, nowMs, options.node || "local"),
-    type: "warrant.created",
-    idempotency_key: envelope.idempotency_key + ":warrant",
-    prev_hash: signedEvent.hash,
-    payload: {
-      warrant_id: warrantId,
-      warrant_hash: warrantHash,
-      semantic_fingerprint: semanticFingerprint,
-      anchors, scope: warrantDoc.scope, evidence: warrantDoc.evidence,
-      red_check: warrantDoc.red_check, budget_micro_usd: budget,
-      created_by: "human:owner", role: "builder", tier: "flash", status: "active",
-      intent_id: intentId,
-    },
-  }, humanKp.privateKey, humanKp.keyId);
-  appendEvent(mirqlDir, warrantEvent);
+  // Recover a missing grant from the committed intent, chained to the actual head.
+  const persisted = readVerifiedLedger(mirqlDir);
+  const head = persisted.at(-1);
+  const grantKey = signedEvent.idempotency_key + ":warrant";
+  const grantPayload = {
+    warrant_id: warrantId, warrant_hash: warrantHash, semantic_fingerprint: semanticFingerprint,
+    anchors, scope: warrantDoc.scope, evidence: warrantDoc.evidence,
+    red_check: warrantDoc.red_check, budget_micro_usd: budget,
+    created_by: "human:owner", role: "builder", tier: "flash", status: "active", intent_id: intentId,
+  };
+  let warrantEvent = persisted.find(event => event.writer.ns === "human:owner" && event.idempotency_key === grantKey);
+  if (warrantEvent && (warrantEvent.type !== "warrant.created" || jcs(warrantEvent.payload) !== jcs(grantPayload))) {
+    throw conflict();
+  }
+  if (!warrantEvent) {
+    warrantEvent = signEvent({
+      ...envelope,
+      id: ulid(nowMs + 1),
+      seq: head.seq + 1,
+      epoch: head.epoch,
+      hlc: hlcTick(head.hlc, nowMs, options.node || "local"),
+      type: "warrant.created",
+      idempotency_key: grantKey,
+      prev_hash: head.hash,
+      payload: grantPayload,
+    }, humanKp.privateKey, humanKp.keyId);
+    const validation = validateDocument("event", warrantEvent);
+    if (!validation.valid) throw new Error("Invalid warrant grant envelope: " + validation.errors.join(", "));
+    appendEvent(mirqlDir, warrantEvent);
+  }
 
   // 6. B7: persist the warrant document only AFTER ledger.append succeeded.
   const warrantsDir = join(mirqlDir, "warrants");
