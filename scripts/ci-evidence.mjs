@@ -25,7 +25,7 @@
 // Exit codes: 0 evidence written; 1 any measurement failed (fail-closed).
 
 import { spawnSync } from "node:child_process";
-import { existsSync, writeFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
@@ -102,9 +102,20 @@ export function collectDiff(baseSha, headSha, repoDir) {
  * @param {{ pass_base: boolean, pass_head: boolean }} input.suite
  * @param {{ delta_phi: number }} input.phi
  * @param {boolean} [input.causalCompleted=false] - only true with a VERIFIED reproducer cycle
+ * @param {{ passed: boolean, evidence?: object, reasons?: string[] }} [input.thrift]
+ *        - MEASURED thrift test verdict (issue #13). Only ever true when a
+ *          real thrift test ran; absent for non-consolidation PRs.
  * @returns {object} pr-doc consumable by `mirql m check`
  */
-export function buildPrDoc({ pr, diff, suite, phi, causalCompleted = false }) {
+export function buildPrDoc({ pr, diff, suite, phi, causalCompleted = false, thrift }) {
+  const phiBlock = { delta_phi: phi.delta_phi };
+  if (thrift) {
+    phiBlock.thrift_test_passed = thrift.passed === true;
+    if (thrift.evidence) phiBlock.thrift_evidence = thrift.evidence;
+    if (Array.isArray(thrift.reasons) && thrift.reasons.length > 0) {
+      phiBlock.thrift_reasons = thrift.reasons;
+    }
+  }
   return {
     pr: {
       number: pr.number,
@@ -124,26 +135,116 @@ export function buildPrDoc({ pr, diff, suite, phi, causalCompleted = false }) {
       suite_pass_base: suite.pass_base === true,
       suite_pass_head: suite.pass_head === true,
     },
-    phi: {
-      delta_phi: phi.delta_phi,
-    },
+    phi: phiBlock,
   };
 }
 
 /**
- * Loads computePhi from the BASE-NOTARY checkout (Law 7: the running version
- * N-1 owns the metric definition; the candidate never measures itself).
+ * Loads the base-notary phi engine module (Law 7: the running version N-1
+ * owns the metric definitions; the candidate never measures itself).
  */
-export async function loadBaseComputePhi(baseDir) {
+async function loadBasePhiEngine(baseDir) {
   const phiPath = join(resolve(baseDir), "packages", "run", "phi.mjs");
   if (!existsSync(phiPath)) {
     throw new Error(`Law 7 fail-closed: base-notary phi engine not found at ${phiPath}`);
   }
-  const mod = await import(pathToFileURL(phiPath).href);
+  return import(pathToFileURL(phiPath).href);
+}
+
+/** Loads computePhi from the BASE-NOTARY checkout (Law 7). */
+export async function loadBaseComputePhi(baseDir) {
+  const mod = await loadBasePhiEngine(baseDir);
   if (typeof mod.computePhi !== "function") {
     throw new Error("Law 7 fail-closed: base-notary phi.mjs does not export computePhi");
   }
   return mod.computePhi;
+}
+
+/** Loads verifyThrift from the BASE-NOTARY checkout (same Law 7 rationale). */
+export async function loadBaseVerifyThrift(baseDir) {
+  const mod = await loadBasePhiEngine(baseDir);
+  if (typeof mod.verifyThrift !== "function") {
+    throw new Error("Law 7 fail-closed: base-notary phi.mjs does not export verifyThrift");
+  }
+  return mod.verifyThrift;
+}
+
+/** Counts all external dependencies across all dependency blocks in a tree's package.json (Law 0, −1 when unmeasurable). */
+function countDeps(treeDir) {
+  const pkgPath = join(resolve(treeDir), "package.json");
+  if (!existsSync(pkgPath)) return 0;
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+    return (
+      Object.keys(pkg.dependencies ?? {}).length +
+      Object.keys(pkg.devDependencies ?? {}).length +
+      Object.keys(pkg.peerDependencies ?? {}).length +
+      Object.keys(pkg.optionalDependencies ?? {}).length
+    );
+  } catch {
+    return -1;
+  }
+}
+
+/**
+ * Law 13 Thrift Test measurement (issue #13), composed from facts the
+ * evidence builder has ALREADY measured: base-authored ΔΦ, deleted tests,
+ * surface.lock delta, dependency growth. Criteria evaluation is delegated to
+ * the BASE notary's own verifyThrift (Law 7: version N-1 owns the rules).
+ *
+ * @param {object} input
+ * @param {number} input.phiBase
+ * @param {number} input.phiHead
+ * @param {string[]} [input.deletedTests=[]]
+ * @param {string[]} [input.filesChanged=[]]
+ * @param {number} [input.depsBase=0]
+ * @param {number} [input.depsHead=0]
+ * @param {Function} input.verifyThriftFn
+ * @returns {{ passed: boolean, evidence: object, reasons: string[] }}
+ */
+export function measureThrift({
+  phiBase,
+  phiHead,
+  deletedTests = [],
+  filesChanged = [],
+  depsBase = 0,
+  depsHead = 0,
+  verifyThriftFn,
+}) {
+  const safeFiles = Array.isArray(filesChanged) ? filesChanged : [];
+  const safeDeleted = Array.isArray(deletedTests) ? deletedTests : [];
+  const surfacePreserved = !safeFiles.some((f) => {
+    const norm = String(f ?? "").replaceAll("\\", "/").replace(/^\.\//, "").trim();
+    return norm === "surface.lock";
+  });
+
+  if (typeof verifyThriftFn !== "function") {
+    return {
+      passed: false,
+      evidence: { surface_changed: !surfacePreserved, deps_before: depsBase, deps_after: depsHead },
+      reasons: ["Law 7 fail-closed: verifyThrift function not provided or not a function"],
+    };
+  }
+
+  const verdict = verifyThriftFn({
+    phiBefore: phiBase,
+    phiAfter: phiHead,
+    testsPreserved: safeDeleted.length === 0,
+    surfacePreserved,
+    ...(depsBase >= 0 && depsHead >= 0 ? { depCountBefore: depsBase, depCountAfter: depsHead } : {}),
+  });
+  // Evidence carries only facts NOT already present elsewhere in the pr-doc
+  // (delta_phi and tests_deleted live at top level; criteria internals are
+  // pinned by the m2 suite's verifyThrift tests).
+  return {
+    passed: verdict.ok === true,
+    evidence: {
+      surface_changed: !surfacePreserved,
+      deps_before: depsBase,
+      deps_after: depsHead,
+    },
+    reasons: verdict.reasons ?? [],
+  };
 }
 
 export async function main(env = process.env) {
@@ -178,6 +279,8 @@ export async function main(env = process.env) {
 
   // 2. Law 13: base-authored phi (both sides measured by the SAME N-1 engine)
   let deltaPhi;
+  let phiBaseTotal;
+  let phiHeadTotal;
   try {
     const computePhi = await loadBaseComputePhi(baseDir);
     const phiBase = computePhi(baseDir);
@@ -185,10 +288,36 @@ export async function main(env = process.env) {
     if (!Number.isSafeInteger(phiBase?.total) || !Number.isSafeInteger(phiHead?.total)) {
       throw new Error("base or candidate phi total is not a safe integer");
     }
-    deltaPhi = phiHead.total - phiBase.total;
+    phiBaseTotal = phiBase.total;
+    phiHeadTotal = phiHead.total;
+    deltaPhi = phiHeadTotal - phiBaseTotal;
   } catch (err) {
     process.stderr.write(`ci-evidence: base-authored computePhi failed: ${err.message}\n`);
     process.exit(1);
+  }
+
+  // 2b. Law 13 Thrift Test (issue #13): the evaluator fail-closes
+  // THRIFT_TEST_FAILED on consolidation PRs (delta_phi < 0) unless
+  // phi.thrift_test_passed === true — so exactly then, MEASURE it from the
+  // facts already in hand (diff, deleted tests, both checkouts) with the BASE
+  // notary's own verifyThrift criteria (Law 7). Non-consolidations (ΔΦ ≥ 0)
+  // never claim a thrift pass.
+  let thrift;
+  if (deltaPhi < 0) {
+    try {
+      const verifyThriftFn = await loadBaseVerifyThrift(baseDir);
+      thrift = measureThrift({
+        phiBase: phiBaseTotal,
+        phiHead: phiHeadTotal,
+        deletedTests: diff.deletedTests,
+        filesChanged: diff.files,
+        depsBase: countDeps(baseDir),
+        depsHead: countDeps(candidateDir),
+        verifyThriftFn,
+      });
+    } catch (err) {
+      thrift = { passed: false, reasons: [`thrift measurement failed: ${err.message}`] };
+    }
   }
 
   // 3. Honest suite outcomes (measured by the CI steps, never assumed)
@@ -201,12 +330,13 @@ export async function main(env = process.env) {
     },
     phi: { delta_phi: deltaPhi },
     causalCompleted: false, // Law 16: no verified reproducer artifact in this pipeline yet
+    thrift,
   });
 
   const outPath = resolve(env.PR_DOC_PATH ?? join(candidateDir, "pr-doc.json"));
   writeFileSync(outPath, JSON.stringify(prDoc), "utf8");
   process.stdout.write(
-    `ci-evidence: wrote ${outPath} (suite base=${prDoc.proof.suite_pass_base} head=${prDoc.proof.suite_pass_head} delta_phi=${deltaPhi} causal=false)\n`,
+    `ci-evidence: wrote ${outPath} (suite base=${prDoc.proof.suite_pass_base} head=${prDoc.proof.suite_pass_head} delta_phi=${deltaPhi} causal=false${thrift ? ` thrift=${prDoc.phi.thrift_test_passed}` : ""})\n`,
   );
 }
 
