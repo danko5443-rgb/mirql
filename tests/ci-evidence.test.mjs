@@ -16,6 +16,9 @@ import {
   collectDiff,
   buildPrDoc,
   measureThrift,
+  loadReproducerManifest,
+  runReproducerScript,
+  verifyCausalReproducer,
   main,
 } from "../scripts/ci-evidence.mjs";
 import { verifyThrift } from "../packages/run/index.mjs";
@@ -311,6 +314,174 @@ describe("ci-evidence: honest notary evidence builder", () => {
       } finally {
         rmSync(tempDir, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe("6. Verified-reproducer causal cycle (Law 16)", () => {
+    /**
+     * Fixture: a candidate carrying a reproducer whose script exits non-zero
+     * when MIRQL_TARGET_ROOT/marker.txt says "broken", zero on "fixed".
+     * baseDir gets the broken marker, candidate the fixed one — exactly the
+     * red-on-base → green-on-head contract.
+     */
+    function makeFixture({ baseMarker = "broken", headMarker = "fixed", manifest } = {}) {
+      const candidate = mkdtempSync(join(tmpdir(), "mirql-repro-cand-"));
+      const base = mkdtempSync(join(tmpdir(), "mirql-repro-base-"));
+      mkdirSync(join(candidate, "reproducer"), { recursive: true });
+      writeFileSync(
+        join(candidate, "reproducer", "entry.mjs"),
+        `import { readFileSync } from "node:fs";\n` +
+          `import { join } from "node:path";\n` +
+          `const root = process.env.MIRQL_TARGET_ROOT;\n` +
+          `if (!root) { console.error("MIRQL_TARGET_ROOT not set"); process.exit(5); }\n` +
+          `const marker = readFileSync(join(root, "marker.txt"), "utf8").trim();\n` +
+          `process.exit(marker === "broken" ? 3 : 0);\n`,
+        "utf8",
+      );
+      writeFileSync(
+        join(candidate, "reproducer", "manifest.json"),
+        JSON.stringify(
+          manifest ?? {
+            description: "fixture reproducer",
+            entry: "reproducer/entry.mjs",
+            expect_base: "fail",
+            expect_head: "pass",
+          },
+        ),
+        "utf8",
+      );
+      writeFileSync(join(base, "marker.txt"), baseMarker, "utf8");
+      writeFileSync(join(candidate, "marker.txt"), headMarker, "utf8");
+      return { candidate, base };
+    }
+
+    it("validates the manifest fail-closed", () => {
+      const { candidate, base } = makeFixture();
+      try {
+        assert.equal(loadReproducerManifest(candidate).ok, true);
+
+        const noEntry = makeFixture({ manifest: { expect_base: "fail", expect_head: "pass" } });
+        assert.match(loadReproducerManifest(noEntry.candidate).error, /entry/);
+
+        const escaping = makeFixture({
+          manifest: { entry: "reproducer/../../escape.mjs", expect_base: "fail", expect_head: "pass" },
+        });
+        assert.match(loadReproducerManifest(escaping.candidate).error, /escape/);
+
+        const wrongExpects = makeFixture({
+          manifest: { entry: "reproducer/entry.mjs", expect_base: "pass", expect_head: "pass" },
+        });
+        assert.match(loadReproducerManifest(wrongExpects.candidate).error, /expect_base/);
+
+        rmSync(noEntry.candidate, { recursive: true, force: true });
+        rmSync(noEntry.base, { recursive: true, force: true });
+        rmSync(escaping.candidate, { recursive: true, force: true });
+        rmSync(escaping.base, { recursive: true, force: true });
+        rmSync(wrongExpects.candidate, { recursive: true, force: true });
+        rmSync(wrongExpects.base, { recursive: true, force: true });
+      } finally {
+        rmSync(candidate, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
+      }
+    });
+
+    it("verifies causal only on genuinely observed red-on-base + green-on-head", () => {
+      const { candidate, base } = makeFixture();
+      try {
+        const res = verifyCausalReproducer({ candidateDir: candidate, baseDir: base });
+        assert.equal(res.present, true);
+        assert.equal(res.causal, true);
+        assert.equal(res.base_exit_code, 3);
+        assert.equal(res.head_exit_code, 0);
+      } finally {
+        rmSync(candidate, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
+      }
+    });
+
+    it("never verifies when the defect does not reproduce on base", () => {
+      const { candidate, base } = makeFixture({ baseMarker: "fixed" });
+
+      try {
+        const res = verifyCausalReproducer({ candidateDir: candidate, baseDir: base });
+        assert.equal(res.causal, false, "green-on-base proves nothing");
+      } finally {
+        rmSync(candidate, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
+      }
+    });
+
+    it("never verifies when the fix does not fix the head", () => {
+      const { candidate, base } = makeFixture({ headMarker: "broken" });
+
+      try {
+        const res = verifyCausalReproducer({ candidateDir: candidate, baseDir: base });
+        assert.equal(res.causal, false, "red-on-head means the cycle is incomplete");
+        assert.equal(res.head_exit_code, 3);
+      } finally {
+        rmSync(candidate, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
+      }
+    });
+
+    it("fails closed on timeout (never a verified red)", () => {
+      const candidate = mkdtempSync(join(tmpdir(), "mirql-repro-hang-"));
+      const base = mkdtempSync(join(tmpdir(), "mirql-repro-hangb-"));
+      try {
+        mkdirSync(join(candidate, "reproducer"), { recursive: true });
+        writeFileSync(
+          join(candidate, "reproducer", "entry.mjs"),
+          `setTimeout(() => {}, 30000);\n`,
+          "utf8",
+        );
+        writeFileSync(
+          join(candidate, "reproducer", "manifest.json"),
+          JSON.stringify({ entry: "reproducer/entry.mjs", expect_base: "fail", expect_head: "pass" }),
+          "utf8",
+        );
+        const res = verifyCausalReproducer({ candidateDir: candidate, baseDir: base, timeoutMs: 1000 });
+        assert.equal(res.causal, false);
+        assert.ok(res.error, "timeout must be reported");
+      } finally {
+        rmSync(candidate, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
+      }
+    });
+
+    it("reports present:false when the candidate carries no manifest", () => {
+      const candidate = mkdtempSync(join(tmpdir(), "mirql-repro-none-"));
+      try {
+        const res = verifyCausalReproducer({ candidateDir: candidate, baseDir: candidate });
+        assert.equal(res.present, false);
+        assert.equal(res.causal, false);
+      } finally {
+        rmSync(candidate, { recursive: true, force: true });
+      }
+    });
+
+    it("propagates measured reproducer evidence into proof (buildPrDoc)", () => {
+      const doc = buildPrDoc({
+        pr: { number: 9, base_sha: "b".repeat(40), head_sha: "h".repeat(40), author: "agent" },
+        diff: { files_changed: [], tests_deleted: [] },
+        suite: { pass_base: true, pass_head: true },
+        phi: { delta_phi: -5 },
+        causalCompleted: true,
+        reproducer: {
+          present: true, causal: true, entry: "reproducer/entry.mjs",
+          base_exit_code: 3, head_exit_code: 0,
+        },
+      });
+      assert.equal(doc.proof.causal_cycle_completed, true);
+      assert.equal(doc.proof.reproducer.base_exit_code, 3);
+      assert.equal(doc.proof.reproducer.head_exit_code, 0);
+
+      const bare = buildPrDoc({
+        pr: { number: 9, base_sha: "b".repeat(40), head_sha: "h".repeat(40), author: "agent" },
+        diff: { files_changed: [], tests_deleted: [] },
+        suite: { pass_base: true, pass_head: true },
+        phi: { delta_phi: -5 },
+      });
+      assert.equal(bare.proof.reproducer, undefined);
     });
   });
 });
