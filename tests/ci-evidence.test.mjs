@@ -24,7 +24,18 @@ import {
 import { verifyThrift } from "../packages/run/index.mjs";
 
 function git(repoDir, ...args) {
-  const res = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", timeout: 15000 });
+  let res;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    res = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", timeout: 15000 });
+    if (res.status === 0) return res.stdout;
+    if (process.platform === "win32" && (res.stderr?.includes("Permission denied") || res.stderr?.includes("unable to write file") || res.stderr?.includes("failed to write commit object"))) {
+      const waitMs = 50 * (attempt + 1);
+      const start = Date.now();
+      while (Date.now() - start < waitMs) { /* backoff busy wait */ }
+      continue;
+    }
+    break;
+  }
   assert.equal(res.status, 0, `git ${args.join(" ")} failed: ${res.stderr}`);
   return res.stdout;
 }
