@@ -24,7 +24,6 @@ import {
 import {
   generateFactoryKeypairs,
   resolveHumanKeyPath,
-  writePrivateFile,
   HUMAN_KEY_FORBIDDEN_FILES,
   HUMAN_WRITER_NS,
 } from "./keys.mjs";
@@ -145,21 +144,7 @@ export function runGenesis(mirqlDir, options = {}) {
     );
   }
 
-  // Law 6: persist the human private key outside .mirql, mode 0o600.
-  writePrivateFile(
-    humanKeyOut,
-    JSON.stringify(
-      {
-        publicKey: humanKp.publicKey,
-        privateKey: humanKp.privateKey,
-        keyId: humanKp.keyId,
-        writer: humanKp.writer,
-      },
-      null,
-      2,
-    ) + "\n",
-  );
-
+  // Factory provisioning persists the human key before publishing its owner pin.
   const nowMs = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
   const tenantId = typeof options.tenantId === "string" ? options.tenantId : "mirql-core";
   const macroState = typeof options.macroState === "string" ? options.macroState : "BUILD";

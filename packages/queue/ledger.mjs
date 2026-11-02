@@ -1,4 +1,5 @@
 import { requireTrustForKeyCreation } from "../core/trust-root.mjs";
+import { readSignedKeyring, sealKeyring, assertKeyEnrolled } from "../core/keyring.mjs";
 import { trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 // packages/queue/ledger.mjs — Ledger I/O, Key Management, Event Folding, and Concurrency Lockfile.
 import {
@@ -52,17 +53,7 @@ export {
  * @returns {object | null}
  */
 export function loadKeyring(mirqlDir) {
-  const candidates = [
-    trustFile(mirqlDir, "keyring.json"),
-  ];
-  for (const p of candidates) {
-    if (existsSync(p)) {
-      try {
-        return JSON.parse(readFileSync(p, "utf8"));
-      } catch {}
-    }
-  }
-  return null;
+  return readSignedKeyring(mirqlDir);
 }
 
 /**
@@ -72,16 +63,11 @@ export function loadKeyring(mirqlDir) {
  * @param {object} [options]
  */
 export function saveKeyring(mirqlDir, keyring, options = {}) {
-  const p = trustFile(mirqlDir, "keyring.json");
-  mkdirSync(dirname(p), { recursive: true });
-  let existing = {};
-  if (!options.overwrite && existsSync(p)) {
-    try {
-      existing = JSON.parse(readFileSync(p, "utf8"));
-    } catch {}
-  }
-  const merged = options.overwrite ? keyring : { ...existing, ...keyring };
-  writeFileSync(p, JSON.stringify(merged, null, 2) + "\n", "utf8");
+  return withLedgerLock(mirqlDir, () => {
+    if (!options.owner) throw new Error("Keyring changes require the pinned human signing key");
+    const existing = options.overwrite ? {} : readSignedKeyring(mirqlDir);
+    sealKeyring(mirqlDir, { ...existing, ...keyring }, options.owner);
+  });
 }
 
 /**
@@ -96,7 +82,7 @@ export function saveKeyring(mirqlDir, keyring, options = {}) {
 
 
 /**
- * Load or generate the Ed25519 keypair used by the queue writer, ensuring it is registered in keyring.json.
+ * Load or propose the queue keypair, refusing use until the human has enrolled it.
  *
  * @param {string} mirqlDir
  * @param {string} [customKeyFile]
@@ -107,12 +93,16 @@ export function getOrCreateQueueKeypair(mirqlDir, customKeyFile) {
   let kp;
 
   if (existsSync(keyPath)) {
+    let parsed;
     try {
-      const parsed = JSON.parse(readFileSync(keyPath, "utf8"));
-      if (parsed.privateKey && parsed.keyId) {
-        kp = parsed;
-      }
-    } catch {}
+      parsed = JSON.parse(readFileSync(keyPath, "utf8"));
+    } catch (error) {
+      throw new Error("Invalid persisted queue key: " + error.message);
+    }
+    if (!parsed.privateKey || !parsed.publicKey || !parsed.keyId) {
+      throw new Error("Invalid persisted queue key: incomplete key material");
+    }
+    kp = parsed;
   }
 
   if (!kp) {
@@ -141,19 +131,7 @@ export function getOrCreateQueueKeypair(mirqlDir, customKeyFile) {
     } catch {}
   }
 
-  // Ensure tool:queue is registered in <trustRoot>/keyring.json
-  const keyringPath = trustFile(mirqlDir, "keyring.json");
-  let keyring = {};
-  if (existsSync(keyringPath)) {
-    try {
-      keyring = JSON.parse(readFileSync(keyringPath, "utf8"));
-    } catch {}
-  }
-  if (!keyring["tool:queue"]) {
-    keyring["tool:queue"] = kp.publicKey;
-    mkdirSync(dirname(keyringPath), { recursive: true });
-    writeFileSync(keyringPath, JSON.stringify(keyring, null, 2) + "\n", "utf8");
-  }
+  assertKeyEnrolled(mirqlDir, "tool:queue", kp);
 
   return kp;
 }
@@ -188,6 +166,7 @@ export function getOrCreateQueueKeypair(mirqlDir, customKeyFile) {
  * @returns {object} signed event
  */
 export function appendLedgerEventRaw(mirqlDir, eventData, keypair, currentState) {
+  assertKeyEnrolled(mirqlDir, keypair.writer?.ns ?? "tool:queue", keypair);
   const nowMs = eventData.nowMs ?? Date.now();
   const nextSeq =
     (currentState?.disk_seq !== undefined

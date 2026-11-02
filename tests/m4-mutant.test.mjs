@@ -1,3 +1,4 @@
+import { provisionTestTrust } from "./helpers/keyring.mjs";
 // tests/m4-mutant.test.mjs — Milestone M4: Incremental AST Mutation Engine & Flake Detector.
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -431,6 +432,7 @@ export function compute(a, b) {
   });
 
   describe("7. Probe mutants wiring", () => {
+    beforeEach(() => provisionTestTrust(tempDir));
     it("fails closed (fail, not not_implemented) outside a git workspace when source and test are omitted", () => {
       // Issue #14: omitting files is no longer "not implemented" — the probe
       // derives targets from the workspace diff. In a non-git workspace the

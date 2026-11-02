@@ -1,3 +1,4 @@
+import { readSignedKeyring } from "../core/keyring.mjs";
 import { trustFile } from "../core/trust-root.mjs";
 /**
  * mirql-log — the factory's cryptographic append-only ledger (Law 4).
@@ -213,16 +214,7 @@ function eventHashOf(event, rawLine, allowRawLine = false) {
  * @returns {Record<string, unknown>}
  */
 function loadKeyring(mirqlDir) {
-  const file = keyringFile(mirqlDir);
-  if (!existsSync(file)) return {};
-  try {
-    const parsed = JSON.parse(readFileSync(file, "utf8"));
-    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed
-      : {};
-  } catch {
-    return {};
-  }
+  return readSignedKeyring(mirqlDir);
 }
 
 /**
@@ -1385,7 +1377,7 @@ export function runCli(argv = []) {
         return EXIT_CODES.USAGE_ERROR;
     }
   } catch (err) {
-    if (err instanceof LedgerError) {
+    if (err instanceof LedgerError || err?.code === "KEYRING_INTEGRITY") {
       process.stderr.write(jcs({ error: err.code, reason: err.message }) + "\n");
       return err.exitCode;
     }

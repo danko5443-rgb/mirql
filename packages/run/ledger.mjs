@@ -1,5 +1,6 @@
 import { requireTrustForKeyCreation } from "../core/trust-root.mjs";
-import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
+import { assertKeyEnrolled } from "../core/keyring.mjs";
+import { trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 import {
   existsSync,
   mkdirSync,
@@ -117,24 +118,7 @@ export function appendSupervisorEvent(mirqlDir, eventInput, keypair) {
  * @param {{ keyId: string, publicKey: string }} kp
  */
 export function updateKeyring(mirqlDir, kp) {
-  const ledgerDir = resolveTrustRoot(mirqlDir);
-  mkdirSync(ledgerDir, { recursive: true, mode: 0o700 });
-  const keyringPath = trustFile(mirqlDir, "keyring.json");
-  let keyring = {};
-  if (existsSync(keyringPath)) {
-    try {
-      keyring = JSON.parse(readFileSync(keyringPath, "utf8")) ?? {};
-    } catch (err) {
-      throw new Error(`Corrupt keyring file at ${keyringPath}: ${err.message}`);
-    }
-  }
-  if (!keyring[kp.keyId]) {
-    keyring[kp.keyId] = {
-      ns: "tool:run_supervisor",
-      publicKey: kp.publicKey,
-    };
-    writeFileSync(keyringPath, jcs(keyring) + "\n", { encoding: "utf8", mode: 0o600 });
-  }
+  assertKeyEnrolled(mirqlDir, "tool:run_supervisor", kp);
 }
 
 /**
@@ -155,10 +139,12 @@ export function getOrGenerateSupervisorKey(mirqlDir, options = {}) {
     try {
       const parsed = JSON.parse(readFileSync(keyPath, "utf8"));
       if (parsed.privateKey && parsed.publicKey && parsed.keyId) {
+        assertKeyEnrolled(mirqlDir, "tool:run_supervisor", parsed);
         return parsed;
       }
       throw new Error(`Incomplete supervisor keypair structure in ${keyPath}`);
     } catch (err) {
+      if (err.code === "KEYRING_INTEGRITY") throw err;
       throw new Error(`Corrupt supervisor key file at ${keyPath}: ${err.message}`);
     }
   }

@@ -61,4 +61,6 @@ export {
   getActiveTrippedBreakers,
 } from "./breaker.mjs";
 
-export { resolveTrustRoot, assertExternalTrustPath, trustFile } from "./trust-root.mjs";
+export { assertExternalTrustPath } from "./trust-root.mjs";
+
+export { readSignedKeyring, sealKeyring, enrollKey, assertKeyEnrolled, readOwnerPin } from "./keyring.mjs";

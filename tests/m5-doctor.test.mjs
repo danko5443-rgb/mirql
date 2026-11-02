@@ -1,3 +1,4 @@
+import { provisionTestTrust } from "./helpers/keyring.mjs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
@@ -378,6 +379,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("persists trips directly to the durable signed ledger and reconstructs state (Blocker B6)", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-doctor-ledger-test-"));
+      provisionTestTrust(tmpDir);
       const store = new BreakerStore(tmpDir);
 
       const entry = store.trip("worker:flash", "test_trip", 50000, 1000);
@@ -400,6 +402,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("resets individual subsystems and all subsystems via signed ledger events", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-doctor-ledger-test-"));
+      provisionTestTrust(tmpDir);
       const store = new BreakerStore(tmpDir);
 
       store.trip("queue", "trip_queue", 100000, 1000);
@@ -424,6 +427,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("Case A: Real passing probe produces healthy=true without false positive failure (Blocker B1)", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-real-case-a-"));
+      provisionTestTrust(tmpDir);
       const keypair = getOrGenerateSupervisorKey(tmpDir);
 
       appendSupervisorEvent(
@@ -452,6 +456,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("Case B: Real leased and completed job does not show up as hung lease (Blocker B2)", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-real-case-b-"));
+      provisionTestTrust(tmpDir);
       const queueKeypair = getOrCreateQueueKeypair(tmpDir);
       const supervisorKeypair = getOrGenerateSupervisorKey(tmpDir);
 
@@ -507,6 +512,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("Case C: Real worker failures correctly increment tier failure counts and throttle/harden (Blocker B3)", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-real-case-c-"));
+      provisionTestTrust(tmpDir);
       const queueKeypair = getOrCreateQueueKeypair(tmpDir);
       const supervisorKeypair = getOrGenerateSupervisorKey(tmpDir);
 
@@ -651,6 +657,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("Case D: Real macro-state changes are accurately recognized by Doctor (Blocker B4)", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-real-case-d-"));
+      provisionTestTrust(tmpDir);
       const keypair = getOrCreateQueueKeypair(tmpDir);
 
       appendLedgerEventRaw(
@@ -672,6 +679,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("Case E: Daily budget window measures spend within last 24h, not lifetime (Blocker B5)", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-real-case-e-"));
+      provisionTestTrust(tmpDir);
       const queueKeypair = getOrCreateQueueKeypair(tmpDir);
       const supervisorKeypair = getOrGenerateSupervisorKey(tmpDir);
 
@@ -722,6 +730,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("Case F: Supervisor refuses execution when worker tier circuit breaker is tripped", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-supervisor-trip-"));
+      provisionTestTrust(tmpDir);
       const store = new BreakerStore(tmpDir);
       store.trip("worker:flash", "test_worker_trip", 60000, Date.now());
 
@@ -756,6 +765,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("returns EXIT_CODES.OK when workspace and ledger are healthy", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-doctor-cli-"));
+      provisionTestTrust(tmpDir);
       mkdirSync(join(tmpDir, "ledger"), { recursive: true });
       writeFileSync(join(tmpDir, "ledger", "events.jsonl"), "", "utf8");
 
@@ -767,6 +777,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("returns EXIT_CODES.OK on successful operator trip and reset actions (Major Issue M1)", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-doctor-cli-"));
+      provisionTestTrust(tmpDir);
       mkdirSync(join(tmpDir, "ledger"), { recursive: true });
 
       const tripCode = runCliMain(["doctor", "--ledger", tmpDir, "--trip", "worker:flash"]);
@@ -788,6 +799,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("rejects --trip with no value or empty string with USAGE_ERROR (Major Issue M1)", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-doctor-cli-"));
+      provisionTestTrust(tmpDir);
       const exitCode = runCliMain(["doctor", "--ledger", tmpDir, "--trip"]);
       assert.equal(exitCode, EXIT_CODES.USAGE_ERROR);
       rmSync(tmpDir, { recursive: true, force: true });
@@ -795,6 +807,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("rejects --reset with no value or empty string with USAGE_ERROR (Major Issue M1)", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-doctor-cli-"));
+      provisionTestTrust(tmpDir);
       const exitCode = runCliMain(["doctor", "--ledger", tmpDir, "--reset"]);
       assert.equal(exitCode, EXIT_CODES.USAGE_ERROR);
       rmSync(tmpDir, { recursive: true, force: true });
@@ -802,6 +815,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("rejects non-integer --cooldown 1.9 under Law 17 safe integer rule (Major Issue M1)", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-doctor-cli-"));
+      provisionTestTrust(tmpDir);
       const exitCode = runCliMain(["doctor", "--ledger", tmpDir, "--cooldown", "1.9"]);
       assert.equal(exitCode, EXIT_CODES.USAGE_ERROR);
       rmSync(tmpDir, { recursive: true, force: true });
@@ -809,6 +823,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("rejects tripping lifeguard under Law 2 (Blocker B7)", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-doctor-cli-"));
+      provisionTestTrust(tmpDir);
       const exitCode = runCliMain(["doctor", "--ledger", tmpDir, "--trip", "lifeguard"]);
       assert.equal(exitCode, EXIT_CODES.USAGE_ERROR);
       rmSync(tmpDir, { recursive: true, force: true });
@@ -816,6 +831,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("NEW-B8 regression: manual operator trip survives subsequent plain doctor run", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-doctor-b8-"));
+      provisionTestTrust(tmpDir);
       mkdirSync(join(tmpDir, "ledger"), { recursive: true });
 
       const store = new BreakerStore(tmpDir);
@@ -836,6 +852,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("NEW-B9 regression: forged unsigned events in ledger are ignored by breaker fold and triage", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-doctor-b9-"));
+      provisionTestTrust(tmpDir);
       const keypair = getOrCreateQueueKeypair(tmpDir);
 
       // Legitimate warmup event
@@ -906,6 +923,7 @@ describe("Milestone M5: Doctor & Circuit Breakers", () => {
 
     it("Attribution accuracy regression: multiple uncompleted warrants count per-tier failures accurately", () => {
       tmpDir = mkdtempSync(join(tmpdir(), "mirql-doctor-attrib-"));
+      provisionTestTrust(tmpDir);
       const queueKeypair = getOrCreateQueueKeypair(tmpDir);
       const supervisorKeypair = getOrGenerateSupervisorKey(tmpDir);
 

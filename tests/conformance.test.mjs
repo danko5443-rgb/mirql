@@ -258,6 +258,7 @@ describe("Work Package W2: Conformance Suite", () => {
       const expectedCommands = [
         "mirql m check",
         "mirql i genesis",
+        "mirql i enroll-key",
         "mirql i send",
         "mirql i digest",
         "mirql i act",

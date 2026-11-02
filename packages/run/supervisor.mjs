@@ -1,3 +1,4 @@
+import { assertKeyEnrolled } from "../core/keyring.mjs";
 import { resolveTrustRoot } from "../core/trust-root.mjs";
 import { spawn, spawnSync } from "node:child_process";
 import { join, resolve, relative, dirname } from "node:path";
@@ -130,6 +131,8 @@ export function runSupervisor(options = {}) {
     (options.signingKey
       ? { privateKey: options.signingKey, keyId: options.keyId ?? "ed25519:custom" }
       : getOrGenerateSupervisorKey(mirqlDir));
+
+  assertKeyEnrolled(mirqlDir, "tool:run_supervisor", keypair);
 
   // Check circuit breaker before unprivileged worker invocation
   const workerTier = warrant.tier || options.tier || "flash";

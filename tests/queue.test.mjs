@@ -1,3 +1,4 @@
+import { provisionTestTrust, authorizeTestKey, saveTestKeyring } from "./helpers/keyring.mjs";
 import { trustFile } from "../packages/core/trust-root.mjs";
 // tests/queue.test.mjs — Comprehensive test suite for Work Package W4: mirql-queue
 import { test, describe, it, beforeEach, afterEach } from "node:test";
@@ -39,7 +40,6 @@ import {
   foldLedger,
   foldQueueState,
   loadKeyring,
-  saveKeyring,
   appendLedgerEvent,
   getOrCreateQueueKeypair,
 } from "../packages/queue/index.mjs";
@@ -75,7 +75,7 @@ function makeValidWarrant(overrides = {}) {
 /** Append an attempt outcome event to test failure/success */
 function recordAttemptOutcome(mirqlDir, jobId, warrantId, status, verdict, cost = 10_000) {
   const supervisorKeypair = generateEd25519Keypair();
-  saveKeyring(mirqlDir, { "tool:run_supervisor": supervisorKeypair.publicKey });
+  saveTestKeyring(mirqlDir, { "tool:run_supervisor": supervisorKeypair.publicKey });
   const eventWithoutHashSig = {
     v: 1,
     id: ulid(),
@@ -112,6 +112,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "mirql-queue-test-"));
+    provisionTestTrust(tempDir);
   });
 
   afterEach(() => {
@@ -266,7 +267,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
 
       // Record failure for attempt 1
       const keypair = generateEd25519Keypair();
-      saveKeyring(tempDir, { "tool:run_supervisor": keypair.publicKey });
+      saveTestKeyring(tempDir, { "tool:run_supervisor": keypair.publicKey });
       const failEvent1 = signEvent(
         {
           v: 1,
@@ -372,7 +373,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
 
       // Complete the warrant successfully
       const keypair = generateEd25519Keypair();
-      saveKeyring(tempDir, { "tool:run_supervisor": keypair.publicKey });
+      saveTestKeyring(tempDir, { "tool:run_supervisor": keypair.publicKey });
       const successEvt = signEvent(
         {
           v: 1,
@@ -484,7 +485,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
 
       // Append an attempt consuming 30,000,000 micro-USD (daily budget is 25,000,000)
       const keypair = generateEd25519Keypair();
-      saveKeyring(tempDir, { "tool:run_supervisor": keypair.publicKey });
+      saveTestKeyring(tempDir, { "tool:run_supervisor": keypair.publicKey });
       const budgetEvent = signEvent(
         {
           v: 1,
@@ -613,7 +614,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       const { appendFileSync, mkdirSync } = await import("node:fs");
       mkdirSync(join(tempDir, "ledger"), { recursive: true });
       const keypair = generateEd25519Keypair();
-      saveKeyring(tempDir, { "tool:queue": keypair.publicKey });
+      saveTestKeyring(tempDir, { "tool:queue": keypair.publicKey });
       const ghostJobEvent = signEvent(
         {
           v: 1,
@@ -653,7 +654,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       // Append verdict from notary:mergeproof
       const notaryKp = generateEd25519Keypair();
       const baseSha = sha256("base commit 1");
-      saveKeyring(tempDir, { "notary:mergeproof": notaryKp.publicKey });
+      saveTestKeyring(tempDir, { "notary:mergeproof": notaryKp.publicKey });
       const verdictEvent = signEvent(
         {
           v: 1,
@@ -755,7 +756,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
 
       // Now close the lease by recording attempt outcome
       const keypair = generateEd25519Keypair();
-      saveKeyring(tempDir, { "tool:run_supervisor": keypair.publicKey });
+      saveTestKeyring(tempDir, { "tool:run_supervisor": keypair.publicKey });
       const outcomeEvt = signEvent(
         {
           v: 1,
@@ -794,12 +795,12 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       const baseSha = sha256("canonical-base-commit");
 
       // Save keyring with notary:mergeproof and human:owner
-      const ownerKp = generateEd25519Keypair();
+      const ownerKp = provisionTestTrust(tempDir);
       const keyring = {
         "notary:mergeproof": notaryKp.publicKey,
         "human:owner": ownerKp.publicKey,
       };
-      saveKeyring(tempDir, keyring);
+      saveTestKeyring(tempDir, keyring);
 
       const verdictEvent = signEvent(
         {
@@ -893,7 +894,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
 
       // Lease warrant 1 and record 3 failures so warrant 1 enters NEEDS_HUMAN
       const supervisorKp = generateEd25519Keypair();
-      saveKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
+      saveTestKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
       for (let attempt = 1; attempt <= 3; attempt++) {
         const l = leaseNextJob(tempDir);
         assert.equal(l.warrant_id, warrant1.id);
@@ -930,7 +931,8 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       assert.equal(l2.status, "leased");
 
       // Resolving parked warrant 1 via human.approval unparks it
-      const ownerKp = generateEd25519Keypair();
+      assert.equal(getQueueStatus(tempDir).warrants[warrant1.id].status, "needs_human");
+      const ownerKp = provisionTestTrust(tempDir);
       const approvalEvt = signEvent(
         {
           v: 1,
@@ -950,12 +952,6 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
         ownerKp.keyId,
       );
       appendFileSync(join(tempDir, "ledger", "events.jsonl"), jcs(approvalEvt) + "\n", "utf8");
-
-      // Before keyring registration, privileged human.approval fails closed
-      assert.equal(getQueueStatus(tempDir).warrants[warrant1.id].status, "needs_human");
-
-      // Register ownerKp in keyring
-      saveKeyring(tempDir, { ...(loadKeyring(tempDir) || {}), "human:owner": ownerKp.publicKey });
 
       const statusAfterApproval = getQueueStatus(tempDir);
       assert.equal(statusAfterApproval.warrants[warrant1.id].status, "active");
@@ -979,6 +975,8 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
     it("B7: concurrent appends serialize cleanly with the lockfile", async () => {
       const { readFileSync } = await import("node:fs");
       const keypair = generateEd25519Keypair();
+
+      authorizeTestKey(tempDir, "tool:queue", keypair);
 
       // Launch 8 concurrent appendLedgerEvent calls
       const promises = [];
@@ -1081,7 +1079,8 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       haltQueue(tempDir, "Safety halt");
       assert.equal(getQueueStatus(tempDir).halted, true);
 
-      // Ensure keyring does NOT exist
+      const trustedRing = loadKeyring(tempDir);
+      // Remove its unsigned mirror while retaining the human signature.
       const keyringPath = trustFile(tempDir, "keyring.json");
       if (existsSync(keyringPath)) {
         unlinkSync(keyringPath);
@@ -1110,13 +1109,13 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       appendFileSync(join(tempDir, "ledger", "events.jsonl"), jcs(resumeEvt) + "\n", "utf8");
 
       // When no keyring.json exists, privileged event MUST be rejected / ignored
-      const statusNoKeyring = getQueueStatus(tempDir);
-      assert.equal(statusNoKeyring.halted, true);
+      assert.throws(() => getQueueStatus(tempDir), (error) => error.code === "KEYRING_INTEGRITY");
+      writeFileSync(keyringPath, JSON.stringify(trustedRing));
 
-      // Now create a keyring with tool:queue and daemon:lifeguard, NOT human:owner
+      // Author a signed keyring that excludes the attacker key.
       const lifeguardKp = generateEd25519Keypair();
       const queueKp = getOrCreateQueueKeypair(tempDir);
-      saveKeyring(tempDir, {
+      saveTestKeyring(tempDir, {
         "tool:queue": queueKp.publicKey,
         "daemon:lifeguard": lifeguardKp.publicKey,
       });
@@ -1147,8 +1146,8 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       assert.equal(statusKeyNotRegistered.halted, true);
 
       // Now register human:owner with valid public key
-      const validOwnerKp = generateEd25519Keypair();
-      saveKeyring(tempDir, {
+      const validOwnerKp = provisionTestTrust(tempDir);
+      saveTestKeyring(tempDir, {
         "daemon:lifeguard": lifeguardKp.publicKey,
         "human:owner": validOwnerKp.publicKey,
       });
@@ -1193,7 +1192,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
 
       // Issue valid verdict from registered notary:mergeproof
       const notaryKp = generateEd25519Keypair();
-      saveKeyring(tempDir, { "notary:mergeproof": notaryKp.publicKey });
+      saveTestKeyring(tempDir, { "notary:mergeproof": notaryKp.publicKey });
       const baseSha = sha256("base commit r3");
 
       const verdictEvt = signEvent(
@@ -1342,7 +1341,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
 
       // Now fail the job 3 times to put warrant into needs_human
       const supervisorKp = generateEd25519Keypair();
-      saveKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
+      saveTestKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
       let currentLease = leased;
       for (let attempt = 1; attempt <= 3; attempt++) {
         if (attempt > 1) {
@@ -1441,8 +1440,8 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       assert.equal(status.warrants[warrant.id].status, "needs_human");
 
       // 6. Properly signed human.approval with registered key in keyring DOES work
-      const genuineOwnerKp = generateEd25519Keypair();
-      saveKeyring(tempDir, { ...(loadKeyring(tempDir) || {}), "human:owner": genuineOwnerKp.publicKey });
+      const genuineOwnerKp = provisionTestTrust(tempDir);
+      saveTestKeyring(tempDir, { ...(loadKeyring(tempDir) || {}), "human:owner": genuineOwnerKp.publicKey });
 
       const genuineApproval = signEvent(
         {
@@ -1675,7 +1674,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
 
       // Late outcome for lease 1 arrives reporting completed with epoch 2
       const supervisorKp = generateEd25519Keypair();
-      saveKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
+      saveTestKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
 
       const lateOutcome = signEvent(
         {
@@ -1725,7 +1724,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       assert.equal(status.warrants[warrant.id].failed_attempts, 0);
 
       const supervisorKp = generateEd25519Keypair();
-      saveKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
+      saveTestKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
       const unleasedJobId = ulid();
 
       // Emit 5 failed outcomes for the unleased job id
@@ -1785,7 +1784,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
 
       // Register the supervisor writer key so the fold verifies its signature.
       const supervisorKp = generateEd25519Keypair();
-      saveKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
+      saveTestKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
 
       const res = runSupervisor({
         mirqlDir: tempDir,
@@ -1827,7 +1826,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       assert.equal(leased.epoch, 2);
 
       const supervisorKp = generateEd25519Keypair();
-      saveKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
+      saveTestKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
 
       // NOTE: no `epoch` passed — the supervisor records the legacy default 1.
       runSupervisor({

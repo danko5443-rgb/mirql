@@ -1,4 +1,5 @@
 import { requireTrustForKeyCreation } from "../core/trust-root.mjs";
+import { readSignedKeyring, sealKeyring, readOwnerPin } from "../core/keyring.mjs";
 import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 // packages/inbox/keys.mjs — Key Management & Keyring Provisioning for mirql-inbox.
 //
@@ -22,6 +23,7 @@ import {
   existsSync,
   mkdirSync,
   chmodSync,
+  statSync,
   rmSync,
 } from "node:fs";
 import { join, dirname, sep as pathSep, resolve as resolvePath } from "node:path";
@@ -239,6 +241,13 @@ function purgeStaleHumanKeys(keysDir) {
  */
 export function generateFactoryKeypairs(mirqlDir, options = {}) {
   requireTrustForKeyCreation(mirqlDir);
+  const events = join(mirqlDir, "ledger", "events.jsonl");
+  const configured = existsSync(trustFile(mirqlDir, "owner.pub.json")) ||
+    existsSync(trustFile(mirqlDir, "keyring.json"));
+  if ((existsSync(events) && statSync(events).size > 0) ||
+      (configured && !options.humanKeyPath && !options.humanKeypair)) {
+    throw credentialsError("credentials_required", "Existing trust requires explicit human enrollment; use mirql i enroll-key");
+  }
   const keysDir = trustFile(mirqlDir, "keys");
   const ledgerDir = resolveTrustRoot(mirqlDir);
   // H4: private-key material lives only under 0o700 directories.
@@ -261,8 +270,12 @@ export function generateFactoryKeypairs(mirqlDir, options = {}) {
   let humanKp = null;
   if (options.humanKeypair && typeof options.humanKeypair.privateKey === "string") {
     humanKp = options.humanKeypair;
-  } else if (typeof options.humanKeyPath === "string" && options.humanKeyPath.length > 0) {
-    humanKp = readKeypairFile(resolvePath(options.humanKeyPath));
+  } else {
+    const humanPath = resolveHumanKeyPath(mirqlDir, options);
+    humanKp = readKeypairFile(humanPath);
+    if (existsSync(humanPath) && !humanKp) {
+      throw credentialsError("credentials_invalid", "Existing human key is unreadable; refusing to replace it");
+    }
   }
   if (!humanKp) {
     humanKp = generateEd25519Keypair();
@@ -281,6 +294,10 @@ export function generateFactoryKeypairs(mirqlDir, options = {}) {
     keyId: humanDerived.keyId,
     writer: { ns: HUMAN_WRITER_NS, key_id: humanDerived.keyId },
   };
+  if (existsSync(trustFile(mirqlDir, "owner.pub.json")) &&
+      readOwnerPin(mirqlDir).publicKey !== humanEntry.publicKey) {
+    throw credentialsError("key_mismatch", "Human key differs from the existing owner pin; refusing to overwrite credentials");
+  }
   result[HUMAN_WRITER_NS] = humanEntry;
   registerKeyringEntry(keyring, HUMAN_WRITER_NS, humanEntry);
 
@@ -291,17 +308,16 @@ export function generateFactoryKeypairs(mirqlDir, options = {}) {
 
     if (existsSync(keyPath)) {
       const parsed = readKeypairFile(keyPath);
-      if (parsed) {
-        const derived = derivePublicParts(parsed.privateKey);
-        if (derived) {
-          kp = {
-            publicKey: derived.publicKey,
-            privateKey: parsed.privateKey,
-            keyId: derived.keyId,
-            writer: { ns: item.ns, key_id: derived.keyId },
-          };
-        }
+      const derived = parsed ? derivePublicParts(parsed.privateKey) : null;
+      if (!derived) {
+        throw credentialsError("credentials_invalid", "Existing factory key is invalid; refusing to replace " + keyPath);
       }
+      kp = {
+        publicKey: derived.publicKey,
+        privateKey: parsed.privateKey,
+        keyId: derived.keyId,
+        writer: { ns: item.ns, key_id: derived.keyId },
+      };
     }
 
     if (!kp) {
@@ -323,7 +339,8 @@ export function generateFactoryKeypairs(mirqlDir, options = {}) {
     registerKeyringEntry(keyring, item.ns, kp);
   }
 
-  writeFileSync(trustFile(mirqlDir, "keyring.json"), JSON.stringify(keyring, null, 2) + "\n", "utf8");
+  writePrivateFile(resolveHumanKeyPath(mirqlDir, options), JSON.stringify(humanEntry, null, 2) + "\n");
+  sealKeyring(mirqlDir, keyring, humanEntry, { initialize: true });
   return result;
 }
 
@@ -340,14 +357,7 @@ function registerKeyringEntry(keyring, ns, kp) {
  * @returns {Record<string, unknown>}
  */
 export function loadKeyring(mirqlDir) {
-  const keyringPath = trustFile(mirqlDir, "keyring.json");
-  if (!existsSync(keyringPath)) return {};
-  try {
-    const parsed = JSON.parse(readFileSync(keyringPath, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  return readSignedKeyring(mirqlDir);
 }
 
 /**
