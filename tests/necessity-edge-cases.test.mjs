@@ -13,9 +13,11 @@ function exercise(kind) {
   mkdirSync(join(root,"src"));mkdirSync(join(root,"tests"));
   writeFileSync(join(root,"package.json"),JSON.stringify({scripts:{test:"node --test"}}));
   if(kind==="delete")writeFileSync(join(root,"src","obsolete.txt"),"obsolete behavior");
-  if(kind==="crash") {
+  if(kind==="crash" || kind==="timeout") {
    writeFileSync(join(root,"src","a.mjs"),"export const value=1;\n");
-   writeFileSync(join(root,"src","b.mjs"),'export function read(){throw new Error("runtime failure");}\n');
+   writeFileSync(join(root,"src","b.mjs"),kind==="timeout"
+    ? 'export function read(){Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,35000);return 2;}\n'
+    : 'export function read(){throw new Error("runtime failure");}\n');
   }
   git("add",".");git("commit","-qm","base");const baseSha=git("rev-parse","HEAD");
   let body;
@@ -35,9 +37,12 @@ function exercise(kind) {
   return verifyAttempt({git:true,workspaceDir:root,baseSha,headSha,reproducerFile:"tests/repro.test.mjs"});
  } finally {rmSync(root,{recursive:true,force:true});}
 }
-for(const kind of ["add","delete"])test(`necessity restores the absence/presence of an ${kind === "add" ? "added" : "deleted"} file`,()=>{
+for(const kind of ["add","delete"])test(`necessity restores the absence/presence of ${kind === "add" ? "an added" : "a deleted"} file`,()=>{
  const result=exercise(kind);assert.equal(result.verified,true,JSON.stringify(result));assert.equal(result.proof.necessity_check.necessary_files.length,1);
 });
 test("a rollback runtime crash cannot be classified as an unnecessary change",()=>{
  const result=exercise("crash");assert.equal(result.verified,false,JSON.stringify(result));assert.equal(result.rule,"NECESSITY_CHECK_CRASH");
+});
+test("a real rollback timeout is rejected explicitly", {skip:process.platform==="win32"},()=>{
+ const result=exercise("timeout");assert.equal(result.verified,false,JSON.stringify(result));assert.equal(result.rule,"NECESSITY_CHECK_TIMEOUT");
 });
