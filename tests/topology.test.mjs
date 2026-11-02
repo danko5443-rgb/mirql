@@ -400,7 +400,7 @@ describe("Production Containerization & Topology Gates", () => {
         watchdog.disarm();
         assert.equal(watchdog.check().ok, true);
       } finally {
-        rmSync(tmp, { recursive: true, force: true });
+        rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       }
     });
 
@@ -428,7 +428,7 @@ describe("Production Containerization & Topology Gates", () => {
         assert.equal(c2.tripped, true);
         assert.equal(c2.reason, "HEARTBEAT_TIMEOUT_EXPIRED");
       } finally {
-        rmSync(tmp, { recursive: true, force: true });
+        rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       }
     });
 
@@ -493,7 +493,7 @@ describe("Production Containerization & Topology Gates", () => {
         assert.equal(disarmCheck.disarmed, true);
         assert.equal(activeStaleWatchdog.disarmed, true);
       } finally {
-        rmSync(tmp, { recursive: true, force: true });
+        rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       }
     });
 
@@ -517,7 +517,7 @@ describe("Production Containerization & Topology Gates", () => {
           ticker.kill();
         }
       } finally {
-        rmSync(tmp, { recursive: true, force: true });
+        rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       }
     });
 
