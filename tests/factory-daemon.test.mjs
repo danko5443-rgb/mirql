@@ -80,6 +80,35 @@ describe("factory daemon (r supervisor --daemon)", () => {
     daemon.stop();
   });
 
+  it("e2e: fresh ledger dir is created and an idle daemon stays alive on it", async () => {
+    // Regression (Codex P1): a --dir without ledger/ used to leave the
+    // watcher unattached, so the daemon exited 0 immediately.
+    const freshLedger = join(tmp, "fresh-ledger");
+    const child = spawn(process.execPath, [
+      join(ROOT, "bin", "mirql.mjs"), "r", "supervisor",
+      "--daemon", "--dir", freshLedger, "--workspace", workspace,
+    ], {
+      stdio: ["ignore", "ignore", "pipe"],
+      env: { ...process.env, MIRQL_TRUST_ROOT: join(tmp, "trust") },
+    });
+    let stderr = "";
+    child.stderr.on("data", (c) => { stderr += c; });
+    try {
+      await withTimeout(
+        new Promise((res, rej) => {
+          child.on("exit", (code) => rej(new Error(`daemon exited early with ${code}; stderr: ${stderr}`)));
+          setTimeout(res, 3000);
+        }),
+        10_000,
+        "aliveness probe",
+      );
+      assert.equal(existsSync(join(freshLedger, "ledger")), true, "ledger dir not created");
+      assert.equal(existsSync(join(freshLedger, "state", "launcher.pid")), true);
+    } finally {
+      child.kill();
+    }
+  });
+
   it("e2e: bin composition drains a submitted job, prints the step, exits 0", async () => {
     const warrant = authorizeTestWarrant(ledger, makeValidWarrant());
     submitWarrant(ledger, warrant, { repoRoot: ROOT });

@@ -679,6 +679,10 @@ export async function startFactoryDaemon(options = {}) {
   const mirqlDir = resolve(options.dir ?? options.mirqlDir ?? join(process.cwd(), ".mirql"));
   const stateDir = join(mirqlDir, "state");
   mkdirSync(stateDir, { recursive: true });
+  // The watcher silently no-ops when the ledger directory does not exist,
+  // which would leave an idle daemon that exits 0 the moment nothing else
+  // keeps the event loop alive (P1 from the Codex review).
+  mkdirSync(join(mirqlDir, "ledger"), { recursive: true });
   const heartbeatPath = join(stateDir, "heartbeat");
   const pidPath = join(stateDir, "launcher.pid");
   const touch = (file, body) => { try { writeFileSync(file, body, "utf8"); } catch {} };
