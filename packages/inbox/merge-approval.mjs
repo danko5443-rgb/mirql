@@ -1,6 +1,6 @@
 import { ulid, hlcTick, jcs, sha256, signEvent, validateDocument, withLedgerLock } from "../core/index.mjs";
 import { isHumanOnlyPath } from "../core/anti-cheat.mjs";
-import { measureMergeBinding } from "../core/merge-approval.mjs";
+import { measureMergeContext } from "../core/merge-approval.mjs";
 import { readVerifiedLedger } from "../core/ledger-verify.mjs";
 import { requireAuthorizedWarrant } from "../core/warrant.mjs";
 import { authenticateHumanWriter } from "./keys.mjs";
@@ -19,8 +19,8 @@ export function approveMerge(mirqlDir, options = {}) {
     requireGenesisLedger(mirqlDir);
     const owner = authenticateHumanWriter(mirqlDir, options);
     requireAuthorizedWarrant(mirqlDir, { warrantId: options.warrantId, nowMs: options.nowMs });
-    const binding = measureMergeBinding(options);
-    const forbidden = binding.paths.filter(path => isHumanOnlyPath(path));
+    const { binding, policies } = measureMergeContext(options);
+    const forbidden = binding.paths.filter(path => isHumanOnlyPath(path, policies.humanOnly));
     if (forbidden.length) throw refusal("TOUCH_HUMAN_ONLY", "Merge approvals cannot authorize humanOnly paths: " + forbidden.join(", "));
     const events = readVerifiedLedger(mirqlDir);
     const idempotencyKey = "merge-approved:" + sha256(jcs(binding));

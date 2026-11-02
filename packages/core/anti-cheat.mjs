@@ -92,45 +92,48 @@ export function isPathMatchingPattern(normalizedPath, pattern) {
  * @returns {{ humanOnly: string[], humanApprove: string[], aiReviewers: string[] }}
  */
 export function loadPathPolicies(rootDir = process.cwd()) {
+  const pathsFile = join(rootDir, "policy", "paths.yaml");
+  let content = "";
+  if (existsSync(pathsFile)) {
+    try { content = readFileSync(pathsFile, "utf8"); } catch {}
+  }
+  return parsePathPolicies(content);
+}
+
+/** Parse a captured policy document, retaining the mandatory default guards. */
+export function parsePathPolicies(content = "") {
   const humanOnly = [];
   const humanApprove = [];
   const aiReviewers = [];
-  const pathsFile = join(rootDir, "policy", "paths.yaml");
-
-  if (existsSync(pathsFile)) {
-    try {
-      const content = readFileSync(pathsFile, "utf8");
-      let currentSection = null;
-      for (const line of content.split(/\r?\n/)) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith("#")) continue;
-        if (trimmed.startsWith("humanOnly:")) {
-          currentSection = "humanOnly";
-          continue;
-        }
-        if (trimmed.startsWith("humanApprove:")) {
-          currentSection = "humanApprove";
-          continue;
-        }
-        if (trimmed.startsWith("aiReviewers:")) {
-          currentSection = "aiReviewers";
-          continue;
-        }
-        // Any other top-level key ends the current list.
-        if (/^[A-Za-z_][\w-]*:/.test(trimmed)) {
-          currentSection = null;
-          continue;
-        }
-        if (trimmed.startsWith("-")) {
-          const val = trimmed.replace(/^-\s*/, "").replace(/["']/g, "").trim();
-          if (val) {
-            if (currentSection === "humanOnly") humanOnly.push(val);
-            else if (currentSection === "humanApprove") humanApprove.push(val);
-            else if (currentSection === "aiReviewers") aiReviewers.push(val);
-          }
-        }
+  let currentSection = null;
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (trimmed.startsWith("humanOnly:")) {
+      currentSection = "humanOnly";
+      continue;
+    }
+    if (trimmed.startsWith("humanApprove:")) {
+      currentSection = "humanApprove";
+      continue;
+    }
+    if (trimmed.startsWith("aiReviewers:")) {
+      currentSection = "aiReviewers";
+      continue;
+    }
+    // Any other top-level key ends the current list.
+    if (/^[A-Za-z_][\w-]*:/.test(trimmed)) {
+      currentSection = null;
+      continue;
+    }
+    if (trimmed.startsWith("-")) {
+      const val = trimmed.replace(/^-\s*/, "").replace(/["']/g, "").trim();
+      if (val) {
+        if (currentSection === "humanOnly") humanOnly.push(val);
+        else if (currentSection === "humanApprove") humanApprove.push(val);
+        else if (currentSection === "aiReviewers") aiReviewers.push(val);
       }
-    } catch {}
+    }
   }
 
   for (const def of DEFAULT_HUMAN_ONLY_PATTERNS) {
