@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { EXIT_CODES } from "../core/index.mjs";
 import { checkHumanOnlyPaths } from "./anti-cheat.mjs";
@@ -91,13 +94,24 @@ export function runAgent(options = {}) {
 
   // If a command is specified, spawn it in the clean sandbox environment
   if (typeof options.command === "string" && options.command.length > 0) {
-    const res = spawnSync(options.command, {
-      shell: true,
-      env: cleanEnv,
-      cwd: options.cwd ?? process.cwd(),
-      timeout: options.timeout_ms ?? 30000,
-      encoding: "utf8",
-    });
+    const workerHome = mkdtempSync(join(tmpdir(), "mirql-agent-home-"));
+    for (const key of Object.keys(cleanEnv)) {
+      if (key.toUpperCase() === "HOME" || key.toUpperCase() === "USERPROFILE") {
+        delete cleanEnv[key];
+      }
+    }
+    let res;
+    try {
+      res = spawnSync(options.command, {
+        shell: true,
+        env: { ...cleanEnv, HOME: workerHome, USERPROFILE: workerHome },
+        cwd: options.cwd ?? process.cwd(),
+        timeout: options.timeout_ms ?? 30000,
+        encoding: "utf8",
+      });
+    } finally {
+      rmSync(workerHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    }
 
     let exitCode = res.status;
     // A process terminated by a signal must not report exit 0
