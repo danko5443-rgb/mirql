@@ -207,6 +207,21 @@ describe("Milestone M7: Keyless Canary Promotion Gauntlet & Ouroboros Self-Hosti
       assert.ok(Number.isSafeInteger(sample1.latency_p99_ms));
     });
 
+    it("only signs health samples with measured p99 and preserves optional latency gaps", () => {
+      const staged = stageCanary(mirqlDir, { jobId: setupReadyJob(), baseSha: "candidate-base" });
+      const samples = () => readLedgerEvents(mirqlDir)
+        .map(({ event }) => event).filter((event) => event.type === "job.canary_health");
+      const counts = { total_requests: 1, error_count: 0 };
+      assert.throws(() => sampleCanaryHealth(mirqlDir, staged.canary_id, counts),
+        (err) => err.errorCode === "MISSING_METRICS");
+      assert.equal(samples().length, 0);
+      sampleCanaryHealth(mirqlDir, staged.canary_id, { ...counts, latency_p99_ms: 0 });
+      const [sample] = samples();
+      assert.equal(sample.payload.latency_p99_ms, 0);
+      assert.equal(sample.payload.latency_p50_ms, null);
+      assert.equal(sample.payload.latency_p90_ms, null);
+    });
+
     it("rejects non-integer metric inputs under Law 17", () => {
       assert.throws(
         () => {

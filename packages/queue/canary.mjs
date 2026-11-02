@@ -494,19 +494,17 @@ export function sampleCanaryHealth(mirqlDir, canaryId, sampleMetrics, options = 
     requireSafeInteger(rawP99, "latencyP99Ms");
   }
 
-  if (rawTotal === undefined || rawErrors === undefined) {
+  if (rawTotal === undefined || rawErrors === undefined || rawP99 === undefined) {
     throw canaryError(
       "MISSING_METRICS",
-      "sampleMetrics must explicitly supply total_requests and error_count",
+      "sampleMetrics must explicitly supply total_requests, error_count, and latency_p99_ms",
       EXIT_CODES.USAGE_ERROR,
     );
   }
 
   const totalRequests = rawTotal;
   const errorCount = rawErrors;
-  const latencyP50Ms = rawP50 ?? 0;
-  const latencyP90Ms = rawP90 ?? 0;
-  const latencyP99Ms = rawP99 ?? 100;
+  const latencyP99Ms = rawP99;
 
   if (totalRequests === 0) {
     throw canaryError("ZERO_REQUESTS", "totalRequests must be > 0 for health calculation", EXIT_CODES.USAGE_ERROR);
@@ -549,8 +547,8 @@ export function sampleCanaryHealth(mirqlDir, canaryId, sampleMetrics, options = 
       error_count: errorCount,
       error_rate_bp: errorRateBp,
       error_threshold_bp: errorThresholdBp,
-      latency_p50_ms: latencyP50Ms,
-      latency_p90_ms: latencyP90Ms,
+      latency_p50_ms: rawP50 ?? null,
+      latency_p90_ms: rawP90 ?? null,
       latency_p99_ms: latencyP99Ms,
       latency_p99_ceiling_ms: latencyP99CeilingMs,
       healthy: isHealthy,
