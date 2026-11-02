@@ -79,18 +79,46 @@ describe("circuit breakers are binding, not advisory (issue #15)", () => {
     const store = new BreakerStore(tempDir);
     store.trip("worker", "consecutive_tier_failures", 3_600_000);
 
+    const res = leaseNextJob(tempDir);
+    assert.equal(res.ok, false);
+    assert.equal(res.status, "breaker_tripped");
     const active = getActiveTrippedBreakers(tempDir);
     assert.equal(active.length, 1);
     assert.equal(active[0].subsystem, "worker");
     assert.equal(active[0].reason, "consecutive_tier_failures");
-
-    const res = leaseNextJob(tempDir);
-    assert.equal(res.ok, false);
-    assert.equal(res.status, "breaker_tripped");
     assert.equal(res.exit_code, EXIT_CODES.BREAKER_OPEN);
     assert.equal(res.breakers.length, 1);
     assert.match(res.error, /worker/);
   });
+
+  for (const recovery of ["expiry", "reset"]) {
+    it(`reactive leasing resumes after breaker ${recovery} without a new job`, { timeout: 5000 }, async (t) => {
+      const { runSupervisorReactive } = await targetImport("packages/run/supervisor.mjs");
+      submitWarrant(tempDir, makeValidWarrant(), { repoRoot: ROOT });
+      tickQueue(tempDir);
+      const store = new BreakerStore(tempDir);
+      store.trip("worker", "test_trip", recovery === "reset" ? 60000 : 600);
+      const attempts = [];
+      let onLease;
+      const leased = new Promise(resolveLease => { onLease = resolveLease; });
+      const reactive = await runSupervisorReactive({
+        mirqlDir: tempDir,
+        initialRun: true,
+        leaseJob(dir) {
+          const result = leaseNextJob(dir);
+          attempts.push(result.status);
+          if (result.status === "leased") onLease();
+          // This test ends at the real lease boundary, before builder dispatch.
+          return result.status === "leased" ? { ok: true, status: "idle" } : result;
+        },
+      });
+      t.after(() => reactive.close());
+      assert.deepEqual(attempts, ["breaker_tripped"]);
+      if (recovery === "reset") store.reset("worker");
+      await leased;
+      assert.equal(attempts.at(-1), "leased");
+    });
+  }
 
   it("human reset reopens the queue", () => {
     submitWarrant(tempDir, makeValidWarrant(), { repoRoot: ROOT });

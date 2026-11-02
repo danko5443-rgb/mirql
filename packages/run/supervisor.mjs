@@ -545,6 +545,7 @@ export async function runSupervisorReactive(options = {}) {
   let queuedRerun = false;
   const pendingEvents = [];
   let expiryTimer = null;
+  let wakeAtMs = Infinity;
 
   const watcher = createLedgerWatcher(ledgerPath, {
     debounceMs: options.debounceMs ?? 25,
@@ -558,11 +559,14 @@ export async function runSupervisorReactive(options = {}) {
   });
 
   const scheduleExpiryWake = (expiresAtMs) => {
-    if (expiryTimer || watcher.closed) return;
+    if (watcher.closed || !Number.isSafeInteger(expiresAtMs) || expiresAtMs >= wakeAtMs) return;
+    clearTimeout(expiryTimer);
+    wakeAtMs = expiresAtMs;
     const now = Date.now();
-    const delay = Math.max(50, (expiresAtMs - now) + 50);
+    const delay = Math.min(2 ** 31 - 1, Math.max(50, expiresAtMs - now + 50));
     expiryTimer = setTimeout(() => {
       expiryTimer = null;
+      wakeAtMs = Infinity;
       if (!watcher.closed) {
         runStep(null).catch(() => {});
       }
@@ -614,6 +618,13 @@ export async function runSupervisorReactive(options = {}) {
             break;
           }
 
+          if (leaseRes?.status === "breaker_tripped") {
+            // All active trips must expire before leasing is possible. A signed
+            // doctor reset can release the queue earlier and has its own wake.
+            const deadlines = leaseRes.breakers.map(breaker => breaker.expires_at_ms);
+            scheduleExpiryWake(Math.max(...deadlines));
+            break;
+          }
           if (!leaseRes || !leaseRes.ok) {
             break;
           }
@@ -710,6 +721,15 @@ export async function runSupervisorReactive(options = {}) {
     }
     return lastResult;
   };
+
+  if (typeof options.leaseJob === "function") {
+    watcher.on("probe.completed", (event) => {
+      if (event.payload?.probe === "doctor" && event.payload.breaker?.action === "reset") {
+        // Events only wake the scheduler. Lease admission rechecks the signed ledger.
+        runStep(null).catch((err) => watcher.emit("error", err));
+      }
+    });
+  }
 
   const reactiveEvents = ["job.enqueued", "warrant.minted", "human.intent"];
 

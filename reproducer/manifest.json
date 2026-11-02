@@ -1,5 +1,5 @@
 {
-  "description": "Circuit-breaker enforcement regression suite (issue #15): the candidate's tests/breaker-enforcement.test.mjs is executed against the checkout under test (MIRQL_TARGET_ROOT) — it must fail on the advisory-only base (tripped breakers do not refuse leases) and pass on the fixed head (binding enforcement).",
+  "description": "Issue #15: submit pending work, trip a worker breaker, then assert the queue refuses to lease. The advisory-only base grants the lease.",
   "entry": "reproducer/breaker-enforcement.mjs",
   "expect_base": "fail",
   "expect_head": "pass"
