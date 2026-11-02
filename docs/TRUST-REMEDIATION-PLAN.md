@@ -1,14 +1,16 @@
 # Trust Remediation Plan
 
 Execution checkpoint on 2 November 2026. Phase 0 code and the original issue fixes have landed.
-Item 1.4, disposable worker homes, and the breaker recovery follow-up have also landed.
-Item 1.1 is implemented on the external-trust-root branch and requires review.
-Item 1.2 is implemented on the signed-key-enrollment branch for review. Item 1.3, Windows ACL enforcement, is implemented on the private-credential-permissions
-branch for review. Item 2.1, signed warrant authority, is implemented on the
-signed-warrant-authority branch for review. Item 2.3, post-run protected-path
-checking, is implemented on the worker-postrun-policy branch for review. Signed
-merge approvals and the later proof, telemetry, isolation and consolidation work remain open. The owner chose
-to keep the repository private and leave the unavailable main ruleset requirement open.
+The external trust root, signed key enrollment, native credential permissions,
+disposable worker homes (1.1-1.4), and signed warrant authority (2.1) have landed.
+Windows credential ownership has a further correction under review in PR #45.
+The owner-signed merge approval record and CLI have landed; binding hardening is
+under review, and consuming those records in the actual merge gate (2.2) remains open.
+Post-run protected-path checking (2.3) has landed, with Git-object and repository-policy
+bypass fixes under review in PR #48. The later proof, telemetry, isolation and
+consolidation work remain open. The owner chose to keep the repository private
+and leave the unavailable main ruleset requirement open. Human review requirements
+are not satisfied by implementation or automated test results alone.
 The historical status table below records the original audit, rather than current completion.
 
 
