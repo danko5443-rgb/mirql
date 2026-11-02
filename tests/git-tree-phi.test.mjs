@@ -1,6 +1,7 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
-import {mkdtempSync,writeFileSync,mkdirSync,rmSync} from "node:fs";
+import {mkdtempSync,writeFileSync,mkdirSync,rmSync,chmodSync} from "node:fs";
+import {deflateSync} from "node:zlib";
 import {join} from "node:path";
 import {tmpdir} from "node:os";
 import {spawnSync} from "node:child_process";
@@ -24,3 +25,9 @@ test("malformed package metadata in the actual tree refuses measurement",()=>rep
 test("an invalid reference refuses measurement instead of returning zero",()=>repo(root=>{assert.throws(()=>phi.computeGitTreePhi(root,"does-not-exist"),e=>e.code==="PHI_UNMEASURED");}));
 test("subdirectory invocation measures the complete tree",()=>repo((root,git,base)=>{mkdirSync(join(root,"nested"));assert.deepEqual(phi.computeGitTreePhi(join(root,"nested"),base).metrics,phi.computeGitTreePhi(root,base).metrics);}));
 test("non-UTF-8 source refuses measurement",()=>repo((root,git)=>{writeFileSync(join(root,"bad.js"),Buffer.from([0xff,0xfe]));git("add",".");git("commit","-qm","invalid encoding");assert.throws(()=>phi.computeGitTreePhi(root,"HEAD"),e=>e.code==="PHI_UNMEASURED");}));
+
+test("corrupted blob storage cannot falsify a named tree's metrics",()=>repo((root,git,base)=>{
+ const id=git("rev-parse",base+":source.mjs"),path=join(root,".git","objects",id.slice(0,2),id.slice(2));
+ const bytes=Buffer.from("export function forged(x){if(x)return 99;}\n");chmodSync(path,0o600);writeFileSync(path,deflateSync(Buffer.concat([Buffer.from("blob "+bytes.length+"\0"),bytes])));
+ assert.throws(()=>phi.computeGitTreePhi(root,base),e=>e.code==="PHI_UNMEASURED");
+}));

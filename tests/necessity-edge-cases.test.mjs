@@ -1,3 +1,4 @@
+import {verifyAuthorizedGitFixture} from "./helpers/authorized-verification.mjs";
 import {test} from "node:test";
 import assert from "node:assert/strict";
 import {mkdtempSync,mkdirSync,writeFileSync,rmSync} from "node:fs";
@@ -34,7 +35,7 @@ function exercise(kind) {
   }
   writeFileSync(join(root,"tests","repro.test.mjs"),'import test from "node:test";import assert from "node:assert/strict";import {existsSync} from "node:fs";test("behavior",async()=>{'+body+'});\n');
   git("add",".");git("commit","-qm","head");const headSha=git("rev-parse","HEAD");
-  return verifyAttempt({git:true,workspaceDir:root,baseSha,headSha,reproducerFile:"tests/repro.test.mjs"});
+  return verifyAuthorizedGitFixture({git:true,workspaceDir:root,baseSha,headSha,reproducerFile:"tests/repro.test.mjs"});
  } finally {rmSync(root,{recursive:true,force:true});}
 }
 for(const kind of ["add","delete"])test(`necessity restores the absence/presence of ${kind === "add" ? "an added" : "a deleted"} file`,()=>{

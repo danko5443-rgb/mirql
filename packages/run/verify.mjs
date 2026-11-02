@@ -12,6 +12,8 @@ import {
 } from "./anti-cheat.mjs";
 import { findExactMergeApproval } from "../core/merge-approval.mjs";
 import { parsePathPolicies } from "../core/anti-cheat.mjs";
+import { measureAuthorizedPhi } from "./authorized-phi.mjs";
+import { requireAuthorizedWarrant } from "../core/warrant.mjs";
 import { evaluatePhiGate } from "./phi.mjs";
 import { extractChangedLines } from "./mutant.mjs";
 import { parseTapOutput, checkV8Coverage } from "./causal-evidence.mjs";
@@ -427,6 +429,18 @@ function verifyGitRepository(options) {
     ? runCommand(process.execPath, ["--test", "--test-reporter=tap", resolve(cwd, reproducerFile)], cwd, extraEnv)
     : runCommand(conformanceCommand, null, cwd, extraEnv);
 
+  let measuredPhi;
+  try {
+    measuredPhi = measureAuthorizedPhi({ repoDir, baseSha, headSha,
+      mirqlDir: options.mirqlDir, warrantId: options.warrantId, conformance });
+  } catch (error) {
+    const rule = error.code === "WARRANT_UNAUTHORIZED" ? error.code : "PHI_UNMEASURED";
+    return { verified: false, verdict: "needs_human", rule, violation: rule,
+      detail: "Immutable complexity and its signed authority could not be verified." };
+  }
+  if (!measuredPhi.ok) return { verified: false, verdict: "reject", rule: measuredPhi.rule,
+    violation: "PHI_INCREASED", phi: measuredPhi };
+
   let worktreeDir = null;
   let covDir = null;
   try {
@@ -674,7 +688,7 @@ function verifyGitRepository(options) {
       };
     }
 
-    if (unnecessaryFiles.length > 0 && (options.warrantClass === "surgical" || options.surgical === true)) {
+    if (unnecessaryFiles.length > 0 && measuredPhi.warrant_class === "surgical") {
       return {
         verified: false,
         verdict: "reject",
@@ -694,7 +708,12 @@ function verifyGitRepository(options) {
       };
     }
 
+    if (!conformance) {
+      try { requireAuthorizedWarrant(options.mirqlDir, { warrantId: options.warrantId }); }
+      catch { return { verified: false, verdict: "needs_human", rule: "WARRANT_UNAUTHORIZED", violation: "WARRANT_UNAUTHORIZED" }; }
+    }
     return {
+      phi: measuredPhi,
       verified: !conformance,
       verdict: conformance ? "conformance_pass" : "auto_merge",
       rule: conformance ? "CONFORMANCE_ONLY" : "MP-000",
@@ -802,6 +821,11 @@ function verifyExecutionAttempt(options = {}) {
     }
   }
 
+  // C. Git-based execution verification mode
+  if (options.git === true || (options.workspaceDir && options.baseSha && !options.runCheck)) {
+    return verifyGitRepository(options);
+  }
+
   // B. Law 13: Phi Gate
   const phiCheck = checkPhiLaw13(options);
   if (!phiCheck.ok) {
@@ -812,11 +836,6 @@ function verifyExecutionAttempt(options = {}) {
       violation: phiCheck.violation,
       detail: phiCheck.detail,
     };
-  }
-
-  // C. Git-based execution verification mode
-  if (options.git === true || (options.workspaceDir && options.baseSha && !options.runCheck)) {
-    return verifyGitRepository(options);
   }
 
   // D. Execution verification stages via runCheck callback (Phase 3.7: unified pipeline)

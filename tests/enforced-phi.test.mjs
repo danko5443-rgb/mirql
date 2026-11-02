@@ -1,0 +1,18 @@
+import {test} from "node:test";import assert from "node:assert/strict";
+import {mkdtempSync,mkdirSync,writeFileSync,rmSync} from "node:fs";import {join} from "node:path";import {tmpdir} from "node:os";
+import {git} from "./helpers/git.mjs";import {runGenesis} from "../packages/inbox/genesis.mjs";import {sendIntent} from "../packages/inbox/send.mjs";import {verifyAttempt} from "../packages/run/verify.mjs";
+function exercise({budget=0,kind="feature",missing=false,forged=false}={}) {
+ const root=mkdtempSync(join(tmpdir(),"mirql-enforced-phi-"));try{
+ mkdirSync(join(root,"src"));mkdirSync(join(root,"tests"));git(root,"init","-q");git(root,"config","user.name","test");git(root,"config","user.email","test@local");
+ writeFileSync(join(root,"package.json"),JSON.stringify({scripts:{test:"node --test"}}));writeFileSync(join(root,"src","value.mjs"),"export function value(){return 1;}\n");git(root,"add",".");git(root,"commit","-qm","base");const baseSha=git(root,"rev-parse","HEAD").trim();
+ const dir=join(root,".mirql"),owner=runGenesis(dir),grant=sendIntent(dir,{title:"Measured complexity authority",kind,phi_budget:budget,scope:["src/**","tests/**"]},{key:owner.human_key_path});
+ writeFileSync(join(root,"src","value.mjs"),'export function value(){return 2;}\n'+Array.from({length:15},(_,i)=>`export const extra${i}=${i};`).join("\n")+"\n");writeFileSync(join(root,"tests","repro.test.mjs"),'import test from "node:test";import assert from "node:assert/strict";import {value} from "../src/value.mjs";test("value",()=>assert.equal(value(),2));\n');git(root,"add","src/value.mjs","tests/repro.test.mjs");git(root,"commit","-qm","head");const headSha=git(root,"rev-parse","HEAD").trim();
+ const result=verifyAttempt({git:true,workspaceDir:root,baseSha,headSha,reproducerFile:"tests/repro.test.mjs",...(missing?{}:{mirqlDir:dir,warrantId:grant.warrant_id}),...(forged?{phiBefore:10000,phiAfter:0,deltaPhi:-10000,featureBudget:10000,role:"consolidator",warrantClass:"consolidator"}:{})});return {result,baseSha,headSha};
+ }finally{rmSync(root,{recursive:true,force:true});}
+}
+test("real growth over the signed zero budget rejects",()=>{const {result}=exercise();assert.equal(result.verified,false,JSON.stringify(result));assert.equal(result.rule,"LAW_13_PHI_INCREASE");assert.ok(result.phi.delta_phi>0);});
+test("an explicit signed allowance permits measured growth",()=>{const {result,baseSha,headSha}=exercise({budget:1000});assert.equal(result.verified,true,JSON.stringify(result));assert.equal(result.phi.base_sha,baseSha);assert.equal(result.phi.head_sha,headSha);assert.ok(result.phi.delta_phi>0);assert.equal(result.phi.phi_budget,1000);});
+test("caller Phi and role fields cannot override the signed zero allowance",()=>{const {result}=exercise({forged:true});assert.equal(result.verified,false);assert.equal(result.rule,"LAW_13_PHI_INCREASE");});
+test("signed consolidation still requires a decrease despite a positive allowance",()=>{const {result}=exercise({budget:1000,kind:"consolidation"});assert.equal(result.verified,false);assert.equal(result.rule,"LAW_13_CONSOLIDATOR_PHI");});
+test("a caller's consolidator label cannot override a signed feature class",()=>{const {result}=exercise({budget:1000,forged:true});assert.equal(result.verified,true,JSON.stringify(result));assert.equal(result.phi.warrant_class,"feature");});
+test("unsigned live verification cannot authorize a complexity allowance",()=>{const {result}=exercise({budget:1000,missing:true});assert.equal(result.verified,false);assert.equal(result.rule,"WARRANT_UNAUTHORIZED");});
