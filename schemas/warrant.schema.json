@@ -49,6 +49,11 @@
       "minimum": 0,
       "description": "Hard spend ceiling in integer micro-USD."
     },
+    "phi_budget": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Owner-authorized complexity growth allowance. Optional for legacy warrants; absence means zero. Bound by the signed warrant hash."
+    },
     "created_by": {
       "type": "string",
       "pattern": "^(tool|human|notary|daemon):[a-z_]+$",
