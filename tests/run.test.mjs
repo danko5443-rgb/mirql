@@ -1,3 +1,4 @@
+import { initEmptyRepo } from "./helpers/git.mjs";
 import { authorizeTestWarrant } from "./helpers/warrant.mjs";
 import { provisionTestTrust, authorizeTestKey } from "./helpers/keyring.mjs";
 import { test, describe, it, beforeEach, afterEach } from "node:test";
@@ -1544,6 +1545,7 @@ test("add correctly computes sum", () => {
 
 test("each worker receives an empty temporary home and removes it after exit", () => {
   const workspace = mkdtempSync(join(tmpdir(), "mirql-home-test-"));
+  initEmptyRepo(workspace);
   const script = join(workspace, "inspect-home.mjs");
   writeFileSync(script, `import {readdirSync,writeFileSync} from "node:fs";
     const home=process.env.HOME;
@@ -1582,6 +1584,7 @@ test("a worker cleanup failure preserves output and exit status", {
   skip: process.platform === "win32" || process.getuid?.() === 0,
 }, () => {
   const workspace = mkdtempSync(join(tmpdir(), "mirql-cleanup-test-"));
+  initEmptyRepo(workspace);
   const script = join(workspace, "lock-home.mjs");
   writeFileSync(script, `import {mkdirSync,writeFileSync,chmodSync} from "node:fs";
     const locked=process.env.HOME+"/locked";

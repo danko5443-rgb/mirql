@@ -1,3 +1,4 @@
+import { git, initEmptyRepo } from "./helpers/git.mjs";
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
@@ -11,6 +12,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "mirql-warrant-attack-"));
   metadata = join(root, "workspace", ".mirql");
   mkdirSync(metadata, { recursive: true });
+  initEmptyRepo(join(root, "workspace"));
   provisionTestTrust(metadata);
   marker = join(root, "worker-ran");
   worker = join(root, "worker.mjs");
@@ -152,4 +154,21 @@ test("a changed human grant cannot enter the queue under the same ID", () => {
   const result = submitWarrant(metadata, { ...warrant, budget_micro_usd: 1 }, { repoRoot: join(root, "workspace") });
   assert.equal(result.ok, false);
   assert.equal(result.exit_code, 4);
+});
+
+
+test("a green verifier cannot override the worker's measured protected edit", () => {
+  const workspace = join(root, "workspace");
+  mkdirSync(join(workspace, "policy"), { recursive: true });
+  writeFileSync(join(workspace, "policy", "guard.json"), "base");
+  git(workspace, "add", "policy/guard.json");
+  git(workspace, "commit", "-qm", "protected base");
+  authorizeTestWarrant(metadata, ID);
+  writeFileSync(worker, 'import {writeFileSync} from "node:fs";writeFileSync("policy/guard.json","tampered");');
+  const result = execute({ runCheck: ({stage}) => ({exitCode: stage === "green_on_head" ? 0 : 1}) });
+  assert.equal(result.agentResult.violation, "TOUCH_HUMAN_ONLY");
+  assert.equal(result.agentResult.workerExitCode, 0);
+  assert.equal(result.verified, false);
+  assert.equal(result.verdict, "reject");
+  assert.equal(result.outcome.status, "fail");
 });
