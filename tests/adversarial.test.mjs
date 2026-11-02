@@ -157,7 +157,7 @@ test("a changed human grant cannot enter the queue under the same ID", () => {
 });
 
 
-test("a green verifier cannot override the worker's measured protected edit", () => {
+test("a green verifier cannot override the worker's measured protected edit", async () => {
   const workspace = join(root, "workspace");
   mkdirSync(join(workspace, "policy"), { recursive: true });
   writeFileSync(join(workspace, "policy", "guard.json"), "base");
@@ -165,7 +165,7 @@ test("a green verifier cannot override the worker's measured protected edit", ()
   git(workspace, "commit", "-qm", "protected base");
   authorizeTestWarrant(metadata, ID);
   writeFileSync(worker, 'import {writeFileSync} from "node:fs";writeFileSync("policy/guard.json","tampered");');
-  const result = execute({ runCheck: ({stage}) => ({exitCode: stage === "green_on_head" ? 0 : 1}) });
+  const result = await execute({ runCheck: ({stage}) => ({exitCode: stage === "green_on_head" ? 0 : 1}) });
   assert.equal(result.agentResult.violation, "TOUCH_HUMAN_ONLY");
   assert.equal(result.agentResult.workerExitCode, 0);
   assert.equal(result.verified, false);

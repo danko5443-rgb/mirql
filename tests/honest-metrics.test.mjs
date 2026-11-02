@@ -64,8 +64,8 @@ describe("supervisor telemetry honesty (issue #16)", () => {
   });
   afterEach(() => rmSync(tempDir, { recursive: true, force: true }));
 
-  it("unmeasured thrift and cost stay flagged while Git surface is measured", () => {
-    const res = supervisorRun({ workspaceDir: tempDir });
+  it("unmeasured thrift and cost stay flagged while Git surface is measured", async () => {
+    const res = await supervisorRun({ workspaceDir: tempDir });
     assert.equal(res.outcome.thrift.measured, 0);
     assert.deepEqual(Object.keys(res.outcome.thrift), ["measured"]);
     assert.equal(res.outcome.cost.measured, 0);
@@ -73,16 +73,17 @@ describe("supervisor telemetry honesty (issue #16)", () => {
     assert.equal(res.outcome.surface.measured, 1);
     assert.equal(res.outcome.surface.files_changed, 0);
 
-    // The ledger payload carries null — downstream folds treat it as 0, and
-    // anyone auditing sees "not measured" instead of a fabricated number.
+    // Unmeasured telemetry is omitted from the ledger payload (issue #46):
+    // a null cost_micro_usd bricks `mirql l view`'s Law 17 fold, so absence —
+    // not null — is the "not measured" marker.
     const evt = JSON.parse(readFileSync(join(tempDir, "ledger", "events.jsonl"), "utf8").trim().split(/\r?\n/).at(-1));
-    assert.equal(evt.payload.tokens_consumed, null);
-    assert.equal(evt.payload.cost_micro_usd, null);
+    assert.ok(!("tokens_consumed" in evt.payload));
+    assert.ok(!("cost_micro_usd" in evt.payload));
   });
 
-  it("real measurements pass through verbatim when supplied", () => {
+  it("real measurements pass through verbatim when supplied", async () => {
     const thrift = { model_calls: 2, tokens_in: 1200, tokens_out: 340, cache_hits: 1 };
-    const res = supervisorRun({ workspaceDir: tempDir, thrift, costMicroUsd: 42_500 });
+    const res = await supervisorRun({ workspaceDir: tempDir, thrift, costMicroUsd: 42_500 });
     assert.equal(res.outcome.thrift.measured, 1);
     assert.equal(res.outcome.thrift.tokens_in, 1200);
     assert.equal(res.outcome.cost.measured, 1);
@@ -93,21 +94,21 @@ describe("supervisor telemetry honesty (issue #16)", () => {
     assert.equal(evt.payload.cost_micro_usd, 42_500);
   });
 
-  it("tree digest is a real measurement: deterministic and content-sensitive", () => {
-    const a = supervisorRun({ workspaceDir: tempDir });
-    const b = supervisorRun({ jobId: "01HZZZZZZZZZZZZZZZZZZZZZZY" });
+  it("tree digest is a real measurement: deterministic and content-sensitive", async () => {
+    const a = await supervisorRun({ workspaceDir: tempDir });
+    const b = await supervisorRun({ jobId: "01HZZZZZZZZZZZZZZZZZZZZZZY" });
     assert.equal(a.outcome.tree_hash, b.outcome.tree_hash, "same tree must digest identically");
 
     writeFileSync(join(tempDir, "probe.txt"), "x", "utf8"); // non-source file: ignored
-    const c = supervisorRun({ jobId: "01HZZZZZZZZZZZZZZZZZZZZZZX" });
+    const c = await supervisorRun({ jobId: "01HZZZZZZZZZZZZZZZZZZZZZZX" });
     assert.equal(c.outcome.tree_hash, a.outcome.tree_hash, "non-source files do not alter the digest");
 
     writeFileSync(join(tempDir, "widget.mjs"), "export const x = 1;\n", "utf8");
-    const d = supervisorRun({ jobId: "01HZZZZZZZZZZZZZZZZZZZZZZW" });
+    const d = await supervisorRun({ jobId: "01HZZZZZZZZZZZZZZZZZZZZZZW" });
     assert.notEqual(d.outcome.tree_hash, a.outcome.tree_hash, "source change must alter the digest");
   });
 
-  it("git workspaces: surface measured via numstat, head from real git HEAD", () => {
+  it("git workspaces: surface measured via numstat, head from real git HEAD", async () => {
     const ws = mkdtempSync(join(tmpdir(), "mirql-honest-git-"));
     git(ws, "init", "-q");
     git(ws, "config", "user.email", "t@mirql.local");
@@ -120,7 +121,7 @@ describe("supervisor telemetry honesty (issue #16)", () => {
     writeFileSync(join(ws, "code.mjs"), "export const a = 2;\nexport const b = 3;\n");
 
     try {
-      const res = supervisorRun({ workspaceDir: ws });
+      const res = await supervisorRun({ workspaceDir: ws });
       assert.equal(res.outcome.surface.measured, 1);
       assert.equal(res.outcome.surface.files_changed, 1);
       assert.equal(res.outcome.surface.lines_added, 2);
@@ -136,9 +137,9 @@ describe("supervisor telemetry honesty (issue #16)", () => {
     }
   });
 
-  it("signed outcome events stay valid and fold without NaN from nulls", () => {
+  it("signed outcome events stay valid and fold cleanly when telemetry is unmeasured", async () => {
     const kp = generateEd25519Keypair();
-    const res = supervisorRun({ workspaceDir: tempDir, signingKey: kp.privateKey, keyId: kp.keyId, keypair: kp });
+    const res = await supervisorRun({ workspaceDir: tempDir, signingKey: kp.privateKey, keyId: kp.keyId, keypair: kp });
     const evt = JSON.parse(readFileSync(join(tempDir, "ledger", "events.jsonl"), "utf8").trim().split(/\r?\n/).at(-1));
     assert.equal(verifyEvent(evt, kp.publicKey).ok, true);
 
