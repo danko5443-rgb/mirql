@@ -20,11 +20,14 @@ import {
   foldQueueState,
   readLedgerEvents,
   EXIT_CODES,
+  generateEd25519Keypair,
   sha256,
   ulid,
 } from "../packages/core/index.mjs";
 import {
+  appendLedgerEventRaw,
   getOrCreateQueueKeypair,
+  saveKeyring,
 } from "../packages/queue/ledger.mjs";
 
 describe("Milestone M7: Keyless Canary Promotion Gauntlet & Ouroboros Self-Hosting", () => {
@@ -63,6 +66,15 @@ describe("Milestone M7: Keyless Canary Promotion Gauntlet & Ouroboros Self-Hosti
     const res = submitWarrant(mirqlDir, warrant);
     assert.equal(res.ok, true, `submitWarrant must succeed: ${res.error}`);
     leaseNextJob(mirqlDir, { workerId: "worker-canary-test" });
+    // stageCanary fails closed without an accepted notary verdict.
+    const notaryKp = generateEd25519Keypair();
+    saveKeyring(mirqlDir, { "notary:mergeproof": notaryKp.publicKey });
+    appendLedgerEventRaw(
+      mirqlDir,
+      { type: "verdict.accepted", payload: { job_id: res.job_id, status: "accepted" } },
+      { ...notaryKp, writer: { ns: "notary:mergeproof" } },
+      foldQueueState(mirqlDir),
+    );
     return res.job_id;
   }
 

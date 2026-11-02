@@ -203,15 +203,10 @@ export function checkAntiCheat(input = {}) {
   const approveCheck = checkHumanApprovePaths(filesChanged);
   const touchesHumanApprove = !approveCheck.ok;
 
-  const isHumanApproved =
-    Boolean(input.human_approved || input.human_approval || evidence.human_approval);
-
-  // C1: causal proof STRICTLY requires the completed triple-execution cycle.
-  // A self-reported `suite_pass_head` is not causal evidence and must not
-  // unlock humanApprove surfaces (MP-005).
-  const hasCausalProof = proof?.causal_cycle_completed === true;
-
-  if (hasUncitedSurface || (touchesHumanApprove && !hasCausalProof && !isHumanApproved)) {
+  // Phase 0.3: neither a proof nor a human_approved / human_approval flag in
+  // the input unlocks a humanApprove path; both are self-reported. Signed
+  // approvals arrive in Phase 2.
+  if (hasUncitedSurface || touchesHumanApprove) {
     return {
       ok: false,
       rule: "MP-005",
@@ -219,7 +214,7 @@ export function checkAntiCheat(input = {}) {
       verdict: "needs_human",
       detail: hasUncitedSurface
         ? `PR introduces uncited surface commands: ${surface.uncited_commands.join(", ")}`
-        : `PR touches humanApprove path(s) [${approveCheck.paths.join(", ")}] without causal proof; requires human sign-off.`,
+        : `PR touches humanApprove path(s) [${approveCheck.paths.join(", ")}] ; requires human sign-off.`,
     };
   }
 

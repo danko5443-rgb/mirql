@@ -3,7 +3,12 @@ import { readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
-const root = resolve(import.meta.dirname, "..");
+// Phase 0.0a: MIRQL_TEST_ROOT lets CI run the BASE notary's copy of this
+// runner against the candidate checkout, so a PR cannot swap the runner that
+// judges it. Default: the tree this script lives in.
+const root = process.env.MIRQL_TEST_ROOT
+  ? resolve(process.env.MIRQL_TEST_ROOT)
+  : resolve(import.meta.dirname, "..");
 const testsDir = join(root, "tests");
 const files = readdirSync(testsDir)
   .filter((f) => f.endsWith(".test.mjs"))

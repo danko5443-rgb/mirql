@@ -159,6 +159,52 @@ export function isTestFilePath(p) {
 }
 
 /**
+ * Files that steer an aiReviewers account: CodeRabbit config, AGENTS.md (Codex
+ * review guidelines) and the agent instruction files CodeRabbit reads as code
+ * guidelines by default. Every pattern matches at any depth (see
+ * isReviewerConfigPath). An AI approval never
+ * clears a PR that touches one: that PR may be reviewed under its own
+ * instructions.
+ */
+const AI_REVIEWER_CONFIG_PATTERNS = Object.freeze([
+  ".coderabbit.yaml",
+  ".coderabbit.yml",
+  "AGENTS.md",
+  "AGENTS.override.md",
+  "AGENT.md",
+  "CLAUDE.md",
+  "GEMINI.md",
+  ".cursorrules",
+  ".windsurfrules",
+  ".cursor/rules/**",
+  ".clinerules/**",
+  ".rules/**",
+  ".github/copilot-instructions.md",
+  ".github/instructions/**",
+]);
+
+/** True when a path is, or lies under, a reviewer config pattern at any depth. */
+function isReviewerConfigPath(filePath) {
+  const norm = normalizePath(filePath);
+  return AI_REVIEWER_CONFIG_PATTERNS.some((pat) => {
+    const normPat = normalizePath(pat);
+    if (normPat.endsWith("/**")) {
+      return `/${norm}/`.includes(`/${normPat.slice(0, -3)}/`);
+    }
+    return isPathMatchingPattern(norm, pat);
+  });
+}
+
+const REVIEWER_LOGIN_RE =/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/;
+
+/** Returns the reviewer login if it is a plausible GitHub login, else null. */
+function validReviewerLogin(login) {
+  return typeof login === "string" && REVIEWER_LOGIN_RE.test(login) ? login : null;
+}
+
+const GIT_SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
+
+/**
  * Queries git diff --name-status base...head if git and a repository are available.
  * Returns { ok: true, files: string[], deletedFiles: string[] } on success,
  * or { ok: false, error: string, files: [], deletedFiles: [] } on failure.
@@ -172,6 +218,13 @@ export function getGitDiffInfo(baseSha, headSha, repoDir = process.cwd()) {
   if (!baseSha || !headSha) {
     return { ok: true, files: [], deletedFiles: [] };
   }
+  // The SHAs can come from an untrusted PR doc. Accept only full hex object
+  // ids so a value like "--output=<path>" can never be parsed as a git option.
+  for (const sha of [baseSha, headSha]) {
+    if (typeof sha !== "string" || !GIT_SHA_RE.test(sha)) {
+      return { ok: false, error: `invalid commit sha: ${JSON.stringify(sha)}`, files: [], deletedFiles: [] };
+    }
+  }
   const gitDir = join(repoDir, ".git");
   if (!existsSync(gitDir)) {
     return {
@@ -184,7 +237,7 @@ export function getGitDiffInfo(baseSha, headSha, repoDir = process.cwd()) {
   try {
     const res = spawnSync(
       "git",
-      ["diff", "--name-status", `${baseSha}...${headSha}`],
+      ["diff", "--name-status", "--end-of-options", `${baseSha}...${headSha}`],
       { cwd: repoDir, encoding: "utf8", timeout: 10000 },
     );
     if (res.status !== 0) {
@@ -249,8 +302,13 @@ export function getGitDiffFiles(baseSha, headSha, repoDir = process.cwd()) {
  * - `rootDir`        — repo root for policy/paths.yaml (default: cwd)
  * - `targetTipSha`   — authoritative target tip SHA for MP-004 (CLI --base)
  * - `expectedHeadSha`— authoritative head SHA for MP-004 (CLI --head)
- * - `humanApproved`  — explicit affirmative human sign-off from verified source (unlocks MP-005)
+ * - `humanApproved`  — ignored since Phase 0.3: no boolean unlocks MP-005;
+ *                      signed approvals arrive in Phase 2
  * - `repoDir`        — directory of git repository to cross-check diffs against reality (Law 7)
+ * - `humanOnlyReviewer` — login of an aiReviewers account that approved the
+ *                      head commit (looked up by CI from the GitHub API). It
+ *                      lets a humanOnly PR continue through every other rule;
+ *                      the best verdict is then needs_human, never auto_merge.
  *
  * @param {object} prDoc PR fixture or outcome document
  * @param {object} [options]
@@ -312,16 +370,18 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
 
   const policies = loadPathPolicies(options.rootDir);
 
-  // Law 3 & 6: A PR document CANNOT self-approve via inline json flags!
-  // humanApproved is ONLY valid if supplied through options from an external signed event or verified caller.
-  const humanApproved = options.humanApproved === true;
-
   // --- MP-001: TOUCH_HUMAN_ONLY -------------------------------------------
   const forbidden = filesChanged.filter((f) =>
     isHumanOnlyPath(f, policies.humanOnly),
   );
+  // A PR that changes an AI reviewer's own config may be reviewed under that
+  // config, so its approval cannot clear MP-001; a human must merge it.
+  const touchesReviewerConfig = filesChanged.some(isReviewerConfigPath);
+  const humanOnlyReviewer = touchesReviewerConfig ? null : validReviewerLogin(options.humanOnlyReviewer);
   if (forbidden.length > 0) {
     checks.human_only = false;
+  }
+  if (forbidden.length > 0 && !humanOnlyReviewer) {
     return fail(
       "MP-001",
       "TOUCH_HUMAN_ONLY",
@@ -488,14 +548,15 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
   const approvePaths = filesChanged.filter((f) =>
     isHumanApprovePath(f, policies.humanApprove),
   );
-  const touchesHumanApproveWithoutApproval =
-    approvePaths.length > 0 && !hasCausalProof && !humanApproved;
+  // Phase 0.3: a self-reported proof or a caller boolean never unlocks a
+  // humanApprove path — touching one always escalates to a human.
+  const touchesHumanApprove = approvePaths.length > 0;
 
-  if (isUncitedSurface || touchesHumanApproveWithoutApproval) {
+  if (isUncitedSurface || touchesHumanApprove) {
     checks.surface = false;
     const detail = isUncitedSurface
       ? `PR modified public surface without cited roadmap reference: ${uncitedCommands.join(", ")}`
-      : `PR touched humanApprove path(s) [${approvePaths.join(", ")}] without causal proof or human sign-off.`;
+      : `PR touched humanApprove path(s) [${approvePaths.join(", ")}] ; human review required.`;
     return fail("MP-005", "UNCITED_SURFACE", "needs_human", detail, {
       checks,
       uncited_commands: uncitedCommands,
@@ -552,9 +613,9 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     }
   }
 
-  // --- MP-000: auto_merge ------------------------------------------------------
-  // Fail closed: clean causal proof requires proof.causal_cycle_completed === true
-  // OR a proven suite pass (suite_pass_base AND suite_pass_head).
+  // --- MP-000 ------------------------------------------------------------------
+  // Fail closed: a doc needs causal_cycle_completed === true or a proven suite
+  // pass (suite_pass_base AND suite_pass_head) to get past this point.
   const hasSuiteProof =
     proof.suite_pass_base === true && proof.suite_pass_head === true;
   if (!hasCausalProof && !hasSuiteProof) {
@@ -568,12 +629,37 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     );
   }
 
+  // Phase 0.0b / Law 16: a suite pass is not a causal proof.
+  if (!hasCausalProof) {
+    checks.proof = false;
+    return fail(
+      "LAW_16",
+      "NO_CAUSAL_PROOF",
+      "needs_human",
+      "Suite passes on base and head, but no causal proof (red-green-re-red) was measured; human review required.",
+      { checks },
+    );
+  }
+
+  if (forbidden.length > 0) {
+    return fail(
+      "MP-001",
+      "TOUCH_HUMAN_ONLY",
+      "needs_human",
+      `humanOnly path(s) [${forbidden.join(", ")}] approved by ${humanOnlyReviewer}; all other rules passed; merge is manual, never auto_merge.`,
+      { checks, forbidden_paths: forbidden, human_only_reviewer: humanOnlyReviewer },
+    );
+  }
+
+  // Phase 0.2: every proof field in a PR doc is self-reported, so the best a
+  // doc can earn is conformance_pass. auto_merge comes only from a measured
+  // causal cycle (run/verify.mjs git mode) or, from Phase 2, a notary-signed doc.
   return {
     ok: true,
     rule: "MP-000",
     violation: null,
-    verdict: "auto_merge",
-    detail: "Clean causal proof; all merge-proof rules satisfied.",
+    verdict: "conformance_pass",
+    detail: "All merge-proof rules satisfied by the self-reported proof; it would auto-merge if the proof were measured.",
     flags: [],
     checks,
   };

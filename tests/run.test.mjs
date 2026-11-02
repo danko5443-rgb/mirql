@@ -378,45 +378,51 @@ test("tautological test", () => {
       assert.equal(doc.violation, "STALE_BASE");
     });
 
-    it("bad PR 05: rejects UNCITED_SURFACE under rule MP-005 with needs_human", () => {
+    // Phase 0.0a: bin/** is humanOnly, so 05's bin/mirql.mjs edit trips MP-001.
+    it("bad PR 05: rejects TOUCH_HUMAN_ONLY under rule MP-001 (bin/** is humanOnly)", () => {
       const fixturePath = "conformance/bad_prs/05-uncited-surface.json";
       const programmatic = verifyAttempt({ fixture: join(ROOT, fixturePath) });
       assert.equal(programmatic.verified, false);
-      assert.equal(programmatic.rule, "MP-005");
-      assert.equal(programmatic.violation, "UNCITED_SURFACE");
-      assert.equal(programmatic.verdict, "needs_human");
+      assert.equal(programmatic.rule, "MP-001");
+      assert.equal(programmatic.violation, "TOUCH_HUMAN_ONLY");
 
       const cli = runBin("bin/mirql.mjs", ["r", "verify", "--fixture", fixturePath]);
       assert.equal(cli.status, EXIT_CODES.POLICY_DENIAL); // 4
       const doc = JSON.parse(cli.stderr);
-      assert.equal(doc.rule, "MP-005");
-      assert.equal(doc.violation, "UNCITED_SURFACE");
+      assert.equal(doc.rule, "MP-001");
+      assert.equal(doc.violation, "TOUCH_HUMAN_ONLY");
     });
 
-    it("good PR 01: verifies valid repro fix with auto_merge (exit 0)", () => {
+    // Phase 0.2/0.3: a fixture is self-reported and touches packages/**, so it
+    // never verifies and goes to a human.
+    it("good PR 01: valid repro fix is not verified → needs_human (exit 4)", () => {
       const fixturePath = "conformance/good_prs/01-valid-repro-fix.json";
       const programmatic = verifyAttempt({ fixture: join(ROOT, fixturePath) });
-      assert.equal(programmatic.verified, true);
-      assert.equal(programmatic.verdict, "auto_merge");
+      assert.equal(programmatic.verified, false);
+      assert.equal(programmatic.verdict, "needs_human");
+      assert.equal(programmatic.rule, "MP-005");
 
       const cli = runBin("bin/mirql.mjs", ["r", "verify", "--fixture", fixturePath]);
-      assert.equal(cli.status, 0);
-      const doc = JSON.parse(cli.stdout);
-      assert.equal(doc.verified, true);
-      assert.equal(doc.verdict, "auto_merge");
+      assert.equal(cli.status, EXIT_CODES.POLICY_DENIAL);
+      const doc = JSON.parse(cli.stderr);
+      assert.equal(doc.verified, false);
+      assert.equal(doc.verdict, "needs_human");
     });
 
-    it("good PR 02: verifies valid consolidate phi drop with auto_merge (exit 0)", () => {
+    // Phase 0.2/0.3: a fixture is self-reported and touches packages/**, so it
+    // never verifies and goes to a human.
+    it("good PR 02: valid consolidate phi drop is not verified → needs_human (exit 4)", () => {
       const fixturePath = "conformance/good_prs/02-valid-consolidate-phi-drop.json";
       const programmatic = verifyAttempt({ fixture: join(ROOT, fixturePath) });
-      assert.equal(programmatic.verified, true);
-      assert.equal(programmatic.verdict, "auto_merge");
+      assert.equal(programmatic.verified, false);
+      assert.equal(programmatic.verdict, "needs_human");
+      assert.equal(programmatic.rule, "MP-005");
 
       const cli = runBin("bin/mirql.mjs", ["r", "verify", "--fixture", fixturePath]);
-      assert.equal(cli.status, 0);
-      const doc = JSON.parse(cli.stdout);
-      assert.equal(doc.verified, true);
-      assert.equal(doc.verdict, "auto_merge");
+      assert.equal(cli.status, EXIT_CODES.POLICY_DENIAL);
+      const doc = JSON.parse(cli.stderr);
+      assert.equal(doc.verified, false);
+      assert.equal(doc.verdict, "needs_human");
     });
 
     it("B11: tokenizer catches empty catches across all evasive forms", () => {
@@ -1160,21 +1166,21 @@ test("add correctly computes sum", () => {
       assert.equal(withSuitePass.violation, "UNCITED_SURFACE");
       assert.equal(withSuitePass.verdict, "needs_human");
 
-      // A genuine completed causal cycle still unlocks humanApprove paths.
+      // Phase 0.3: neither a self-reported causal proof nor a
+      // human_approved flag unlocks humanApprove paths any more.
       const withCausalProof = checkAntiCheat({
         ...base,
         proof: { causal_cycle_completed: true },
       });
-      assert.equal(withCausalProof.ok, true);
-      assert.equal(withCausalProof.rule, "MP-000");
+      assert.equal(withCausalProof.ok, false);
+      assert.equal(withCausalProof.rule, "MP-005");
 
-      // Explicit human authorization still works without causal proof.
       const withHumanApproval = checkAntiCheat({
         ...base,
         proof: { suite_pass_head: true },
         human_approved: true,
       });
-      assert.equal(withHumanApproval.ok, true);
+      assert.equal(withHumanApproval.ok, false);
     });
   });
 

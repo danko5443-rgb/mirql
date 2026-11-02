@@ -122,6 +122,20 @@ const KP_BY_TYPE = {
 };
 
 /**
+ * Phase 0.4: without a keyring nothing verifies, so ledgers that tests expect
+ * to verify register every test key (legacy plain entries, so the ACL gate —
+ * not the keyring's namespace binding — still judges forged namespaces).
+ */
+function trustTestKeys(mirqlDir) {
+  mkdirSync(join(mirqlDir, "ledger"), { recursive: true });
+  const keyring = {};
+  for (const kp of [QUEUE_KP, RUN_KP, NOTARY_KP, INBOX_KP, LIFEGUARD_KP, LOG_KP]) {
+    keyring[kp.keyId] = kp.publicKey;
+  }
+  writeFileSync(join(mirqlDir, "ledger", "keyring.json"), jcs(keyring), "utf8");
+}
+
+/**
  * The five-event spec sequence: genesis -> warrant -> lease -> outcome ->
  * verdict. Each entry carries the writer namespace its ACL row grants.
  */
@@ -199,6 +213,7 @@ function appendSigned(mirqlDir, inputs, startMs = BASE_MS) {
 /** Seed a ledger with the five spec events; returns the mirqlDir. */
 function seedSpecFive() {
   const dir = makeTmp();
+  trustTestKeys(dir);
   appendSigned(dir, specFiveInputs());
   return dir;
 }
@@ -301,6 +316,7 @@ function seedGoldenFixture() {
 describe("appendEvent — signed appends and hash chaining", () => {
   test("appends the five spec events with seq 1..5 and a linked prev_hash chain", () => {
     const dir = makeTmp();
+    trustTestKeys(dir);
     const inputs = specFiveInputs();
     const results = appendSigned(dir, inputs);
 
@@ -1076,6 +1092,7 @@ describe("appendEvent — pre-signed envelopes and keyring verification", () => 
 
   test("rejects Law 17 floats in a caller-supplied envelope (usage error)", () => {
     const dir = makeTmp();
+    trustTestKeys(dir);
     const bogus = {
       ...makeEnvelope(QUEUE_KP, { seq: 1, prevHash: GENESIS_PREV_HASH }),
       payload: { ratio: 0.5 },
@@ -1108,6 +1125,7 @@ describe("appendEvent — pre-signed envelopes and keyring verification", () => 
 describe("CLI — append/verify/view through bin/mirql.mjs and bin/mirql-log.mjs", () => {
   test("append via --event, then --file, then stdin, growing the chain 1..4", () => {
     const dir = makeTmp();
+    trustTestKeys(dir);
     const signOpts = (kp) => [
       "--sign-key",
       kp.privateKey,
