@@ -12,11 +12,12 @@ const WIN_LOCK_PATTERNS = [
 
 const MAX_ATTEMPTS = 5;
 const BASE_WAIT_MS = 50;
+const SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4));
 
 /** Zero-CPU synchronous sleep using Atomics.wait on a shared buffer (Law 17 safe integer ms). */
 function syncSleep(ms) {
   const safeMs = Math.max(1, Math.floor(ms));
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, safeMs);
+  Atomics.wait(SLEEP_BUF, 0, 0, safeMs);
 }
 
 function isTransientWinLock(res) {
@@ -53,8 +54,9 @@ export function git(repoDir, ...args) {
       return res.stdout;
     }
 
-    // If a commit command hit a transient lock during write but the commit actually landed:
+    // If a retried commit command hit a transient lock during write but the commit landed:
     if (
+      attempt > 1 &&
       args[0] === "commit" &&
       res.status === 1 &&
       (res.stdout?.includes("nothing to commit") || res.stderr?.includes("nothing to commit"))
@@ -72,7 +74,7 @@ export function git(repoDir, ...args) {
     syncSleep(waitMs);
   }
 
-  assert.equal(
+  assert.strictEqual(
     res.status,
     0,
     `git ${args.join(" ")} failed (status=${res.status}, signal=${res.signal ?? "none"}, ` +
