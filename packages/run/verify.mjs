@@ -1,6 +1,6 @@
-import { readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
-import { resolve, join } from "node:path";
-import { tmpdir } from "node:os";
+import { readFileSync, existsSync, mkdtempSync, rmSync, realpathSync } from "node:fs";
+import { resolve, join, dirname, delimiter, relative, isAbsolute, sep } from "node:path";
+import { tmpdir, constants as osConstants } from "node:os";
 import { spawnSync } from "node:child_process";
 import { EXIT_CODES, isTestFilePath } from "../core/index.mjs";
 import { sanitizeAgentEnv } from "./agent.mjs";
@@ -238,19 +238,43 @@ function verifyGitRepository(options) {
     return spawnSync("git", args, { cwd, encoding: "utf8", timeout: 30000 });
   }
 
-  function runCmd(cmd, cwd = repoDir, extraEnv = {}) {
+  // Resolve the installed npm CLI outside the candidate before executing it.
+  // Searching from its working directory would let a candidate-local npm.cmd win.
+  const rootInfo = git(["--no-replace-objects", "rev-parse", "--show-toplevel"]);
+  const npmRepository = resolve(rootInfo.status === 0 ? rootInfo.stdout.replace(/\r?\n$/, "") : repoDir);
+  const npmRoots = [dirname(process.execPath), ...(process.env.PATH ?? process.env.Path ?? "").split(delimiter).filter(isAbsolute)];
+  const npmCandidates = npmRoots.flatMap(root => [
+    join(root, "node_modules", "npm", "bin", "npm-cli.js"),
+    join(root, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+    join(root, "npm"),
+  ]);
+  let npmCli = null;
+  for (const candidate of npmCandidates) {
+    try {
+      const path = realpathSync(candidate);
+      const fromRepo = relative(npmRepository, path);
+      if (path.endsWith(sep + "npm-cli.js") &&
+          (isAbsolute(fromRepo) || fromRepo === ".." || fromRepo.startsWith(".." + sep))) {
+        npmCli = path;
+        break;
+      }
+    } catch { continue; } // A missing installation candidate supplies no runner.
+  }
+
+  // Only explicit conformance commands use a shell.
+  // A reproducer filename is always passed as one argument to the Node runner.
+  function runCommand(command, args, cwd, extraEnv = {}) {
     const { env: cleanEnv } = sanitizeAgentEnv(process.env);
-    const res = spawnSync(cmd, {
-      shell: true,
-      cwd,
-      env: { ...cleanEnv, ...extraEnv },
-      encoding: "utf8",
-      timeout: 30000,
-    });
-    let code = res.status;
-    if (res.signal) code = 128 + 15;
-    else if (code === null || code === undefined) code = 1;
-    return { exitCode: code, stdout: res.stdout, stderr: res.stderr };
+    const spawnOptions = {
+      shell: args === null, cwd, env: { ...cleanEnv, ...extraEnv },
+      encoding: "utf8", timeout: 30000, windowsHide: true,
+    };
+    const res = args === null
+      ? spawnSync(command, spawnOptions)
+      : spawnSync(command, args, spawnOptions);
+    const code = res.signal ? 128 + (osConstants.signals[res.signal] ?? 1) : res.status;
+    return { exitCode: code, stdout: res.stdout ?? "", stderr: res.stderr ?? "",
+      timedOut: res.error?.code === "ETIMEDOUT" };
   }
 
   const resolveCommit = (ref) => {
@@ -342,57 +366,30 @@ function verifyGitRepository(options) {
     };
   }
 
-  // Determine reproducer test file (Phase 3.2 Anti-tautology exploit prevention)
-  let reproducerFile = null;
-  let reproducerCmd = null;
-
-  if (options.reproducerFile) {
-    if (!testFiles.includes(options.reproducerFile) && !options.fixture && !options.conformance) {
-      return {
-        verified: false,
-        verdict: "reject",
-        rule: "REPRODUCER_NOT_IN_DIFF",
-        violation: "REPRODUCER_NOT_IN_DIFF",
-        detail: `Specified reproducer ${options.reproducerFile} was not added or modified in the candidate diff.`,
-      };
-    }
-    reproducerFile = options.reproducerFile;
-  } else if (typeof options.reproducerCommand === "string") {
-    const m = options.reproducerCommand.match(/node\s+(?:--test\s+)?(\S+)/);
-    if (m && testFiles.includes(m[1])) {
-      reproducerFile = m[1];
-    } else if (options.fixture || options.conformance) {
-      reproducerCmd = options.reproducerCommand;
-    } else if (testFiles.length > 0) {
-      reproducerFile = testFiles[0];
-    } else if (options.allowNoTests || options.warrantClass === "refactor" || options.warrantClass === "consolidation") {
-      reproducerFile = null;
-    } else {
-      return {
-        verified: false,
-        verdict: "reject",
-        rule: "REPRODUCER_NOT_IN_DIFF",
-        violation: "REPRODUCER_NOT_IN_DIFF",
-        detail: "Caller-supplied reproducer command does not correspond to a test file in the candidate diff.",
-      };
-    }
-  } else if (testFiles.length > 0) {
-    reproducerFile = testFiles[0];
-  } else if (!options.allowNoTests && options.warrantClass !== "refactor" && options.warrantClass !== "consolidation") {
-    return {
-      verified: false,
-      verdict: "reject",
-      rule: "NO_REPRODUCER_TEST",
-      violation: "NO_REPRODUCER_TEST",
-      detail: "Candidate diff contains no added or modified test files to verify causal proof.",
-    };
+  const conformance = options.conformance === true;
+  let reproducerFile = options.reproducerFile ?? null;
+  let conformanceCommand = null;
+  if (reproducerFile !== null && !testFiles.includes(reproducerFile)) {
+    return { verified: false, verdict: "reject", rule: "REPRODUCER_NOT_IN_DIFF",
+      violation: "REPRODUCER_NOT_IN_DIFF", detail: "The reproducer must be an added or modified test file." };
   }
-
-  if (reproducerFile) {
-    reproducerCmd = `"${process.execPath}" --test --test-reporter=tap ${reproducerFile}`;
-  } else if (!reproducerCmd) {
-    reproducerCmd = options.reproducerCommand ?? "npm test";
+  if (reproducerFile === null) {
+    if (conformance && typeof options.reproducerCommand === "string") {
+      conformanceCommand = options.reproducerCommand;
+    } else if (typeof options.reproducerCommand === "string") {
+      // Preserve selection of a canonical legacy path, without executing its command.
+      const match = options.reproducerCommand.match(/^node\s+(?:--test\s+)?(\S+)$/);
+      reproducerFile = match && testFiles.includes(match[1]) ? match[1] : (testFiles[0] ?? null);
+    } else reproducerFile = testFiles[0] ?? null;
   }
+  if (reproducerFile === null && conformanceCommand === null) {
+    const rule = typeof options.reproducerCommand === "string" ? "REPRODUCER_NOT_IN_DIFF" : "NO_REPRODUCER_TEST";
+    return { verified: false, verdict: "reject", rule, violation: rule,
+      detail: "Candidate diff contains no added or modified reproducer test file." };
+  }
+  const runReproducer = (cwd, extraEnv = {}) => reproducerFile !== null
+    ? runCommand(process.execPath, ["--test", "--test-reporter=tap", resolve(cwd, reproducerFile)], cwd, extraEnv)
+    : runCommand(conformanceCommand, null, cwd, extraEnv);
 
   let worktreeDir = null;
   let covDir = null;
@@ -438,10 +435,14 @@ function verifyGitRepository(options) {
     const redCheckout = checkoutBaseWithHeadTests();
     if (redCheckout !== null) return redCheckout;
 
-    const redRes1 = runCmd(reproducerCmd, worktreeDir);
-    const redRes2 = runCmd(reproducerCmd, worktreeDir);
+    const redRes1 = runReproducer(worktreeDir);
+    const redRes2 = runReproducer(worktreeDir);
 
-    if (redRes1.exitCode !== redRes2.exitCode) {
+    const redEvidence1 = parseTapOutput(redRes1.stdout + "\n" + redRes1.stderr, redRes1.exitCode);
+    const redEvidence2 = parseTapOutput(redRes2.stdout + "\n" + redRes2.stderr, redRes2.exitCode);
+    if (redRes1.exitCode !== redRes2.exitCode ||
+        redEvidence1.isAssertionFailure !== redEvidence2.isAssertionFailure ||
+        redEvidence1.isCrash !== redEvidence2.isCrash) {
       return {
         verified: false,
         verdict: "reject",
@@ -475,7 +476,7 @@ function verifyGitRepository(options) {
       };
     }
 
-    const tapRed = parseTapOutput(redRes1.stdout + "\n" + redRes1.stderr, redRes1.exitCode);
+    const tapRed = redEvidence1;
     if (!tapRed.isAssertionFailure) {
       return {
         verified: false,
@@ -493,7 +494,7 @@ function verifyGitRepository(options) {
     if (greenCheckout !== null) return greenCheckout;
 
     covDir = mkdtempSync(join(tmpdir(), "mirql-v8cov-"));
-    const greenRes1 = runCmd(reproducerCmd, worktreeDir, { NODE_V8_COVERAGE: covDir });
+    const greenRes1 = runReproducer(worktreeDir, { NODE_V8_COVERAGE: covDir });
 
     if (!Number.isInteger(greenRes1.exitCode) || greenRes1.exitCode !== 0) {
       return {
@@ -510,7 +511,7 @@ function verifyGitRepository(options) {
     }
 
     // Phase 3.8: Determinism Sentinel (repeat Green).
-    const greenRes2 = runCmd(reproducerCmd, worktreeDir);
+    const greenRes2 = runReproducer(worktreeDir);
     if (!Number.isInteger(greenRes2.exitCode) || greenRes2.exitCode !== 0) {
       return {
         verified: false,
@@ -527,9 +528,10 @@ function verifyGitRepository(options) {
     }
 
     // Phase 3.4: Full Test Suite
-    const hasPackageJson = existsSync(join(worktreeDir, "package.json"));
-    const fullTestCmd = options.testCommand ?? (hasPackageJson ? "npm test" : reproducerCmd);
-    const fullRes = runCmd(fullTestCmd, worktreeDir);
+    // A passing reproducer never substitutes for the project's full suite.
+    const fullRes = npmCli === null
+      ? { exitCode: null, stdout: "", stderr: "Cannot locate an installed npm CLI outside the candidate" }
+      : runCommand(process.execPath, [npmCli, "test"], worktreeDir);
     if (!Number.isInteger(fullRes.exitCode) || fullRes.exitCode !== 0) {
       return {
         verified: false,
@@ -584,7 +586,7 @@ function verifyGitRepository(options) {
       const revCheck = checkout([baseSha, "--", f]);
       if (revCheck !== null) return revCheck;
 
-      const revRes = runCmd(reproducerCmd, worktreeDir);
+      const revRes = runReproducer(worktreeDir);
       const tapRev = parseTapOutput(revRes.stdout + "\n" + revRes.stderr, revRes.exitCode);
 
       if (tapRev.isAssertionFailure) {
@@ -638,9 +640,9 @@ function verifyGitRepository(options) {
     }
 
     return {
-      verified: true,
-      verdict: "auto_merge",
-      rule: "MP-000",
+      verified: !conformance,
+      verdict: conformance ? "conformance_pass" : "auto_merge",
+      rule: conformance ? "CONFORMANCE_ONLY" : "MP-000",
       proof: {
         causal_cycle_completed: true,
         base_fail_runs: 2,
@@ -662,6 +664,7 @@ function verifyGitRepository(options) {
           unnecessary_count: unnecessaryFiles.length,
         },
         anti_cheat: { passed: true, violations_count: 0 },
+        full_suite: { passed: true, exitCode: fullRes.exitCode },
       },
     };
   } finally {

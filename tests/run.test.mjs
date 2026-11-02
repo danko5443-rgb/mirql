@@ -212,7 +212,7 @@ describe("Work Package W5a: `mirql-run` and `bing-bong` Consensus Loop", () => {
       // Base commit: broken implementation
       writeFileSync(
         join(repoDir, "package.json"),
-        JSON.stringify({ type: "module" }),
+        JSON.stringify({ type: "module", scripts: { test: "node --test" } }),
         "utf8",
       );
       const srcDir = join(repoDir, "src");
@@ -1067,7 +1067,7 @@ describe("P0 Remediation: C1, H1, H2, H3, H5", () => {
 
     writeFileSync(
       join(repoDir, "package.json"),
-      JSON.stringify({ type: "module" }),
+      JSON.stringify({ type: "module", scripts: { test: "node --test" } }),
       "utf8",
     );
     const srcDir = join(repoDir, "src");
@@ -1347,6 +1347,7 @@ test("add correctly computes sum", () => {
 
       const { baseSha, headSha } = buildMathRepo(repoDir, {
         extraBaseFiles: {
+          "package.json": JSON.stringify({ type: "module", scripts: { test: "node --test && node dump-env.mjs" } }),
           // Committed at base (a non-test file): dumps the child env to an
           // absolute path that survives worktree cleanup.
           "dump-env.mjs":
@@ -1374,7 +1375,6 @@ test("add correctly computes sum", () => {
           baseSha,
           headSha,
           reproducerCommand: "node --test tests/math.test.mjs",
-          testCommand: "node --test tests/math.test.mjs && node dump-env.mjs",
         });
 
         assert.equal(
@@ -1453,7 +1453,7 @@ test("add correctly computes sum", () => {
 
       writeFileSync(
         join(repoDir, "package.json"),
-        JSON.stringify({ type: "module" }),
+        JSON.stringify({ type: "module", scripts: { test: "node --test" } }),
         "utf8",
       );
       mkdirSync(join(repoDir, "src"), { recursive: true });
