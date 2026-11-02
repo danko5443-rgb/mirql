@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mirql.local/schemas/merge-approval/v1.json",
+  "title": "Human merge approval binding v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "warrant_id",
+    "base_sha",
+    "head_sha",
+    "tree_sha",
+    "paths"
+  ],
+  "properties": {
+    "warrant_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNPQRSTVWXYZ]{26}$"
+    },
+    "base_sha": {
+      "type": "string",
+      "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+    },
+    "head_sha": {
+      "type": "string",
+      "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+    },
+    "tree_sha": {
+      "type": "string",
+      "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+    },
+    "paths": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

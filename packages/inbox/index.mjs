@@ -1,3 +1,5 @@
+import { approveMerge } from "./merge-approval.mjs";
+export { approveMerge };
 // packages/inbox/index.mjs — Cryptographic Human Sovereignty Portal (Law 6, Milestone M6).
 import { resolve as resolvePath, join } from "node:path";
 import { enrollKey } from "../core/keyring.mjs";
@@ -73,7 +75,7 @@ export {
 
 export { FACTORY_WRITERS, CANONICAL_WRITERS, HUMAN_WRITER_NS, HUMAN_KEY_FILENAME };
 
-const SUBCOMMANDS = Object.freeze(["genesis", "send", "digest", "act", "propose", "enroll-key"]);
+const SUBCOMMANDS = Object.freeze(["genesis", "send", "digest", "act", "propose", "enroll-key", "approve-merge"]);
 
 // Law 3 note: WRITER_ACL is imported so this module fails fast if the frozen
 // ACL table is ever absent — but it is NEVER mutated here. The canonical
@@ -170,6 +172,7 @@ function emitUsage() {
       subcommands: {
         genesis:
           "bootstrap .mirql/, provision factory keys, sign mirql.genesis; --human-key-out <path> (default: <trustRoot>/human_owner.key.private.json, mode 0600)",
+        "approve-merge": "sign exact Git commit/tree/path approval; --warrant-id <ULID> --workspace <repo> --base <ref> --head <ref> --key <human-key>",
         "enroll-key": "enroll a public key for a writer namespace; requires --key <human-private-key>",
         send:
           "submit human intent & mint a warrant; REQUIRES --key <path> or MIRQL_HUMAN_KEY (outside .mirql)",
@@ -218,6 +221,14 @@ export function runCli(argv = []) {
       }
       case "genesis": {
         const result = runGenesis(mirqlDir, options);
+        process.stdout.write(JSON.stringify(result) + "\n");
+        return EXIT_CODES.OK;
+      }
+      case "approve-merge": {
+        const result = approveMerge(mirqlDir, {
+          ...options, workspaceDir: options.workspace ?? process.cwd(),
+          warrantId: options.warrantId ?? options["warrant-id"],
+        });
         process.stdout.write(JSON.stringify(result) + "\n");
         return EXIT_CODES.OK;
       }
