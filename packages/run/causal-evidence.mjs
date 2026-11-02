@@ -12,7 +12,7 @@ export function parseTapOutput(output, exitCode) {
   let failed=false, block=null;
   for (const line of text.split(/\r?\n/)) {
     const result=/^\s*(not ok|ok) \d+\b/.exec(line);
-    if (result) failed=result[1]==="not ok";
+    if (result) failed=result[1]==="not ok" && !/\s#\s*TODO\b/i.test(line);
     const start=/^(\s+)---\s*$/.exec(line);
     if (start) { block=failed?{indent:start[1].length}:null; continue; }
     if (!block) continue;

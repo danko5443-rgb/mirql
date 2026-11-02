@@ -7,11 +7,12 @@ import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { parseTapOutput, checkV8Coverage } from "../packages/run/verify.mjs";
 
-function tapFor(body) {
+function tapFor(body, {todoError=false}={}) {
   const root=mkdtempSync(join(tmpdir(),"mirql-tap-boundary-"));
   try {
     const file=join(root,"case.test.mjs");
-    writeFileSync(file,'import test from "node:test"; import assert from "node:assert/strict";\ntest("case",()=>{'+body+'});\n');
+    const todo=todoError?'test("known issue",{todo:true},()=>{throw new Error("deferred failure");});\n':'';
+    writeFileSync(file,'import test from "node:test"; import assert from "node:assert/strict";\n'+todo+'test("case",()=>{'+body+'});\n');
     const env={...process.env}; delete env.NODE_TEST_CONTEXT;
     const result=spawnSync(process.execPath,["--test","--test-reporter=tap",file],{env,encoding:"utf8",windowsHide:true});
     assert.equal(result.status,1,result.stderr);
@@ -63,4 +64,7 @@ test("coverage from another directory cannot satisfy a workspace path by suffix"
 });
 test("executed changed source in the exact workspace is counted",()=>{
   assert.equal(measureCoverage(functions,5).executedChangedLines,true);
+});
+test("a TODO error does not mask a genuine active assertion failure",()=>{
+  assert.equal(tapFor('assert.equal(1,2);',{todoError:true}).isAssertionFailure,true);
 });
