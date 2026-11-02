@@ -101,6 +101,7 @@ export function runAgent(options = {}) {
       }
     }
     let res;
+    let cleanupError;
     try {
       res = spawnSync(options.command, {
         shell: true,
@@ -110,7 +111,11 @@ export function runAgent(options = {}) {
         encoding: "utf8",
       });
     } finally {
-      rmSync(workerHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      try {
+        rmSync(workerHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      } catch (error) {
+        cleanupError = error.message;
+      }
     }
 
     let exitCode = res.status;
@@ -122,8 +127,9 @@ export function runAgent(options = {}) {
     }
 
     return {
-      exitCode,
-      ok: exitCode === 0 && !res.signal,
+      exitCode: cleanupError ? EXIT_CODES.POLICY_DENIAL : exitCode,
+      ok: exitCode === 0 && !res.signal && !cleanupError,
+      ...(cleanupError ? { workerExitCode: exitCode, cleanupError, workerHome } : {}),
       stdout: res.stdout ?? "",
       stderr: res.stderr ?? "",
       strippedEnv: stripped,

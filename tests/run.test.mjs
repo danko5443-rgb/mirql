@@ -1,6 +1,7 @@
 import { test, describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
+  chmodSync,
   mkdtempSync,
   mkdirSync,
   rmSync,
@@ -1554,6 +1555,36 @@ test("each worker receives an empty temporary home and removes it after exit", (
     }
     assert.notEqual(homes[0], homes[1]);
   } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a worker cleanup failure preserves output and exit status", {
+  skip: process.platform === "win32" || process.getuid?.() === 0,
+}, () => {
+  const workspace = mkdtempSync(join(tmpdir(), "mirql-cleanup-test-"));
+  const script = join(workspace, "lock-home.mjs");
+  writeFileSync(script, `import {mkdirSync,writeFileSync,chmodSync} from "node:fs";
+    const locked=process.env.HOME+"/locked";
+    mkdirSync(locked);
+    writeFileSync(locked+"/file","data");
+    chmodSync(locked,0o500);
+    console.log("worker output");
+    process.exit(7);`);
+  let home;
+  try {
+    const result = runAgent({ command: `"${process.execPath}" "${script}"`, cwd: workspace });
+    home = result.workerHome;
+    assert.equal(result.ok, false);
+    assert.equal(result.exitCode, EXIT_CODES.POLICY_DENIAL);
+    assert.equal(result.workerExitCode, 7);
+    assert.match(result.stdout, /worker output/);
+    assert.ok(result.cleanupError);
+  } finally {
+    if (home) {
+      chmodSync(join(home, "locked"), 0o700);
+      rmSync(home, { recursive: true, force: true });
+    }
     rmSync(workspace, { recursive: true, force: true });
   }
 });
