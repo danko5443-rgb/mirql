@@ -159,11 +159,28 @@ export function isTestFilePath(p) {
 }
 
 /**
- * Files that steer an aiReviewers account (CodeRabbit config; AGENTS.md review
- * guidelines for Codex, at any depth). An AI approval never clears a PR that
- * touches one: that PR may be reviewed under its own instructions.
+ * Files that steer an aiReviewers account: CodeRabbit config, AGENTS.md (Codex
+ * review guidelines) and the agent instruction files CodeRabbit reads as code
+ * guidelines by default. Plain names match at any depth. An AI approval never
+ * clears a PR that touches one: that PR may be reviewed under its own
+ * instructions.
  */
-const AI_REVIEWER_CONFIG_PATTERNS = Object.freeze([".coderabbit.yaml", ".coderabbit.yml", "AGENTS.md"]);
+const AI_REVIEWER_CONFIG_PATTERNS = Object.freeze([
+  ".coderabbit.yaml",
+  ".coderabbit.yml",
+  "AGENTS.md",
+  "AGENTS.override.md",
+  "AGENT.md",
+  "CLAUDE.md",
+  "GEMINI.md",
+  ".cursorrules",
+  ".windsurfrules",
+  ".cursor/rules/**",
+  ".clinerules/**",
+  ".rules/**",
+  ".github/copilot-instructions.md",
+  ".github/instructions/**",
+]);
 
 const REVIEWER_LOGIN_RE =/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/;
 

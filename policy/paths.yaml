@@ -5,7 +5,8 @@
 # humanApprove: Core files that require explicit affirmative human authorization before merging.
 # aiReviewers: GitHub logins whose Approve review on the PR head commit clears MP-001 in CI. Only the BASE
 #   branch's copy of this list is read, so a PR cannot add its own reviewer. Never cleared by AI approval:
-#   reviewer config (.coderabbit.yaml/.yml, AGENTS.md) and any PR where someone commanded "@coderabbitai
+#   reviewer config and agent instruction files (.coderabbit.yaml, AGENTS.md, CLAUDE.md, ...; see
+#   AI_REVIEWER_CONFIG_PATTERNS in packages/mergeproof/evaluator.mjs) and any PR where someone commanded "@coderabbitai
 #   approve". Residual risks: a reviewer can be prompt-injected by the diff, and a command comment deleted
 #   after it fired is no longer visible to CI. Remove a login from this list to require a human again.
 

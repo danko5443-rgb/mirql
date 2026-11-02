@@ -26,6 +26,8 @@
 //   PR_AUTHOR       - PR author login
 //   COMMENTS_PATH   - JSON lines, one GitHub issue comment per line
 //                     (`gh api --paginate .../issues/N/comments --jq '.[]'`)
+//   REVIEW_COMMENTS_PATH - JSON lines, one inline review comment per line
+//                     (`gh api --paginate .../pulls/N/comments --jq '.[]'`)
 //   GITHUB_OUTPUT   - (optional) receives `approver=<login>`
 //
 // Exit codes: 0 always when inputs parse (no approval is not an error);
@@ -93,8 +95,9 @@ export function findAiApproval(reviews, { reviewers, headSha, author }) {
 }
 
 export async function main(env = process.env) {
-  const { BASE_NOTARY_DIR, REVIEWS_PATH, COMMENTS_PATH, HEAD_SHA, PR_AUTHOR } = env;
-  for (const [name, value] of Object.entries({ BASE_NOTARY_DIR, REVIEWS_PATH, COMMENTS_PATH, HEAD_SHA, PR_AUTHOR })) {
+  const { BASE_NOTARY_DIR, REVIEWS_PATH, COMMENTS_PATH, REVIEW_COMMENTS_PATH, HEAD_SHA, PR_AUTHOR } = env;
+  const required = { BASE_NOTARY_DIR, REVIEWS_PATH, COMMENTS_PATH, REVIEW_COMMENTS_PATH, HEAD_SHA, PR_AUTHOR };
+  for (const [name, value] of Object.entries(required)) {
     if (!value) {
       console.error(`ci-review-gate: ${name} is required`);
       return 1;
@@ -104,7 +107,10 @@ export async function main(env = process.env) {
   let comments;
   try {
     reviews = parseReviews(readFileSync(REVIEWS_PATH, "utf8"));
-    comments = parseReviews(readFileSync(COMMENTS_PATH, "utf8"));
+    comments = [
+      ...parseReviews(readFileSync(COMMENTS_PATH, "utf8")),
+      ...parseReviews(readFileSync(REVIEW_COMMENTS_PATH, "utf8")),
+    ];
   } catch (err) {
     console.error(`ci-review-gate: cannot read reviews or comments: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
