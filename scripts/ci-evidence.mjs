@@ -169,7 +169,7 @@ export async function loadBaseVerifyThrift(baseDir) {
   return mod.verifyThrift;
 }
 
-/** Counts dependencies+devDependencies in a tree's package.json (−1 when unmeasurable). */
+/** Counts all external dependencies across all dependency blocks in a tree's package.json (Law 0, −1 when unmeasurable). */
 function countDeps(treeDir) {
   const pkgPath = join(resolve(treeDir), "package.json");
   if (!existsSync(pkgPath)) return 0;
@@ -177,7 +177,9 @@ function countDeps(treeDir) {
     const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
     return (
       Object.keys(pkg.dependencies ?? {}).length +
-      Object.keys(pkg.devDependencies ?? {}).length
+      Object.keys(pkg.devDependencies ?? {}).length +
+      Object.keys(pkg.peerDependencies ?? {}).length +
+      Object.keys(pkg.optionalDependencies ?? {}).length
     );
   } catch {
     return -1;
@@ -193,19 +195,41 @@ function countDeps(treeDir) {
  * @param {object} input
  * @param {number} input.phiBase
  * @param {number} input.phiHead
- * @param {string[]} input.deletedTests
- * @param {string[]} input.filesChanged
- * @param {number} input.depsBase
- * @param {number} input.depsHead
+ * @param {string[]} [input.deletedTests=[]]
+ * @param {string[]} [input.filesChanged=[]]
+ * @param {number} [input.depsBase=0]
+ * @param {number} [input.depsHead=0]
  * @param {Function} input.verifyThriftFn
  * @returns {{ passed: boolean, evidence: object, reasons: string[] }}
  */
-export function measureThrift({ phiBase, phiHead, deletedTests, filesChanged, depsBase, depsHead, verifyThriftFn }) {
-  const surfacePreserved = !filesChanged.some((f) => String(f).replaceAll("\\", "/") === "surface.lock");
+export function measureThrift({
+  phiBase,
+  phiHead,
+  deletedTests = [],
+  filesChanged = [],
+  depsBase = 0,
+  depsHead = 0,
+  verifyThriftFn,
+}) {
+  const safeFiles = Array.isArray(filesChanged) ? filesChanged : [];
+  const safeDeleted = Array.isArray(deletedTests) ? deletedTests : [];
+  const surfacePreserved = !safeFiles.some((f) => {
+    const norm = String(f ?? "").replaceAll("\\", "/").replace(/^\.\//, "").trim();
+    return norm === "surface.lock";
+  });
+
+  if (typeof verifyThriftFn !== "function") {
+    return {
+      passed: false,
+      evidence: { surface_changed: !surfacePreserved, deps_before: depsBase, deps_after: depsHead },
+      reasons: ["Law 7 fail-closed: verifyThrift function not provided or not a function"],
+    };
+  }
+
   const verdict = verifyThriftFn({
     phiBefore: phiBase,
     phiAfter: phiHead,
-    testsPreserved: deletedTests.length === 0,
+    testsPreserved: safeDeleted.length === 0,
     surfacePreserved,
     ...(depsBase >= 0 && depsHead >= 0 ? { depCountBefore: depsBase, depCountAfter: depsHead } : {}),
   });
@@ -219,7 +243,7 @@ export function measureThrift({ phiBase, phiHead, deletedTests, filesChanged, de
       deps_before: depsBase,
       deps_after: depsHead,
     },
-    reasons: verdict.reasons,
+    reasons: verdict.reasons ?? [],
   };
 }
 

@@ -146,6 +146,31 @@ describe("ci-evidence: honest notary evidence builder", () => {
       assert.equal(docFail.phi.thrift_test_passed, false);
       assert.ok(docFail.phi.thrift_reasons.length > 0);
     });
+
+    it("detects surface.lock modification even with relative path variations", () => {
+      const res1 = measureThrift({ ...input, filesChanged: ["./surface.lock"] });
+      assert.equal(res1.passed, false);
+      assert.equal(res1.evidence.surface_changed, true);
+
+      const res2 = measureThrift({ ...input, filesChanged: [".\\surface.lock"] });
+      assert.equal(res2.passed, false);
+      assert.equal(res2.evidence.surface_changed, true);
+    });
+
+    it("fails closed when verifyThriftFn is missing or invalid", () => {
+      const res = measureThrift({ ...input, verifyThriftFn: null });
+      assert.equal(res.passed, false);
+      assert.ok(res.reasons.some((r) => r.includes("Law 7 fail-closed")));
+    });
+
+    it("safely defaults omitted arrays without throwing", () => {
+      const res = measureThrift({
+        phiBase: 1000,
+        phiHead: 900,
+        verifyThriftFn: verifyThrift,
+      });
+      assert.equal(res.passed, true);
+    });
   });
 
   describe("4. collectDiff (authoritative git diff, fail-closed)", () => {
