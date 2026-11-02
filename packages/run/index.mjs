@@ -171,7 +171,7 @@ export function runCli(argv = []) {
           supervisor:
             "privileged parent broker: executes agent, verifyAttempt, records Outcome (--epoch <int> threads the leased epoch)",
           agent: "unprivileged worker: strips secrets, enforces policy/paths.yaml",
-          verify: "triple-execution Red-Green-ReRed verifier & anti-cheat gate (--fixture <path>)",
+          verify: "Git causal verifier (--workspace <repo> --base <ref> --head <ref> --reproducer <changed-test> --dir <ledger> --warrant-id <id>); --fixture <path> is conformance only",
           probe: "declarative 0-token probe runner (--probe <name>)",
           "bing-bong": "multi-agent cross-family consensus loop (alias bb)",
           phi: "compute complexity potential phi",
@@ -186,7 +186,7 @@ export function runCli(argv = []) {
     case "verify": {
       const fixture = flags.fixture || flags.f;
       // B1: mirql r verify with no inputs must fail with exit 2 (USAGE_ERROR)
-      if (!fixture && positional.length <= 1 && !flags.workspace && !flags.reproducer) {
+      if (!fixture && positional.length <= 1 && !flags.workspace && !flags.reproducer && !flags.base && !flags.head) {
         emitError({
           error: "USAGE_ERROR",
           reason: "mirql r verify requires --fixture <path> or verification target",
@@ -220,12 +220,25 @@ export function runCli(argv = []) {
         }
       }
 
-      // Live verification without fixture
+      for (const name of ["workspace", "base", "head", "reproducer", "dir", "warrant-id"]) {
+        if (flags[name] !== undefined && (typeof flags[name] !== "string" || !flags[name].trim())) {
+          emitError({ error: "USAGE_ERROR", reason: `--${name} requires a value` });
+          return EXIT_CODES.USAGE_ERROR;
+        }
+      }
+      // The live command measures Git objects and runs the fixed test pipeline.
       const result = verifyAttempt({
+        git: true,
         workspaceDir: flags.workspace ?? process.cwd(),
+        baseSha: flags.base,
+        headSha: flags.head,
+        reproducerFile: flags.reproducer,
+        mirqlDir: flags.dir,
+        warrantId: flags["warrant-id"],
       });
       emitLine(jcs(result));
-      return result.verified ? EXIT_CODES.OK : EXIT_CODES.DOMAIN_NEGATIVE;
+      if (result.verified) return EXIT_CODES.OK;
+      return result.verdict === "needs_human" ? EXIT_CODES.POLICY_DENIAL : EXIT_CODES.DOMAIN_NEGATIVE;
     }
 
     case "supervisor": {

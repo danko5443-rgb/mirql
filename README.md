@@ -72,7 +72,7 @@ The public surface is strictly locked in [`surface.lock`](surface.lock):
 ### Run (`mirql r`)
 - `mirql r supervisor` — Execute the reactive agent supervisor daemon.
 - `mirql r agent` — Run an ephemeral sandboxed role container.
-- `mirql r verify` — Validate local candidate proof artifacts.
+- `mirql r verify --workspace <repo> --base <ref> --head <ref> --reproducer <changed-test-file>` — Run the measured Git causal checks and the project's full npm test suite. For humanApprove changes, add `--dir <ledger> --warrant-id <id>` to consume an exact owner-signed approval. `--fixture` checks conformance only. Candidate tests currently execute under the invoking user account; OS isolation remains unfinished.
 - `mirql r probe` — Run declarative health probes (tests, drift, mutants, complexity, surface).
 - `mirql r bing-bong` (alias `mirql r bb`) — Multi-agent frontier consensus loop where 2–3 cross-family agents debate until reaching unanimous `CONVERGED` consensus or escalating to `mirql-inbox` with exit code `10`.
 
