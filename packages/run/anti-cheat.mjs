@@ -13,6 +13,7 @@ import {
   isEffectivelyEmpty,
   checkSwallowedExceptions,
   checkTestWeakenings,
+  isTestFilePath,
 } from "../core/index.mjs";
 
 export {
@@ -27,6 +28,7 @@ export {
   isEffectivelyEmpty,
   checkSwallowedExceptions,
   checkTestWeakenings,
+  isTestFilePath,
 };
 
 /**

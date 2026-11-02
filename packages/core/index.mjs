@@ -39,6 +39,7 @@ export {
   isEffectivelyEmpty,
   checkSwallowedExceptions,
   checkTestWeakenings,
+  isTestFilePath,
 } from "./anti-cheat.mjs";
 export {
   LedgerWatcher,

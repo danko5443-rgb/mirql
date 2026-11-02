@@ -16,6 +16,7 @@ import { join, resolve, basename, dirname, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { sanitizeAgentEnv } from "./agent.mjs";
+import { isTestFilePath } from "../core/index.mjs";
 
 /**
  * Standard AST mutation operators supported by Scout (Mutants) per roles/scout-mutants.md:
@@ -343,21 +344,6 @@ function hashString(str) {
   return hash;
 }
 
-/**
- * True when the path looks like a test file (same rule as the mergeproof
- * evaluator and CI evidence builder).
- * @param {string} p
- * @returns {boolean}
- */
-function isTestFilePath(p) {
-  const norm = String(p ?? "").replaceAll("\\", "/").toLowerCase();
-  return (
-    norm.startsWith("tests/") ||
-    norm.startsWith("test/") ||
-    norm.includes(".test.") ||
-    norm.includes("_test.")
-  );
-}
 
 /**
  * Locates a BOUNDED workspace root to snapshot for sandboxed mutation:
