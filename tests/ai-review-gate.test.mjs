@@ -94,7 +94,9 @@ describe("ai review gate: findAiApproval", () => {
     assert.equal(hasApproveCommand([human("@coderabbitai approve")]), true);
     assert.equal(hasApproveCommand([human("thanks\n@CodeRabbitAI  resolve")]), true);
     assert.equal(hasApproveCommand([human("@coderabbitai review")]), false);
-    assert.equal(hasApproveCommand([{ user: { login: "coderabbitai[bot]", type: "Bot" }, body: "run @coderabbitai approve" }]), false);
+    assert.equal(hasApproveCommand([{ user: { login: "coderabbitai[bot]", type: "Bot" }, body: "run @coderabbitai approve" }], BOTS), false);
+    assert.equal(hasApproveCommand([{ user: { login: "other-app[bot]", type: "Bot" }, body: "@coderabbitai approve" }], BOTS), true);
+    assert.equal(hasApproveCommand([{ ...review("evil", "COMMENTED", HEAD, undefined, "User"), body: "@coderabbitai approve" }], BOTS), true, "review bodies count");
   });
 
   it("main reads the base policy and writes the approver output", async () => {
@@ -155,12 +157,20 @@ describe("ai review gate: evaluator", () => {
   });
 
   it("an approval cannot clear a change to the reviewer's own config", () => {
-    const res = evaluatePullRequest(
-      humanOnlyDoc({ diff_stat: { files_changed: [".coderabbit.yaml"] } }),
-      { rootDir: ROOT, humanOnlyReviewer: "coderabbitai[bot]" },
-    );
-    assert.equal(res.verdict, "reject");
-    assert.equal(res.violation, "TOUCH_HUMAN_ONLY");
+    const cases = [
+      [".coderabbit.yaml"],
+      ["./.CodeRabbit.yml"],
+      ["packages/core/AGENTS.md"],
+      [".github/workflows/x.yml", "AGENTS.md"],
+    ];
+    for (const files of cases) {
+      const res = evaluatePullRequest(
+        humanOnlyDoc({ diff_stat: { files_changed: files } }),
+        { rootDir: ROOT, humanOnlyReviewer: "coderabbitai[bot]" },
+      );
+      assert.equal(res.verdict, "reject", files.join(","));
+      assert.equal(res.violation, "TOUCH_HUMAN_ONLY");
+    }
   });
 
   it("an implausible reviewer login is ignored", () => {

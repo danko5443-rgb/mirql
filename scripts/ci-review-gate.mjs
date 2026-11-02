@@ -13,8 +13,10 @@
 //   - the reviewer's latest decisive review is APPROVED
 //   - that review was submitted on the exact head commit (a new push voids it)
 //   - no aiReviewers account has an outstanding CHANGES_REQUESTED
-//   - no human comment on the PR commands a bot to approve or resolve
-//     (`@coderabbitai approve`), since that skips the bot's own review
+//   - no comment or review body on the PR, other than the reviewer bots' own,
+//     commands a bot to approve or resolve (`@coderabbitai approve`), since
+//     that skips the bot's own review. A command deleted after it fired is not
+//     visible here; that residual risk is documented in policy/paths.yaml.
 //
 // Zero external dependencies. Environment contract:
 //   BASE_NOTARY_DIR - base-notary checkout root (policy source)
@@ -36,11 +38,18 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const DECISIVE_STATES = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
 const APPROVE_COMMAND_RE = /@coderabbit(?:ai)?\b[^\n]*\b(?:approve|resolve)\b/i;
 
-/** True when a non-bot comment commands a reviewer bot to approve or resolve. */
-export function hasApproveCommand(comments) {
-  return (comments ?? []).some(
-    (c) => c?.user?.type !== "Bot" && APPROVE_COMMAND_RE.test(String(c?.body ?? "")),
-  );
+/**
+ * True when any comment or review body not written by an allowlisted reviewer
+ * bot commands a reviewer to approve or resolve. Other bots count as people
+ * here: any account that can post the command can trigger it.
+ */
+export function hasApproveCommand(items, reviewers = []) {
+  const exempt = new Set(reviewers.map((r) => r.toLowerCase()));
+  return (items ?? []).some((c) => {
+    const login = String(c?.user?.login ?? "").toLowerCase();
+    const isReviewerBot = c?.user?.type === "Bot" && exempt.has(login);
+    return !isReviewerBot && APPROVE_COMMAND_RE.test(String(c?.body ?? ""));
+  });
 }
 
 /** Parses JSON-lines review output; blank lines are skipped. */
@@ -106,7 +115,7 @@ export async function main(env = process.env) {
   );
   const reviewers = loadPathPolicies(baseRoot).aiReviewers ?? [];
 
-  const commanded = hasApproveCommand(comments);
+  const commanded = hasApproveCommand([...comments, ...reviews], reviewers);
   const approver = commanded
     ? null
     : findAiApproval(reviews, { reviewers, headSha: HEAD_SHA, author: PR_AUTHOR });

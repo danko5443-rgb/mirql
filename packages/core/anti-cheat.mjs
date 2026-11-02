@@ -16,6 +16,8 @@ export const DEFAULT_HUMAN_ONLY_PATTERNS = Object.freeze([
   "scripts/**",
   "bin/**",
   ".coderabbit.yaml",
+  ".coderabbit.yml",
+  "AGENTS.md",
 ]);
 
 /**
