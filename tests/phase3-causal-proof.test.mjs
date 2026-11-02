@@ -17,6 +17,7 @@ function initRepo(dir) {
   git(dir, ["config", "user.email", "p3@example.test"]);
   git(dir, ["config", "user.name", "p3"]);
   git(dir, ["config", "commit.gpgsign", "false"]);
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
 }
 
 function tmp(prefix) {

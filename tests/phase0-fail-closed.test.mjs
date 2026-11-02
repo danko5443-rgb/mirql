@@ -68,6 +68,7 @@ function initRepo(dir) {
   git(dir, ["config", "user.email", "p0@example.test"]);
   git(dir, ["config", "user.name", "p0"]);
   git(dir, ["config", "commit.gpgsign", "false"]);
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
 }
 
 /** Two-commit repo: base has a bug, head fixes it and adds a reproducer. */
