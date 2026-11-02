@@ -1,3 +1,4 @@
+import { authorizeTestWarrant } from "./helpers/warrant.mjs";
 import { provisionTestTrust, authorizeTestKey } from "./helpers/keyring.mjs";
 import { test, describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -502,6 +503,7 @@ test("tautological test", () => {
       const kp = generateEd25519Keypair();
       authorizeTestKey(tempDir, "tool:run_supervisor", kp);
 
+      authorizeTestWarrant(tempDir, "01HWWWWWWWWWWWWWWWWWWWWWWW");
       const res = runSupervisor({
         mirqlDir: tempDir,
         signingKey: kp.privateKey,
@@ -536,11 +538,11 @@ test("tautological test", () => {
       const eventsPath = join(tempDir, "ledger", "events.jsonl");
       assert.ok(existsSync(eventsPath), "events.jsonl must exist");
       const content = readFileSync(eventsPath, "utf8").trim();
-      const eventDoc = JSON.parse(content);
+      const eventDoc = content.split(/\r?\n/).map(JSON.parse).at(-1);
 
       assert.equal(eventDoc.type, "attempt.outcome");
       assert.equal(eventDoc.writer.ns, "tool:run_supervisor");
-      assert.equal(eventDoc.seq, 1);
+      assert.equal(eventDoc.seq, 2);
       assert.ok(eventDoc.hash.startsWith("sha256:"));
       assert.ok(eventDoc.sig.length > 0);
 
@@ -552,6 +554,7 @@ test("tautological test", () => {
       const kp = generateEd25519Keypair();
       authorizeTestKey(tempDir, "tool:run_supervisor", kp);
 
+      authorizeTestWarrant(tempDir, "01H00000000000000000000002");
       const res = runSupervisor({
         mirqlDir: tempDir,
         keypair: kp,
@@ -1199,6 +1202,7 @@ test("add correctly computes sum", () => {
   // -------------------------------------------------------------------------
   describe("H1: leased-job epoch threaded through supervisor", () => {
     it("CLI accepts --epoch <int> and threads it into the Outcome and signed attempt.outcome event", () => {
+      authorizeTestWarrant(tempDir, "01HWWWWWWWWWWWWWWWWWWWWWWW");
       const res = runBin("bin/mirql-run.mjs", [
         "supervisor",
         "--dir", tempDir,
@@ -1219,7 +1223,7 @@ test("add correctly computes sum", () => {
 
       // The persisted ledger event carries the same epoch.
       const eventDoc = JSON.parse(
-        readFileSync(join(tempDir, "ledger", "events.jsonl"), "utf8").trim(),
+        readFileSync(join(tempDir, "ledger", "events.jsonl"), "utf8").trim().split(/\r?\n/).at(-1),
       );
       assert.equal(eventDoc.epoch, 2);
       assert.equal(eventDoc.payload.epoch, 2);
@@ -1238,6 +1242,7 @@ test("add correctly computes sum", () => {
     });
 
     it("defaults the epoch to 1 when --epoch is omitted (backwards compatible)", () => {
+      authorizeTestWarrant(tempDir, "01HWWWWWWWWWWWWWWWWWWWWWWW");
       const res = runBin("bin/mirql-run.mjs", [
         "supervisor",
         "--dir", tempDir,

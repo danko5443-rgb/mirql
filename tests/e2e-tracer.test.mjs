@@ -155,7 +155,10 @@ describe("End-to-End Self-Hosting Tracer Bullet (W5b hardened: full 5-binary aut
       assert.equal(warrant.budget_micro_usd, 1500000);
 
       events = readAllEvents(mirqlDir);
-      assert.equal(events.length, 2);
+      assert.equal(events.length, 3);
+      assert.equal(events[2].type, "warrant.created");
+      assert.equal(events[2].writer.ns, "human:owner");
+      assert.equal(events[2].payload.warrant_hash, sha256(jcs(warrant)));
       assert.equal(events[1].seq, 2);
       assert.equal(events[1].type, "human.intent");
       assert.equal(events[1].writer.ns, "human:owner");
@@ -192,11 +195,11 @@ describe("End-to-End Self-Hosting Tracer Bullet (W5b hardened: full 5-binary aut
       assert.ok(qStatus.open_warrants.includes(warrantId));
 
       events = readAllEvents(mirqlDir);
-      assert.equal(events.length, 4);
-      assert.equal(events[2].type, "job.enqueued");
-      assert.equal(events[2].writer.ns, "tool:queue");
-      assert.equal(events[3].type, "job.leased");
+      assert.equal(events.length, 5);
+      assert.equal(events[3].type, "job.enqueued");
       assert.equal(events[3].writer.ns, "tool:queue");
+      assert.equal(events[4].type, "job.leased");
+      assert.equal(events[4].writer.ns, "tool:queue");
 
       // =====================================================================
       // Step 4: Cryptographic ledger audit (chain + signatures + bindings)
@@ -205,8 +208,8 @@ describe("End-to-End Self-Hosting Tracer Bullet (W5b hardened: full 5-binary aut
       assert.equal(verifyRes.status, 0, `Ledger verify failed: ${verifyRes.stderr}`);
       const audit = JSON.parse(verifyRes.stdout);
       assert.equal(audit.valid, true);
-      assert.equal(audit.event_count, 4);
-      assert.equal(audit.head_hash, events[3].hash);
+      assert.equal(audit.event_count, 5);
+      assert.equal(audit.head_hash, events[4].hash);
 
       // The standalone mirql-log binary verifies identically.
       const verifyLogBin = runBin(BIN_LOG, ["verify", "--dir", mirqlDir]);
@@ -220,7 +223,7 @@ describe("End-to-End Self-Hosting Tracer Bullet (W5b hardened: full 5-binary aut
       assert.equal(digestRes.status, 0, `Digest failed: ${digestRes.stderr}`);
       const digest = JSON.parse(digestRes.stdout);
       assert.equal(digest.tool, "inbox");
-      assert.equal(digest.seq, 4);
+      assert.equal(digest.seq, 5);
       assert.equal(digest.halted, false);
       assert.equal(digest.budget_spent_micro_usd, 0);
       assert.equal(digest.mutates_ledger, false);
@@ -268,7 +271,7 @@ describe("End-to-End Self-Hosting Tracer Bullet (W5b hardened: full 5-binary aut
       const actDoc = JSON.parse(actRes.stdout);
       assert.equal(actDoc.status, "acted");
       assert.equal(actDoc.decision, "approve");
-      assert.equal(actDoc.seq, 5);
+      assert.equal(actDoc.seq, 6);
       assert.equal(actDoc.event.type, "human.approval");
       assert.equal(actDoc.event.writer.ns, "human:owner");
 
@@ -301,7 +304,7 @@ describe("End-to-End Self-Hosting Tracer Bullet (W5b hardened: full 5-binary aut
       const resumeDoc = JSON.parse(resumeRes.stdout);
       assert.equal(resumeDoc.status, "acted");
       assert.equal(resumeDoc.decision, "resume");
-      assert.equal(resumeDoc.seq, 8);
+      assert.equal(resumeDoc.seq, 9);
       assert.equal(resumeDoc.event.type, "mirql.resume");
       assert.equal(resumeDoc.event.writer.ns, "human:owner");
 
@@ -313,25 +316,25 @@ describe("End-to-End Self-Hosting Tracer Bullet (W5b hardened: full 5-binary aut
       const viewRes = runBin(BIN_MIRQL, ["l", "view", "state", "--dir", mirqlDir]);
       assert.equal(viewRes.status, 0, `View failed: ${viewRes.stderr}`);
       const stateDoc = JSON.parse(viewRes.stdout);
-      assert.equal(stateDoc.seq, 8);
+      assert.equal(stateDoc.seq, 9);
       assert.equal(stateDoc.halted, false);
 
       // The INBOX digest fold lifts the halt on mirql.resume.
       const digestResumed = JSON.parse(runBin(BIN_MIRQL, ["i", "digest", "--dir", mirqlDir]).stdout);
       assert.equal(digestResumed.halted, false);
-      assert.equal(digestResumed.seq, 8);
+      assert.equal(digestResumed.seq, 9);
 
       // =====================================================================
       // Step 8: Final full-ledger audit
       // =====================================================================
       events = readAllEvents(mirqlDir);
-      assert.equal(events.length, 8);
+      assert.equal(events.length, 9);
       const finalVerify = runBin(BIN_MIRQL, ["l", "verify", "--dir", mirqlDir]);
       assert.equal(finalVerify.status, 0, `Final verify failed: ${finalVerify.stderr}`);
       const finalAudit = JSON.parse(finalVerify.stdout);
       assert.equal(finalAudit.valid, true);
-      assert.equal(finalAudit.event_count, 8);
-      assert.equal(finalAudit.head_hash, events[7].hash);
+      assert.equal(finalAudit.event_count, 9);
+      assert.equal(finalAudit.head_hash, events[8].hash);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

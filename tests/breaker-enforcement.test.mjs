@@ -99,7 +99,7 @@ describe("circuit breakers are binding, not advisory (issue #15)", () => {
       submitWarrant(tempDir, makeValidWarrant(), { repoRoot: ROOT });
       tickQueue(tempDir);
       const store = new BreakerStore(tempDir);
-      store.trip("worker", "test_trip", recovery === "expiry" ? 600 : 60000);
+      store.trip("worker", "test_trip", recovery === "expiry" ? 2500 : 60000);
       const attempts = [];
       let onLease;
       const leased = new Promise(resolveLease => { onLease = resolveLease; });

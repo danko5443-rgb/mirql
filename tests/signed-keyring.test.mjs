@@ -1,3 +1,4 @@
+import { authorizeTestWarrant } from "./helpers/warrant.mjs";
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, cpSync, existsSync, mkdirSync } from "node:fs";
@@ -144,6 +145,7 @@ test("a damaged machine key is refused without overwriting its bytes", () => {
 });
 
 test("an unregistered supervisor key is refused before the worker command runs", () => {
+  authorizeTestWarrant(metadata, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
   const marker = join(temp, "worker-ran");
   const script = join(temp, "worker.mjs");
   writeFileSync(script, `import {writeFileSync} from "node:fs";writeFileSync(${JSON.stringify(marker)}, "ran");`);

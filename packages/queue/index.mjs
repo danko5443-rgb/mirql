@@ -1,3 +1,4 @@
+import { requireAuthorizedWarrant } from "../core/warrant.mjs";
 // packages/queue/index.mjs — Deterministic State Machine, Warrant Admission & Lease Scheduler.
 import { readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -202,7 +203,18 @@ export function submitWarrant(mirqlDir, warrantInput, options = {}) {
   return withLedgerLock(mirqlDir, () => {
     // 3. Fix B6: Enforce Warrant ID Uniqueness across entire ledger history
     const state = foldQueueState(mirqlDir);
-    if (state.warrants && state.warrants[warrantInput.id]) {
+    const existingWarrant = state.warrants?.[warrantInput.id];
+    const alreadyAdmitted = Object.values(state.jobs || {}).some(job => job.warrant_id === warrantInput.id);
+    let authorizedOnly = false;
+    if (existingWarrant && !alreadyAdmitted) {
+      try {
+        requireAuthorizedWarrant(mirqlDir, { warrant: warrantInput, nowMs: options.nowMs });
+        authorizedOnly = true;
+      } catch (error) {
+        if (error.code !== "WARRANT_UNAUTHORIZED") throw error;
+      }
+    }
+    if (existingWarrant && !authorizedOnly) {
       const errorMsg = `Policy denial: warrant ID ${warrantInput.id} already exists in ledger`;
       if (options.throwOnError) {
         const err = new Error(errorMsg);
@@ -219,7 +231,9 @@ export function submitWarrant(mirqlDir, warrantInput, options = {}) {
 
     // 4. Semantic fingerprint deduplication check
     const openWarrants = Object.values(state.warrants || {}).filter(
-      (w) => w.status === "active" || w.status === "open" || w.status === "in_progress",
+      (w) => w.id !== warrantInput.id &&
+        (w.status === "active" || w.status === "open" || w.status === "in_progress") &&
+        Object.values(state.jobs || {}).some(job => job.warrant_id === w.id),
     );
 
     const existing = openWarrants.find(

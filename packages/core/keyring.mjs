@@ -166,3 +166,48 @@ export function assertKeyEnrolled(mirqlDir, namespace, keypair) {
   const probe = signEvent({ domain: "mirql/key-possession/v1" }, keypair.privateKey, keypair.keyId);
   if (!verifyEvent(probe, publicKey).ok) throw denial("Private signing material does not match its enrolled key");
 }
+
+/** Resolve an event key only from explicitly registered namespace-bound material. */
+export function resolveRegisteredPublicKey(event, keyring, options = {}) {
+  const keyId = event?.writer?.key_id;
+  if (typeof keyId !== "string" || keyId.length === 0) return null;
+  const hasKeyring = keyring !== undefined;
+  if (hasKeyring) {
+    const raw = keyring[keyId];
+    if (raw === undefined || raw === null) {
+      return null; // key not registered in keyring: fail closed (B3)
+    }
+    let trustedKey = raw;
+    if (typeof trustedKey === "object" && !Array.isArray(trustedKey)) {
+      // Namespace-bound keyring entry: { ns, publicKey }.
+      if (
+        typeof trustedKey.ns === "string" &&
+        trustedKey.ns.length > 0 &&
+        typeof event?.writer?.ns === "string" &&
+        trustedKey.ns !== event.writer.ns
+      ) {
+        return null; // Namespace binding violation!
+      }
+      trustedKey = trustedKey.publicKey ?? trustedKey.pubkey;
+    }
+    if (typeof trustedKey !== "string" || trustedKey.length === 0) {
+      return null;
+    }
+    if (typeof options.publicKey === "string" && options.publicKey.length > 0) {
+      if (options.publicKey !== trustedKey) {
+        return null;
+      }
+    }
+    return trustedKey;
+  }
+  if (typeof options.publicKey === "string" && options.publicKey.length > 0) {
+    return options.publicKey;
+  }
+  const embeddedAllowed =
+    options.conformance === true || options.allowEmbeddedKey === true;
+  if (embeddedAllowed && keyId.startsWith("ed25519:")) {
+    const embedded = keyId.slice("ed25519:".length);
+    if (/^[A-Za-z0-9_-]{43}$/.test(embedded)) return embedded;
+  }
+  return null;
+}

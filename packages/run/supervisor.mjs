@@ -1,3 +1,4 @@
+import { requireAuthorizedWarrant } from "../core/warrant.mjs";
 import { assertKeyEnrolled } from "../core/keyring.mjs";
 import { resolveTrustRoot } from "../core/trust-root.mjs";
 import { spawn, spawnSync } from "node:child_process";
@@ -73,57 +74,8 @@ export function runSupervisor(options = {}) {
 
   try {
 
-  // 1. Resolve and validate Warrant (Law 11)
-  let warrant = null;
-  if (typeof options.warrant === "string") {
-    if (existsSync(options.warrant)) {
-      try {
-        warrant = JSON.parse(readFileSync(options.warrant, "utf8"));
-      } catch (err) {
-        throw new Error(`Unreadable warrant file: ${err.message}`);
-      }
-    } else {
-      try {
-        warrant = JSON.parse(options.warrant);
-      } catch (err) {
-        throw new Error(`Invalid warrant string: ${err.message}`);
-      }
-    }
-  } else if (options.warrant && typeof options.warrant === "object") {
-    warrant = { ...options.warrant };
-  } else if (options.warrantId) {
-    warrant = {
-      v: 1,
-      id: options.warrantId,
-      class: options.class ?? "surgical",
-      semantic_fingerprint:
-        options.semantic_fingerprint ?? sha256(`intent:${options.warrantId}`),
-      anchors: options.anchors ?? ["packages/core/**"],
-      evidence: options.evidence ?? { benchmark: 1 },
-      red_check: options.red_check ?? { test: 1 },
-      scope: options.scope ?? { allow: 1 },
-      budget_micro_usd: options.budget_micro_usd ?? 1500000,
-      created_by: options.created_by ?? "human:owner",
-    };
-  } else {
-    throw new Error("Missing required warrant parameter");
-  }
-
-  const warrantValidation = validateDocument("warrant", warrant);
-  if (!warrantValidation.valid) {
-    throw new Error(
-      `Invalid warrant document: ${JSON.stringify(warrantValidation.errors)}`,
-    );
-  }
-
-  if (
-    typeof warrant.id !== "string" ||
-    !/^[0-9A-HJKMNPQRSTVWXYZ]{26}$/.test(warrant.id)
-  ) {
-    throw new Error(
-      `Invalid warrant id "${warrant.id}": must be 26-char Crockford ULID`,
-    );
-  }
+  // Law 11: caller fields select existing authority, never create it.
+  const warrant = requireAuthorizedWarrant(mirqlDir, options);
 
   // 2. Supervisor keys are loaded from the external trust root.
   const keypair =

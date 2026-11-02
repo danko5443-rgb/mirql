@@ -1,3 +1,4 @@
+import { authorizeTestWarrant } from "./helpers/warrant.mjs";
 import { provisionTestTrust } from "./helpers/keyring.mjs";
 // tests/m1-wake.test.mjs — Milestone M1: Event-Driven Wake Rules & Concurrency 1 Gates.
 import { describe, it, beforeEach, afterEach } from "node:test";
@@ -400,6 +401,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
       writeFileSync(ledgerPath, "", "utf8");
 
       const warrant = makeValidWarrant();
+      authorizeTestWarrant(tempDir, warrant);
 
       // Start reactive supervisor wired to queue lease
       const reactive = await runSupervisorReactive({
@@ -445,6 +447,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
       const w1 = makeValidWarrant();
       const w2 = makeValidWarrant();
       const w3 = makeValidWarrant();
+      for (const warrant of [w1, w2, w3]) authorizeTestWarrant(tempDir, warrant);
       const warrantMap = new Map([
         [w1.id, w1],
         [w2.id, w2],
@@ -533,6 +536,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
 
       const wBad = makeValidWarrant();
       const wGood = makeValidWarrant();
+      authorizeTestWarrant(tempDir, wGood);
 
       // Only wGood is registered in warrant lookup: wBad returns null
       const reactive = await runSupervisorReactive({
@@ -614,6 +618,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
 
       let leaseCallCount = 0;
       const wGood = makeValidWarrant();
+      authorizeTestWarrant(tempDir, wGood);
 
       const reactive = await runSupervisorReactive({
         mirqlDir: tempDir,
