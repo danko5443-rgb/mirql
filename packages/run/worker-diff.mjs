@@ -9,7 +9,7 @@ function git(args, { cwd, env = process.env } = {}) {
     cwd, env, encoding: "utf8", timeout: 10000, maxBuffer: 8 * 1024 * 1024, windowsHide: true,
   });
   if (result.error || result.signal || result.status !== 0) {
-    throw new Error(result.error?.message ?? result.stderr?.trim() ?? "Git change measurement failed");
+    throw new Error(result.error?.message || result.stderr?.trim() || "Git change measurement failed");
   }
   return result.stdout;
 }

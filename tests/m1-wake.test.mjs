@@ -1,3 +1,4 @@
+import { initEmptyRepo } from "./helpers/git.mjs";
 import { authorizeTestWarrant } from "./helpers/warrant.mjs";
 import { provisionTestTrust } from "./helpers/keyring.mjs";
 // tests/m1-wake.test.mjs — Milestone M1: Event-Driven Wake Rules & Concurrency 1 Gates.
@@ -394,6 +395,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
   // 3. End-to-End Reactive Supervisor Loop (M1)
   // ---------------------------------------------------------------------------
   describe("3. End-to-End Reactive Supervisor Wake Loop", () => {
+    beforeEach(() => initEmptyRepo(tempDir));
     it("runSupervisorReactive wakes, leases job, executes supervisor, and writes attempt.outcome to ledger", async () => {
       const ledgerDir = join(tempDir, "ledger");
       mkdirSync(ledgerDir, { recursive: true });
@@ -406,6 +408,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
       // Start reactive supervisor wired to queue lease
       const reactive = await runSupervisorReactive({
         mirqlDir: tempDir,
+        workspaceDir: tempDir,
         debounceMs: 10,
         skipPidFile: true,
         noHeartbeatTicker: true,
@@ -456,6 +459,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
 
       const reactive = await runSupervisorReactive({
         mirqlDir: tempDir,
+        workspaceDir: tempDir,
         debounceMs: 10,
         skipPidFile: true,
         noHeartbeatTicker: true,
@@ -471,6 +475,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
 
       try {
         const outcomesReceived = [];
+        let startOutcomeDeadline;
         const outcomePromise = new Promise((resolve, reject) => {
           // Adaptive deadline: each received outcome re-arms the step timer, so
           // CPU contention from parallel test files cannot flake the
@@ -478,11 +483,13 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
           // test bounded even under pathological stall.
           const STEP_TIMEOUT_MS = 15000;
           const ABSOLUTE_CAP_MS = 45000;
-          const startedAt = Date.now();
+          let startedAt = Date.now();
+          let settled = false;
           let timeout = null;
           const armStepTimeout = () => {
             if (timeout) clearTimeout(timeout);
             timeout = setTimeout(() => {
+              settled = true;
               reject(
                 new Error(
                   `Timeout: received ${outcomesReceived.length} of 3 outcomes after ${Date.now() - startedAt}ms`,
@@ -490,14 +497,19 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
               );
             }, STEP_TIMEOUT_MS);
           };
-          armStepTimeout();
+          startOutcomeDeadline = () => { startedAt = Date.now(); armStepTimeout(); };
+          // Dispatch progress can precede the watcher reading its appended outcomes.
+          reactive.watcher.on("step", () => {
+            if (!settled && Date.now() - startedAt < ABSOLUTE_CAP_MS) armStepTimeout();
+          });
           reactive.watcher.on("event", (evt) => {
             if (evt.type === "attempt.outcome") {
               outcomesReceived.push(evt);
               if (outcomesReceived.length === 3) {
+                settled = true;
                 if (timeout) clearTimeout(timeout);
                 resolve(outcomesReceived);
-              } else if (Date.now() - startedAt < ABSOLUTE_CAP_MS) {
+              } else if (!settled && Date.now() - startedAt < ABSOLUTE_CAP_MS) {
                 armStepTimeout();
               }
             }
@@ -508,6 +520,8 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
         submitWarrant(tempDir, w1, { repoRoot: ROOT });
         submitWarrant(tempDir, w2, { repoRoot: ROOT });
         submitWarrant(tempDir, w3, { repoRoot: ROOT });
+        // Synchronous ingestion is setup, before asynchronous dispatch can progress.
+        startOutcomeDeadline();
 
         const outcomes = await outcomePromise;
         assert.equal(outcomes.length, 3);
@@ -541,6 +555,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
       // Only wGood is registered in warrant lookup: wBad returns null
       const reactive = await runSupervisorReactive({
         mirqlDir: tempDir,
+        workspaceDir: tempDir,
         debounceMs: 10,
         skipPidFile: true,
         noHeartbeatTicker: true,
@@ -622,6 +637,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
 
       const reactive = await runSupervisorReactive({
         mirqlDir: tempDir,
+        workspaceDir: tempDir,
         debounceMs: 10,
         skipPidFile: true,
         noHeartbeatTicker: true,
