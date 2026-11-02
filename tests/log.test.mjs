@@ -1635,6 +1635,30 @@ describe("Claude Opus 5.5 High Review Findings — Regression Suite", () => {
     assert.equal(budget.by_warrant["constructor"], 350);
   });
 
+  test("B6: unmeasured null cost_micro_usd appends, folds and replays (#46)", () => {
+    const dir = makeTmp();
+    const opts = { signingKey: RUN_KP.privateKey, keyId: RUN_KP.keyId, nowMs: BASE_MS };
+
+    // The supervisor writes null when cost is unmeasured (measured-or-flagged
+    // telemetry); the fold used to reject it, so l view/l replay died on the
+    // very ledger the supervisor had just appended.
+    appendEvent(
+      dir,
+      {
+        type: "attempt.outcome",
+        writer: { ns: "tool:run_supervisor" },
+        idempotency_key: "unmeasured",
+        payload: { cost_micro_usd: null, tokens_consumed: null, verdict: "reject" },
+      },
+      opts,
+    );
+
+    assert.equal(getView(dir, "budget").budget_spent_micro_usd, 0);
+    const replayed = replayCache(dir);
+    assert.equal(replayed.rebuilt, true);
+    assert.equal(replayed.state_hash, jcsHash(getView(dir, "job_state")));
+  });
+
   test("B6: negative cost and safe-integer overflow rejected", () => {
     const dir = makeTmp();
     const opts = { signingKey: RUN_KP.privateKey, keyId: RUN_KP.keyId, nowMs: BASE_MS };
