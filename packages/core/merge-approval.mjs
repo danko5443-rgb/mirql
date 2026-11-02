@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { parsePathPolicies } from "./anti-cheat.mjs";
 import { jcs } from "./jcs.mjs";
 import { validateMergeApprovalPayload } from "./schema.mjs";
 import { readVerifiedLedger } from "./ledger-verify.mjs";
@@ -12,16 +13,16 @@ function invalid(message) {
 }
 
 function git(repoDir, args) {
-  const result = spawnSync("git", ["--no-pager", "-c", "core.fsmonitor=false", ...args], {
+  const result = spawnSync("git", ["--no-replace-objects", "--no-pager", "-c", "core.fsmonitor=false", ...args], {
     cwd: repoDir, encoding: "utf8", timeout: 10000, windowsHide: true, maxBuffer: 8 * 1024 * 1024,
   });
-  if (result.error || result.signal || result.status !== 0) throw invalid("Cannot measure approval binding: " + (result.error?.message ?? result.stderr?.trim() ?? "Unknown git failure"));
+  if (result.error || result.signal || result.status !== 0) throw invalid("Cannot measure approval binding: " + (result.error?.message || result.stderr?.trim() || "Unknown git failure"));
   return result.stdout;
 }
 
 /** Capture immutable commits, their candidate tree and every changed Git path. */
-export function measureMergeBinding(options = {}) {
-  const repoDir = options.workspaceDir ?? process.cwd();
+export function measureMergeContext(options = {}) {
+  const repoDir = git(options.workspaceDir ?? process.cwd(), ["rev-parse", "--show-toplevel"]).trimEnd();
   const resolve = ref => {
     if (typeof ref !== "string" || !ref.trim()) throw invalid("Explicit base and head references are required");
     const sha = git(repoDir, ["rev-parse", "--verify", "--end-of-options", ref + "^{commit}"]).trim();
@@ -31,11 +32,24 @@ export function measureMergeBinding(options = {}) {
   const base = resolve(options.baseSha ?? options.base);
   const head = resolve(options.headSha ?? options.head);
   const tree = git(repoDir, ["rev-parse", "--verify", head + "^{tree}"]).trim();
-  const paths = [...new Set(git(repoDir, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", base, head, "--"]).split("\0").filter(Boolean))].sort();
+  const paths = [...new Set(git(repoDir, ["diff", "--no-relative", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", base, head, "--"]).split("\0").filter(Boolean))].sort();
   const binding = { warrant_id: options.warrantId, base_sha: base, head_sha: head, tree_sha: tree, paths };
   const check = validateMergeApprovalPayload(binding);
   if (!check.valid) throw invalid("Invalid merge approval binding: " + check.errors.join(", "));
-  return binding;
+  // The base policy is immutable. Candidate files and local edits cannot weaken it.
+  const entry = git(repoDir, ["ls-tree", "-z", base, "--", "policy/paths.yaml"]);
+  let policy = "";
+  if (entry) {
+    if (!/^100(?:644|755) blob [a-f0-9]+\tpolicy\/paths\.yaml\0$/.test(entry)) {
+      throw invalid("The base path policy must be a regular Git blob");
+    }
+    policy = git(repoDir, ["show", base + ":policy/paths.yaml"]);
+  }
+  return { binding, policies: parsePathPolicies(policy), repoDir };
+}
+
+export function measureMergeBinding(options = {}) {
+  return measureMergeContext(options).binding;
 }
 
 /** No caller-supplied event, signature or approval flag participates in this lookup. */
