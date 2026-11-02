@@ -1,8 +1,9 @@
-import { readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { resolve, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { EXIT_CODES } from "../core/index.mjs";
+import { EXIT_CODES, isTestFilePath, normalizePath } from "../core/index.mjs";
 import { sanitizeAgentEnv } from "./agent.mjs";
 import {
   checkAntiCheat,
@@ -11,6 +12,7 @@ import {
   checkTestWeakenings,
 } from "./anti-cheat.mjs";
 import { evaluatePhiGate } from "./phi.mjs";
+import { extractChangedLines } from "./mutant.mjs";
 
 /**
  * Verifies a candidate fix/feature across the deterministic checks (Laws 10, 13, 16):
@@ -223,24 +225,117 @@ function evaluateCheckResult(check, fixture = {}) {
  * "needs_human", rule: "MP-001" }`; deleted test files reject under MP-002;
  * other anti-cheat violations reject or escalate per their rule.
  */
+/**
+ * Canonical TAP reporter output parser (Phase 3.5).
+ */
+export function parseTapOutput(output, exitCode) {
+  const text = String(output ?? "");
+  const hasNotOk = /not ok \d+/i.test(text);
+  const hasOk = /ok \d+/i.test(text);
+  const hasFailCount = /# fail\s+[1-9]\d*/i.test(text);
+  const isCrash = /TypeError|ReferenceError|SyntaxError|RangeError|Cannot find module|MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND/i.test(text);
+  const isAssertion = /AssertionError|ERR_ASSERTION|operator:\s*['"]?[a-zA-Z]+['"]?|expected:\s*/i.test(text);
+  const isAssertionFailure = exitCode === 1 && !isCrash && (isAssertion || hasNotOk);
+  return {
+    exitCode,
+    isAssertionFailure,
+    isCrash,
+    hasNotOk,
+    hasOk,
+    hasFailCount,
+  };
+}
+
+/**
+ * V8 Coverage line execution mapper (Phase 3.3).
+ */
+export function checkV8Coverage(coverageDir, workspaceDir, changedLinesPerFile) {
+  if (!existsSync(coverageDir)) return { executedChangedLines: false, coveredFiles: [], totalCovered: 0 };
+  const coveredFiles = new Set();
+  const coveredLinesMap = new Map();
+
+  let covFiles = [];
+  try {
+    covFiles = readdirSync(coverageDir).filter(f => f.endsWith(".json"));
+  } catch {
+    return { executedChangedLines: false, coveredFiles: [], totalCovered: 0 };
+  }
+
+  for (const covFile of covFiles) {
+    try {
+      const data = JSON.parse(readFileSync(join(coverageDir, covFile), "utf8"));
+      if (!Array.isArray(data.result)) continue;
+      for (const entry of data.result) {
+        if (!entry.url || !Array.isArray(entry.functions)) continue;
+        let filePath = entry.url;
+        if (filePath.startsWith("file:///")) {
+          try { filePath = fileURLToPath(filePath); } catch { filePath = filePath.slice(8); }
+        } else if (filePath.startsWith("file://")) {
+          filePath = filePath.slice(7);
+        }
+        filePath = normalizePath(filePath);
+
+        for (const [targetRel, targetLines] of changedLinesPerFile.entries()) {
+          const normTarget = normalizePath(targetRel);
+          if (filePath.endsWith(normTarget)) {
+            const absPath = join(workspaceDir, targetRel);
+            if (!existsSync(absPath)) continue;
+            coveredFiles.add(targetRel);
+            const srcContent = readFileSync(absPath, "utf8");
+            const lineOffsets = [0];
+            for (let i = 0; i < srcContent.length; i++) {
+              if (srcContent[i] === "\n") lineOffsets.push(i + 1);
+            }
+
+            for (const fn of entry.functions) {
+              if (!Array.isArray(fn.ranges)) continue;
+              for (const range of fn.ranges) {
+                if (!range || range.count <= 0) continue;
+                for (const lineNum of targetLines) {
+                  if (lineNum < 1 || lineNum > lineOffsets.length) continue;
+                  const startOffset = lineOffsets[lineNum - 1];
+                  const endOffset = lineNum < lineOffsets.length ? lineOffsets[lineNum] - 1 : srcContent.length;
+                  if (Math.max(range.startOffset, startOffset) < Math.min(range.endOffset, endOffset)) {
+                    if (!coveredLinesMap.has(targetRel)) coveredLinesMap.set(targetRel, new Set());
+                    coveredLinesMap.get(targetRel).add(lineNum);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  let totalCovered = 0;
+  for (const set of coveredLinesMap.values()) totalCovered += set.size;
+  return {
+    executedChangedLines: totalCovered > 0,
+    coveredFiles: [...coveredFiles],
+    coveredLinesMap: Object.fromEntries([...coveredLinesMap.entries()].map(([k, v]) => [k, [...v]])),
+    totalCovered,
+  };
+}
+
+/**
+ * Executes honest causal proof against a real git repository (Phase 3).
+ */
 function verifyGitRepository(options) {
   const repoDir = options.workspaceDir ?? options.repoDir ?? process.cwd();
   const baseRef = options.baseCommit ?? options.baseSha ?? "HEAD~1";
   const headRef = options.headCommit ?? options.headSha ?? "HEAD";
-  const reproducerCmd = options.reproducerCommand ?? options.reproducer ?? "npm test";
-  const fullTestCmd = options.testCommand ?? reproducerCmd;
 
   function git(args, cwd = repoDir) {
     return spawnSync("git", args, { cwd, encoding: "utf8", timeout: 30000 });
   }
 
-  function runCmd(cmd, cwd = repoDir) {
-    // H3: never inherit the full process environment — strip secrets.
+  function runCmd(cmd, cwd = repoDir, extraEnv = {}) {
     const { env: cleanEnv } = sanitizeAgentEnv(process.env);
     const res = spawnSync(cmd, {
       shell: true,
       cwd,
-      env: cleanEnv,
+      env: { ...cleanEnv, ...extraEnv },
       encoding: "utf8",
       timeout: 30000,
     });
@@ -250,11 +345,6 @@ function verifyGitRepository(options) {
     return { exitCode: code, stdout: res.stdout, stderr: res.stderr };
   }
 
-  const isTestPath = (f) => /test|spec/i.test(f) || f.startsWith("tests/");
-
-  // Phase 0.5: resolve both refs to commit SHAs in repoDir, once. Inside the
-  // worktree HEAD moves with every checkout, so a symbolic ref like HEAD or
-  // HEAD~1 would point somewhere else on each step.
   const resolveCommit = (ref) => {
     const res = git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
     return res.error || res.status !== 0 ? null : res.stdout.trim();
@@ -272,8 +362,6 @@ function verifyGitRepository(options) {
     };
   }
 
-  // Identify files changed between base and head, including change status
-  // (H5: deletions of test files must be detectable for MP-002).
   const diffRes = git(["diff", "--name-status", baseSha, headSha]);
   if (diffRes.error || diffRes.status !== 0) {
     return {
@@ -295,7 +383,6 @@ function verifyGitRepository(options) {
     if (parts.length < 2 || !/^[A-Z]+\d*$/.test(parts[0])) continue;
     const status = parts[0][0];
     if (status === "R" || status === "C") {
-      // Rename/copy: the surviving (destination) path is the changed file.
       changeEntries.push({ status: "A", path: parts[parts.length - 1] });
     } else {
       changeEntries.push({ status, path: parts[1] });
@@ -304,10 +391,9 @@ function verifyGitRepository(options) {
 
   const allChanged = changeEntries.map((e) => e.path);
   const deletedTests = changeEntries
-    .filter((e) => e.status === "D" && isTestPath(e.path))
+    .filter((e) => e.status === "D" && isTestFilePath(e.path))
     .map((e) => e.path);
 
-  // H5: anti-cheat gate over the git diff BEFORE running the triple-execution.
   const antiCheatCheck = checkAntiCheat({
     diff_stat: { files_changed: allChanged },
     evidence: {
@@ -321,7 +407,6 @@ function verifyGitRepository(options) {
   if (!antiCheatCheck.ok) {
     return {
       verified: false,
-      // H5: touching a humanOnly path in a git diff escalates to a human.
       verdict:
         antiCheatCheck.rule === "MP-001"
           ? "needs_human"
@@ -334,11 +419,75 @@ function verifyGitRepository(options) {
     };
   }
 
-  const testFiles = allChanged.filter((f) => isTestPath(f));
+  const testFiles = allChanged.filter(isTestFilePath);
+  const nonTestFiles = allChanged.filter((f) => !isTestFilePath(f));
+  const nonTestSourceFiles = nonTestFiles.filter((f) => /\.(?:[cm]?[jt]s|jsx|tsx)$/i.test(f));
 
-  // H2: everything below runs inside a disposable worktree — the live
-  // working tree of `repoDir` is never checked out, reset, or touched.
+  // Cap non-test files to 10 for surgical causal verification; >10 escalates to human review
+  if (nonTestFiles.length > 10) {
+    return {
+      verified: false,
+      verdict: "needs_human",
+      rule: "TOO_MANY_CHANGED_FILES",
+      violation: "TOO_MANY_CHANGED_FILES",
+      detail: `Candidate modifies ${nonTestFiles.length} non-test files (cap is 10); requires human review.`,
+    };
+  }
+
+  // Determine reproducer test file (Phase 3.2 Anti-tautology exploit prevention)
+  let reproducerFile = null;
+  let reproducerCmd = null;
+
+  if (options.reproducerFile) {
+    if (!testFiles.includes(options.reproducerFile) && !options.fixture && !options.conformance) {
+      return {
+        verified: false,
+        verdict: "reject",
+        rule: "REPRODUCER_NOT_IN_DIFF",
+        violation: "REPRODUCER_NOT_IN_DIFF",
+        detail: `Specified reproducer ${options.reproducerFile} was not added or modified in the candidate diff.`,
+      };
+    }
+    reproducerFile = options.reproducerFile;
+  } else if (typeof options.reproducerCommand === "string") {
+    const m = options.reproducerCommand.match(/node\s+(?:--test\s+)?(\S+)/);
+    if (m && testFiles.includes(m[1])) {
+      reproducerFile = m[1];
+    } else if (options.fixture || options.conformance) {
+      reproducerCmd = options.reproducerCommand;
+    } else if (testFiles.length > 0) {
+      reproducerFile = testFiles[0];
+    } else if (options.allowNoTests || options.warrantClass === "refactor" || options.warrantClass === "consolidation") {
+      reproducerFile = null;
+    } else {
+      return {
+        verified: false,
+        verdict: "reject",
+        rule: "REPRODUCER_NOT_IN_DIFF",
+        violation: "REPRODUCER_NOT_IN_DIFF",
+        detail: "Caller-supplied reproducer command does not correspond to a test file in the candidate diff.",
+      };
+    }
+  } else if (testFiles.length > 0) {
+    reproducerFile = testFiles[0];
+  } else if (!options.allowNoTests && options.warrantClass !== "refactor" && options.warrantClass !== "consolidation") {
+    return {
+      verified: false,
+      verdict: "reject",
+      rule: "NO_REPRODUCER_TEST",
+      violation: "NO_REPRODUCER_TEST",
+      detail: "Candidate diff contains no added or modified test files to verify causal proof.",
+    };
+  }
+
+  if (reproducerFile) {
+    reproducerCmd = `"${process.execPath}" --test --test-reporter=tap ${reproducerFile}`;
+  } else if (!reproducerCmd) {
+    reproducerCmd = options.reproducerCommand ?? "npm test";
+  }
+
   let worktreeDir = null;
+  let covDir = null;
   try {
     worktreeDir = mkdtempSync(join(tmpdir(), "mirql-verify-wt-"));
     const addRes = git(["worktree", "add", "--detach", worktreeDir, headSha]);
@@ -356,8 +505,6 @@ function verifyGitRepository(options) {
 
     const gitWt = (args) => git(args, worktreeDir);
 
-    // Phase 0.6: a checkout that fails leaves the worktree in an unknown
-    // state, so no test result after it can be trusted.
     const checkout = (args) => {
       const res = gitWt(["checkout", ...args]);
       if (res.error || res.status !== 0) {
@@ -373,15 +520,33 @@ function verifyGitRepository(options) {
       }
       return null;
     };
+
     const checkoutBaseWithHeadTests = () =>
       checkout([baseSha, "--force"]) ??
       (testFiles.length > 0 ? checkout([headSha, "--", ...testFiles]) : null);
 
-    // 1. Red on Base: base code with the head reproducer tests retained
+    // 1. Red on Base: base code with the head reproducer test(s) retained.
+    // Phase 3.8: Determinism Sentinel (run Red twice).
     const redCheckout = checkoutBaseWithHeadTests();
     if (redCheckout !== null) return redCheckout;
-    const redRes = runCmd(reproducerCmd, worktreeDir);
-    if (!Number.isInteger(redRes.exitCode)) {
+
+    const redRes1 = runCmd(reproducerCmd, worktreeDir);
+    const redRes2 = runCmd(reproducerCmd, worktreeDir);
+
+    if (redRes1.exitCode !== redRes2.exitCode) {
+      return {
+        verified: false,
+        verdict: "reject",
+        rule: "FLAKY_REPRODUCER",
+        violation: "FLAKY_REPRODUCER",
+        detail: `Red-on-base reproducer is non-deterministic (run 1: exit ${redRes1.exitCode}, run 2: exit ${redRes2.exitCode}).`,
+        checks: {
+          red_on_base: { passed: false, exitCode1: redRes1.exitCode, exitCode2: redRes2.exitCode },
+        },
+      };
+    }
+
+    if (!Number.isInteger(redRes1.exitCode)) {
       return {
         verified: false,
         verdict: "reject",
@@ -390,102 +555,176 @@ function verifyGitRepository(options) {
         detail: "Red-on-base reproducer returned non-integer exit code.",
       };
     }
-    if (redRes.exitCode === 0) {
+
+    if (redRes1.exitCode === 0) {
       return {
         verified: false,
         verdict: "reject",
         rule: "RED_ON_BASE_FAILED",
         violation: "RED_ON_BASE_FAILED",
-        detail: `Reproducer passed on base commit (must fail on base). stdout: ${redRes.stdout}, stderr: ${redRes.stderr}`,
-        checks: { red_on_base: { passed: false, exitCode: redRes.exitCode } },
+        detail: `Reproducer passed on base commit (must fail on base). stdout: ${redRes1.stdout}, stderr: ${redRes1.stderr}`,
+        checks: { red_on_base: { passed: false, exitCode: redRes1.exitCode } },
       };
     }
-    if (redRes.exitCode !== 1) {
+
+    const tapRed = parseTapOutput(redRes1.stdout + "\n" + redRes1.stderr, redRes1.exitCode);
+    if (!tapRed.isAssertionFailure) {
       return {
         verified: false,
         verdict: "reject",
         rule: "RED_ON_BASE_CRASH",
         violation: "RED_ON_BASE_CRASH",
-        detail: `Reproducer crashed on base with exit code ${redRes.exitCode}; assertion failure (exit 1) required.`,
-        checks: { red_on_base: { passed: false, exitCode: redRes.exitCode } },
+        detail: `Reproducer crashed on base with exit code ${redRes1.exitCode}; assertion failure (exit 1) required.`,
+        checks: { red_on_base: { passed: false, exitCode: redRes1.exitCode, isCrash: tapRed.isCrash } },
       };
     }
 
-    // 2. Green on Head: full head state
+    // 2. Green on Head: full head state.
+    // Phase 3.3: Run with V8 Coverage.
     const greenCheckout = checkout([headSha, "--force"]);
     if (greenCheckout !== null) return greenCheckout;
-    const greenRes = runCmd(fullTestCmd, worktreeDir);
-    if (!Number.isInteger(greenRes.exitCode) || greenRes.exitCode !== 0) {
+
+    covDir = mkdtempSync(join(tmpdir(), "mirql-v8cov-"));
+    const greenRes1 = runCmd(reproducerCmd, worktreeDir, { NODE_V8_COVERAGE: covDir });
+
+    if (!Number.isInteger(greenRes1.exitCode) || greenRes1.exitCode !== 0) {
       return {
         verified: false,
         verdict: "reject",
         rule: "GREEN_ON_HEAD_FAILED",
         violation: "GREEN_ON_HEAD_FAILED",
-        detail: "Full test suite failed on head commit (must pass on head).",
+        detail: `Reproducer failed on head commit (exit ${greenRes1.exitCode}; exit 0 required).`,
         checks: {
-          red_on_base: { passed: true, exitCode: 1 },
-          green_on_head: { passed: false, exitCode: greenRes.exitCode },
+          red_on_base: { passed: true, exitCode: 1, runs: 2 },
+          green_on_head: { passed: false, exitCode: greenRes1.exitCode },
         },
       };
     }
 
-    // 2b. Flake Sentinel: repeat head test to guarantee determinism (M4 Invariant)
-    const flakeRep = runCmd(fullTestCmd, worktreeDir);
-    if (!Number.isInteger(flakeRep.exitCode) || flakeRep.exitCode !== 0) {
+    // Phase 3.8: Determinism Sentinel (repeat Green).
+    const greenRes2 = runCmd(reproducerCmd, worktreeDir);
+    if (!Number.isInteger(greenRes2.exitCode) || greenRes2.exitCode !== 0) {
       return {
         verified: false,
         verdict: "reject",
         rule: "NON_DETERMINISTIC_TEST",
         violation: "NON_DETERMINISTIC_TEST",
-        detail: "Flake sentinel: test passed initially on head but failed on repetition (non-deterministic outcome).",
+        detail: "Flake sentinel: reproducer passed initially on head but failed on repetition (non-deterministic outcome).",
         checks: {
-          red_on_base: { passed: true, exitCode: 1 },
+          red_on_base: { passed: true, exitCode: 1, runs: 2 },
           green_on_head: { passed: true, exitCode: 0 },
-          flake_sentinel: { passed: false, exitCode: flakeRep.exitCode },
+          flake_sentinel: { passed: false, exitCode: greenRes2.exitCode },
         },
       };
     }
 
-    // 3. Re-Red: revert every non-test change (base code + head tests). A
-    // full base checkout handles added AND deleted non-test files correctly.
-    const reRedCheckout = checkoutBaseWithHeadTests();
-    if (reRedCheckout !== null) return reRedCheckout;
-    const reRedRes = runCmd(reproducerCmd, worktreeDir);
-    if (!Number.isInteger(reRedRes.exitCode)) {
+    // Phase 3.4: Full Test Suite
+    const hasPackageJson = existsSync(join(worktreeDir, "package.json"));
+    const fullTestCmd = options.testCommand ?? (hasPackageJson ? "npm test" : reproducerCmd);
+    const fullRes = runCmd(fullTestCmd, worktreeDir);
+    if (!Number.isInteger(fullRes.exitCode) || fullRes.exitCode !== 0) {
       return {
         verified: false,
         verdict: "reject",
-        rule: "NON_INTEGER_EXIT_CODE",
-        violation: "NON_INTEGER_EXIT_CODE",
-        detail: "Re-red reproducer returned non-integer exit code.",
-      };
-    }
-    if (reRedRes.exitCode === 0) {
-      return {
-        verified: false,
-        verdict: "reject",
-        rule: "RE_RED_FAILED",
-        violation: "RE_RED_FAILED",
-        detail:
-          "Re-red patch-reversal check failed: reproducer still passed when src/ was reverted (tautological test).",
+        rule: "GREEN_ON_HEAD_FAILED",
+        violation: "GREEN_ON_HEAD_FAILED",
+        detail: `Full test suite failed on head commit (exit ${fullRes.exitCode}; exit 0 required).`,
         checks: {
-          red_on_base: { passed: true, exitCode: 1 },
-          green_on_head: { passed: true, exitCode: 0 },
-          re_red_on_revert: { passed: false, exitCode: reRedRes.exitCode },
+          red_on_base: { passed: true, exitCode: 1, runs: 2 },
+          green_on_head: { passed: true, exitCode: 0, runs: 2 },
+          full_suite: { passed: false, exitCode: fullRes.exitCode },
         },
       };
     }
-    if (reRedRes.exitCode !== 1) {
+
+    // Phase 3.3: V8 Coverage Analysis
+    const changedLinesMap = new Map();
+    for (const f of nonTestSourceFiles) {
+      const diffOut = gitWt(["diff", "-U0", baseSha, headSha, "--", f]);
+      if (diffOut.status === 0 && diffOut.stdout) {
+        changedLinesMap.set(f, extractChangedLines(diffOut.stdout));
+      }
+    }
+
+    let coverageReport = null;
+    if (nonTestSourceFiles.length > 0) {
+      coverageReport = checkV8Coverage(covDir, worktreeDir, changedLinesMap);
+      let totalChangedLines = 0;
+      for (const set of changedLinesMap.values()) totalChangedLines += set.size;
+
+      if (totalChangedLines > 0 && !coverageReport.executedChangedLines) {
+        return {
+          verified: false,
+          verdict: "reject",
+          rule: "REPRODUCER_IRRELEVANT",
+          violation: "REPRODUCER_IRRELEVANT",
+          detail: "Reproducer executed zero modified lines in the changed source files.",
+          checks: {
+            red_on_base: { passed: true, exitCode: 1, runs: 2 },
+            green_on_head: { passed: true, exitCode: 0, runs: 2 },
+            coverage: { passed: false, covered_files: coverageReport.coveredFiles },
+          },
+        };
+      }
+    }
+
+    // Phase 3.1: Necessity Check (replacing Re-Red)
+    const necessaryFiles = [];
+    const unnecessaryFiles = [];
+
+    for (const f of nonTestFiles) {
+      const revCheck = checkout([baseSha, "--", f]);
+      if (revCheck !== null) return revCheck;
+
+      const revRes = runCmd(reproducerCmd, worktreeDir);
+      const tapRev = parseTapOutput(revRes.stdout + "\n" + revRes.stderr, revRes.exitCode);
+
+      if (tapRev.isAssertionFailure) {
+        necessaryFiles.push(f);
+      } else {
+        unnecessaryFiles.push(f);
+      }
+
+      const restCheck = checkout([headSha, "--", f]);
+      if (restCheck !== null) return restCheck;
+    }
+
+    if (nonTestFiles.length > 0 && necessaryFiles.length === 0) {
       return {
         verified: false,
         verdict: "reject",
         rule: "RE_RED_FAILED",
         violation: "RE_RED_FAILED",
-        detail: `Re-red reproducer failed with crash (exit ${reRedRes.exitCode}) instead of test assertion failure (exit 1).`,
+        detail: "Necessity check failed: reproducer still passed when each non-test file was reverted (tautological or disconnected test).",
         checks: {
-          red_on_base: { passed: true, exitCode: 1 },
-          green_on_head: { passed: true, exitCode: 0 },
-          re_red_on_revert: { passed: false, exitCode: reRedRes.exitCode },
+          red_on_base: { passed: true, exitCode: 1, runs: 2 },
+          green_on_head: { passed: true, exitCode: 0, runs: 2 },
+          necessity_check: {
+            passed: false,
+            tested_files: nonTestFiles,
+            necessary_files: [],
+            unnecessary_files: unnecessaryFiles,
+          },
+        },
+      };
+    }
+
+    if (unnecessaryFiles.length > 0 && (options.warrantClass === "surgical" || options.surgical === true)) {
+      return {
+        verified: false,
+        verdict: "reject",
+        rule: "UNNECESSARY_CHANGE",
+        violation: "UNNECESSARY_CHANGE",
+        detail: `Surgical warrant violated: unnecessary changed files detected: ${unnecessaryFiles.join(", ")}`,
+        checks: {
+          red_on_base: { passed: true, exitCode: 1, runs: 2 },
+          green_on_head: { passed: true, exitCode: 0, runs: 2 },
+          necessity_check: {
+            passed: false,
+            tested_files: nonTestFiles,
+            necessary_files: necessaryFiles,
+            unnecessary_files: unnecessaryFiles,
+          },
         },
       };
     }
@@ -496,27 +735,34 @@ function verifyGitRepository(options) {
       rule: "MP-000",
       proof: {
         causal_cycle_completed: true,
-        base_fail_runs: 1,
-        head_pass_runs: 1,
-        re_red_runs: 1,
+        base_fail_runs: 2,
+        head_pass_runs: 2,
+        full_suite_passed: true,
+        reproducer_relevant: coverageReport ? coverageReport.executedChangedLines : true,
+        necessity_check: {
+          tested_files: nonTestFiles,
+          necessary_files: necessaryFiles,
+          unnecessary_files: unnecessaryFiles,
+        },
       },
       checks: {
-        red_on_base: { passed: true, exitCode: 1 },
-        green_on_head: { passed: true, exitCode: 0 },
-        re_red_on_revert: { passed: true, exitCode: 1 },
+        red_on_base: { passed: true, exitCode: 1, runs: 2 },
+        green_on_head: { passed: true, exitCode: 0, runs: 2 },
+        necessity_check: {
+          passed: nonTestFiles.length === 0 || necessaryFiles.length > 0,
+          necessary_count: necessaryFiles.length,
+          unnecessary_count: unnecessaryFiles.length,
+        },
         anti_cheat: { passed: true, violations_count: 0 },
       },
     };
   } finally {
-    // H2: always dispose of the disposable worktree. The live working tree
-    // was never touched, so no restore checkout is needed.
+    if (covDir !== null) {
+      try { rmSync(covDir, { recursive: true, force: true }); } catch {}
+    }
     if (worktreeDir !== null) {
-      try {
-        git(["worktree", "remove", "--force", worktreeDir]);
-      } catch {}
-      try {
-        rmSync(worktreeDir, { recursive: true, force: true });
-      } catch {}
+      try { git(["worktree", "remove", "--force", worktreeDir]); } catch {}
+      try { rmSync(worktreeDir, { recursive: true, force: true }); } catch {}
     }
   }
 }
@@ -606,210 +852,99 @@ function verifyExecutionAttempt(options = {}) {
     return verifyGitRepository(options);
   }
 
-  // D. Execution verification stages via runCheck callback
+  // D. Execution verification stages via runCheck callback (Phase 3.7: unified pipeline)
   if (typeof options.runCheck === "function") {
     const runCheck = options.runCheck;
-
-    const baseResult = runCheck({ stage: "red_on_base" });
-    if (baseResult && typeof baseResult.then === "function") {
-      return (async () => {
-        const base = await baseResult;
-        if (!base || base.exitCode === null || !Number.isInteger(base.exitCode)) {
-          return {
-            verified: false,
-            verdict: "reject",
-            rule: "NON_INTEGER_EXIT_CODE",
-            violation: "NON_INTEGER_EXIT_CODE",
-            detail: "Red-on-base check returned null or non-integer exit code.",
-          };
-        }
-        if (base.exitCode === 0) {
-          return {
-            verified: false,
-            verdict: "reject",
-            rule: "RED_ON_BASE_FAILED",
-            violation: "RED_ON_BASE_FAILED",
-            detail: "Reproducer passed on base commit (must fail on base).",
-            checks: { red_on_base: { passed: false, exitCode: base.exitCode } },
-          };
-        }
-        if (base.exitCode !== 1) {
-          return {
-            verified: false,
-            verdict: "reject",
-            rule: "RED_ON_BASE_CRASH",
-            violation: "RED_ON_BASE_CRASH",
-            detail: `A crash on base is not a valid red: exit code ${base.exitCode} (assertion failure exit 1 required).`,
-            checks: { red_on_base: { passed: false, exitCode: base.exitCode } },
-          };
-        }
-
-        const head = await runCheck({ stage: "green_on_head" });
-        if (!head || head.exitCode === null || !Number.isInteger(head.exitCode) || head.exitCode !== 0) {
-          return {
-            verified: false,
-            verdict: "reject",
-            rule: "GREEN_ON_HEAD_FAILED",
-            violation: "GREEN_ON_HEAD_FAILED",
-            detail: "Test suite failed on head commit (must pass on head).",
-            checks: {
-              red_on_base: { passed: true, exitCode: base.exitCode },
-              green_on_head: { passed: false, exitCode: head?.exitCode },
-            },
-          };
-        }
-
-        const reRed = await runCheck({ stage: "re_red_on_revert" });
-        if (!reRed || reRed.exitCode === null || !Number.isInteger(reRed.exitCode)) {
-          return {
-            verified: false,
-            verdict: "reject",
-            rule: "NON_INTEGER_EXIT_CODE",
-            violation: "NON_INTEGER_EXIT_CODE",
-            detail: "Re-red check returned null or non-integer exit code.",
-          };
-        }
-        if (reRed.exitCode === 0) {
-          return {
-            verified: false,
-            verdict: "reject",
-            rule: "RE_RED_FAILED",
-            violation: "RE_RED_FAILED",
-            detail:
-              "Re-red patch-reversal check failed: reproducer still passed when src/ was reverted (tautological test).",
-            checks: {
-              red_on_base: { passed: true, exitCode: base.exitCode },
-              green_on_head: { passed: true, exitCode: head.exitCode },
-              re_red_on_revert: { passed: false, exitCode: reRed.exitCode },
-            },
-          };
-        }
-        if (reRed.exitCode !== 1) {
-          return {
-            verified: false,
-            verdict: "reject",
-            rule: "RE_RED_FAILED",
-            violation: "RE_RED_FAILED",
-            detail: `Re-red reproducer did not fail with test assertion failure (exit 1, got ${reRed.exitCode}).`,
-            checks: {
-              red_on_base: { passed: true, exitCode: base.exitCode },
-              green_on_head: { passed: true, exitCode: head.exitCode },
-              re_red_on_revert: { passed: false, exitCode: reRed.exitCode },
-            },
-          };
-        }
-
+    const step = (stage) => runCheck({ stage });
+    const checkRed = (base) => {
+      if (!base || base.exitCode === null || !Number.isInteger(base.exitCode)) {
         return {
-          verified: true,
-          verdict: "auto_merge",
-          rule: "MP-000",
-          proof: {
-            causal_cycle_completed: true,
-            base_fail_runs: 1,
-            head_pass_runs: 1,
-            re_red_runs: 1,
+          verified: false,
+          verdict: "reject",
+          rule: "NON_INTEGER_EXIT_CODE",
+          violation: "NON_INTEGER_EXIT_CODE",
+          detail: "Red-on-base check returned null or non-integer exit code.",
+        };
+      }
+      if (base.exitCode === 0) {
+        return {
+          verified: false,
+          verdict: "reject",
+          rule: "RED_ON_BASE_FAILED",
+          violation: "RED_ON_BASE_FAILED",
+          detail: "Reproducer passed on base commit (must fail on base).",
+          checks: { red_on_base: { passed: false, exitCode: base.exitCode } },
+        };
+      }
+      if (base.exitCode !== 1) {
+        return {
+          verified: false,
+          verdict: "reject",
+          rule: "RED_ON_BASE_CRASH",
+          violation: "RED_ON_BASE_CRASH",
+          detail: `A crash on base is not a valid red: exit code ${base.exitCode} (assertion failure exit 1 required).`,
+          checks: { red_on_base: { passed: false, exitCode: base.exitCode } },
+        };
+      }
+      return null;
+    };
+    const checkHead = (base, head) => {
+      if (!head || head.exitCode === null || !Number.isInteger(head.exitCode) || head.exitCode !== 0) {
+        return {
+          verified: false,
+          verdict: "reject",
+          rule: "GREEN_ON_HEAD_FAILED",
+          violation: "GREEN_ON_HEAD_FAILED",
+          detail: "Test suite failed on head commit (must pass on head).",
+          checks: {
+            red_on_base: { passed: true, exitCode: base.exitCode },
+            green_on_head: { passed: false, exitCode: head?.exitCode },
           },
+        };
+      }
+      return null;
+    };
+    const checkReRed = (base, head, reRed) => {
+      if (!reRed || reRed.exitCode === null || !Number.isInteger(reRed.exitCode)) {
+        return {
+          verified: false,
+          verdict: "reject",
+          rule: "NON_INTEGER_EXIT_CODE",
+          violation: "NON_INTEGER_EXIT_CODE",
+          detail: "Re-red check returned null or non-integer exit code.",
+        };
+      }
+      if (reRed.exitCode === 0) {
+        return {
+          verified: false,
+          verdict: "reject",
+          rule: "RE_RED_FAILED",
+          violation: "RE_RED_FAILED",
+          detail: "Re-red patch-reversal check failed: reproducer still passed when src/ was reverted (tautological test).",
           checks: {
             red_on_base: { passed: true, exitCode: base.exitCode },
             green_on_head: { passed: true, exitCode: head.exitCode },
-            re_red_on_revert: { passed: true, exitCode: reRed.exitCode },
-            anti_cheat: { passed: true, violations_count: 0 },
+            re_red_on_revert: { passed: false, exitCode: reRed.exitCode },
           },
         };
-      })();
-    }
-
-    // Synchronous execution branch
-    if (!baseResult || baseResult.exitCode === null || !Number.isInteger(baseResult.exitCode)) {
-      return {
-        verified: false,
-        verdict: "reject",
-        rule: "NON_INTEGER_EXIT_CODE",
-        violation: "NON_INTEGER_EXIT_CODE",
-        detail: "Red-on-base check returned null or non-integer exit code.",
-      };
-    }
-    if (baseResult.exitCode === 0) {
-      return {
-        verified: false,
-        verdict: "reject",
-        rule: "RED_ON_BASE_FAILED",
-        violation: "RED_ON_BASE_FAILED",
-        detail: "Reproducer passed on base commit (must fail on base).",
-        checks: {
-          red_on_base: { passed: false, exitCode: baseResult.exitCode },
-        },
-      };
-    }
-    if (baseResult.exitCode !== 1) {
-      return {
-        verified: false,
-        verdict: "reject",
-        rule: "RED_ON_BASE_CRASH",
-        violation: "RED_ON_BASE_CRASH",
-        detail: `A crash on base is not a valid red: exit code ${baseResult.exitCode} (assertion failure exit 1 required).`,
-        checks: {
-          red_on_base: { passed: false, exitCode: baseResult.exitCode },
-        },
-      };
-    }
-
-    const headResult = runCheck({ stage: "green_on_head" });
-    if (!headResult || headResult.exitCode === null || !Number.isInteger(headResult.exitCode) || headResult.exitCode !== 0) {
-      return {
-        verified: false,
-        verdict: "reject",
-        rule: "GREEN_ON_HEAD_FAILED",
-        violation: "GREEN_ON_HEAD_FAILED",
-        detail: "Test suite failed on head commit (must pass on head).",
-        checks: {
-          red_on_base: { passed: true, exitCode: baseResult.exitCode },
-          green_on_head: { passed: false, exitCode: headResult?.exitCode },
-        },
-      };
-    }
-
-    const reRedResult = runCheck({ stage: "re_red_on_revert" });
-    if (!reRedResult || reRedResult.exitCode === null || !Number.isInteger(reRedResult.exitCode)) {
-      return {
-        verified: false,
-        verdict: "reject",
-        rule: "NON_INTEGER_EXIT_CODE",
-        violation: "NON_INTEGER_EXIT_CODE",
-        detail: "Re-red check returned null or non-integer exit code.",
-      };
-    }
-    if (reRedResult.exitCode === 0) {
-      return {
-        verified: false,
-        verdict: "reject",
-        rule: "RE_RED_FAILED",
-        violation: "RE_RED_FAILED",
-        detail:
-          "Re-red patch-reversal check failed: reproducer still passed when src/ was reverted (tautological test).",
-        checks: {
-          red_on_base: { passed: true, exitCode: baseResult.exitCode },
-          green_on_head: { passed: true, exitCode: headResult.exitCode },
-          re_red_on_revert: { passed: false, exitCode: reRedResult.exitCode },
-        },
-      };
-    }
-    if (reRedResult.exitCode !== 1) {
-      return {
-        verified: false,
-        verdict: "reject",
-        rule: "RE_RED_FAILED",
-        violation: "RE_RED_FAILED",
-        detail: `Re-red reproducer did not fail with test assertion failure (exit 1, got ${reRedResult.exitCode}).`,
-        checks: {
-          red_on_base: { passed: true, exitCode: baseResult.exitCode },
-          green_on_head: { passed: true, exitCode: headResult.exitCode },
-          re_red_on_revert: { passed: false, exitCode: reRedResult.exitCode },
-        },
-      };
-    }
-
-    return {
+      }
+      if (reRed.exitCode !== 1) {
+        return {
+          verified: false,
+          verdict: "reject",
+          rule: "RE_RED_FAILED",
+          violation: "RE_RED_FAILED",
+          detail: `Re-red reproducer did not fail with test assertion failure (exit 1, got ${reRed.exitCode}).`,
+          checks: {
+            red_on_base: { passed: true, exitCode: base.exitCode },
+            green_on_head: { passed: true, exitCode: head.exitCode },
+            re_red_on_revert: { passed: false, exitCode: reRed.exitCode },
+          },
+        };
+      }
+      return null;
+    };
+    const success = (base, head, reRed) => ({
       verified: true,
       verdict: "auto_merge",
       rule: "MP-000",
@@ -820,12 +955,38 @@ function verifyExecutionAttempt(options = {}) {
         re_red_runs: 1,
       },
       checks: {
-        red_on_base: { passed: true, exitCode: baseResult.exitCode },
-        green_on_head: { passed: true, exitCode: headResult.exitCode },
-        re_red_on_revert: { passed: true, exitCode: reRedResult.exitCode },
+        red_on_base: { passed: true, exitCode: base.exitCode },
+        green_on_head: { passed: true, exitCode: head.exitCode },
+        re_red_on_revert: { passed: true, exitCode: reRed.exitCode },
         anti_cheat: { passed: true, violations_count: 0 },
       },
-    };
+    });
+
+    const firstResult = step("red_on_base");
+    if (firstResult && typeof firstResult.then === "function") {
+      return (async () => {
+        const base = await firstResult;
+        const errBase = checkRed(base);
+        if (errBase) return errBase;
+        const head = await step("green_on_head");
+        const errHead = checkHead(base, head);
+        if (errHead) return errHead;
+        const reRed = await step("re_red_on_revert");
+        const errReRed = checkReRed(base, head, reRed);
+        if (errReRed) return errReRed;
+        return success(base, head, reRed);
+      })();
+    }
+
+    const errBase = checkRed(firstResult);
+    if (errBase) return errBase;
+    const head = step("green_on_head");
+    const errHead = checkHead(firstResult, head);
+    if (errHead) return errHead;
+    const reRed = step("re_red_on_revert");
+    const errReRed = checkReRed(firstResult, head, reRed);
+    if (errReRed) return errReRed;
+    return success(firstResult, head, reRed);
   }
 
   // B1: Fail closed if no runner/callback or proof is provided!

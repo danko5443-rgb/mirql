@@ -148,15 +148,7 @@ export function resolveDeltaPhi(doc = {}) {
  * @param {string} p
  * @returns {boolean}
  */
-export function isTestFilePath(p) {
-  const norm = normalizePath(p);
-  return (
-    norm.startsWith("tests/") ||
-    norm.startsWith("test/") ||
-    norm.includes(".test.") ||
-    norm.includes("_test.")
-  );
-}
+export { isTestFilePath } from '../core/index.mjs';
 
 /**
  * Files that steer an aiReviewers account: CodeRabbit config, AGENTS.md (Codex
