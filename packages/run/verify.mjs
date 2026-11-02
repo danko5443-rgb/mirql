@@ -582,8 +582,22 @@ function verifyGitRepository(options) {
     const necessaryFiles = [];
     const unnecessaryFiles = [];
 
+    const restorePath = (commit, file) => {
+      const entry = gitWt(["ls-tree", "-z", commit, "--", file]);
+      if (entry.error || entry.status !== 0) {
+        return { verified: false, verdict: "reject", rule: "CHECKOUT_FAILED",
+          violation: "CHECKOUT_FAILED", detail: "Cannot measure the rollback path in its Git tree." };
+      }
+      if (entry.stdout) return checkout([commit, "--", file]);
+      // An addition has no base blob; a deletion has no head blob. Restore absence.
+      const remove = gitWt(["rm", "--force", "--ignore-unmatch", "--", file]);
+      return remove.error || remove.status !== 0
+        ? { verified: false, verdict: "reject", rule: "CHECKOUT_FAILED",
+            violation: "CHECKOUT_FAILED", detail: "Cannot restore an absent rollback path." }
+        : null;
+    };
     for (const f of nonTestFiles) {
-      const revCheck = checkout([baseSha, "--", f]);
+      const revCheck = restorePath(baseSha, f);
       if (revCheck !== null) return revCheck;
 
       const revRes = runReproducer(worktreeDir);
@@ -591,11 +605,16 @@ function verifyGitRepository(options) {
 
       if (tapRev.isAssertionFailure) {
         necessaryFiles.push(f);
-      } else {
+      } else if (revRes.exitCode === 0 && !revRes.timedOut) {
         unnecessaryFiles.push(f);
+      } else {
+        const rule = revRes.timedOut ? "NECESSITY_CHECK_TIMEOUT" : "NECESSITY_CHECK_CRASH";
+        return { verified: false, verdict: "reject", rule, violation: rule,
+          detail: `Rollback of ${f} did not produce a passing test or a genuine assertion failure.`,
+          checks: { necessity_check: { passed: false, file: f, exitCode: revRes.exitCode } } };
       }
 
-      const restCheck = checkout([headSha, "--", f]);
+      const restCheck = restorePath(headSha, f);
       if (restCheck !== null) return restCheck;
     }
 
