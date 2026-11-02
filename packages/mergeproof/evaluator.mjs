@@ -158,6 +158,13 @@ export function isTestFilePath(p) {
   );
 }
 
+const REVIEWER_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/;
+
+/** Returns the reviewer login if it is a plausible GitHub login, else null. */
+function validReviewerLogin(login) {
+  return typeof login === "string" && REVIEWER_LOGIN_RE.test(login) ? login : null;
+}
+
 const GIT_SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
 
 /**
@@ -261,6 +268,10 @@ export function getGitDiffFiles(baseSha, headSha, repoDir = process.cwd()) {
  * - `humanApproved`  — ignored since Phase 0.3: no boolean unlocks MP-005;
  *                      signed approvals arrive in Phase 2
  * - `repoDir`        — directory of git repository to cross-check diffs against reality (Law 7)
+ * - `humanOnlyReviewer` — login of an aiReviewers account that approved the
+ *                      head commit (looked up by CI from the GitHub API). It
+ *                      lets a humanOnly PR continue through every other rule;
+ *                      the best verdict is then needs_human, never auto_merge.
  *
  * @param {object} prDoc PR fixture or outcome document
  * @param {object} [options]
@@ -326,8 +337,11 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
   const forbidden = filesChanged.filter((f) =>
     isHumanOnlyPath(f, policies.humanOnly),
   );
+  const humanOnlyReviewer = validReviewerLogin(options.humanOnlyReviewer);
   if (forbidden.length > 0) {
     checks.human_only = false;
+  }
+  if (forbidden.length > 0 && !humanOnlyReviewer) {
     return fail(
       "MP-001",
       "TOUCH_HUMAN_ONLY",
@@ -584,6 +598,16 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
       "needs_human",
       "Suite passes on base and head, but no causal proof (red-green-re-red) was measured; human review required.",
       { checks },
+    );
+  }
+
+  if (forbidden.length > 0) {
+    return fail(
+      "MP-001",
+      "TOUCH_HUMAN_ONLY",
+      "needs_human",
+      `humanOnly path(s) [${forbidden.join(", ")}] approved by ${humanOnlyReviewer}; all other rules passed; merge is manual, never auto_merge.`,
+      { checks, forbidden_paths: forbidden, human_only_reviewer: humanOnlyReviewer },
     );
   }
 

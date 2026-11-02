@@ -3,9 +3,17 @@ name: Mergeproof External Notary
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  # Re-evaluate when an AI reviewer approves (or an approval is dismissed).
+  pull_request_review:
+    types: [submitted, dismissed]
 
 permissions:
   contents: read
+  pull-requests: read
+
+concurrency:
+  group: mergeproof-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   notary:
@@ -93,22 +101,51 @@ jobs:
             node candidate/scripts/ci-evidence.mjs
           fi
 
+      # MP-001: a humanOnly PR may proceed only with an Approve review on the
+      # exact head commit from an aiReviewers account in the BASE policy. The
+      # notary then runs every other rule, capped at needs_human. Skipped while
+      # base has no ci-review-gate.mjs (bootstrap).
+      - name: Find AI Reviewer Approval (Base Policy)
+        id: ai_review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_NOTARY_DIR: ./base-notary
+          REVIEWS_PATH: ./reviews.jsonl
+        run: |
+          if [ -f base-notary/scripts/ci-review-gate.mjs ]; then
+            gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews" --jq '.[]' > "$REVIEWS_PATH"
+            node base-notary/scripts/ci-review-gate.mjs
+          else
+            echo "::notice::base-notary has no ci-review-gate.mjs yet; AI approvals are not considered"
+          fi
+
       - name: Evaluate Mergeproof Notary Gate (Base-Authored Conscience)
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          AI_APPROVER: ${{ steps.ai_review.outputs.approver }}
         working-directory: candidate
         # Only auto_merge exits 0, and CI cannot reach auto_merge until a
-        # measured causal proof exists (Phase 3). needs_human and
+        # measured causal proof exists (Phase 3). A humanOnly PR approved by an
+        # aiReviewers account is capped at needs_human. needs_human and
         # conformance_pass therefore pass this check with a notice: the main
         # ruleset (Phase 0.0c) requires a human review on every PR. A reject or
         # any other failure fails the check.
         run: |
+          reviewer_args=()
+          if [ -n "$AI_APPROVER" ]; then
+            reviewer_args=(--human-only-reviewer "$AI_APPROVER")
+          fi
           set +e
           node ../base-notary/bin/mirql.mjs m check \
             --pr ./pr-doc.json \
             --base "$BASE_SHA" \
-            --head "$HEAD_SHA" > verdict.json
+            --head "$HEAD_SHA" \
+            "${reviewer_args[@]}" > verdict.json
           status=$?
           set -e
           cat verdict.json

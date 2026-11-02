@@ -15,6 +15,7 @@ export const DEFAULT_HUMAN_ONLY_PATTERNS = Object.freeze([
   ".github/**",
   "scripts/**",
   "bin/**",
+  ".coderabbit.yaml",
 ]);
 
 /**
@@ -86,11 +87,12 @@ export function isPathMatchingPattern(normalizedPath, pattern) {
  * Loads path policies from <rootDir>/policy/paths.yaml, falling back to canonical defaults.
  *
  * @param {string} [rootDir=process.cwd()]
- * @returns {{ humanOnly: string[], humanApprove: string[] }}
+ * @returns {{ humanOnly: string[], humanApprove: string[], aiReviewers: string[] }}
  */
 export function loadPathPolicies(rootDir = process.cwd()) {
   const humanOnly = [];
   const humanApprove = [];
+  const aiReviewers = [];
   const pathsFile = join(rootDir, "policy", "paths.yaml");
 
   if (existsSync(pathsFile)) {
@@ -108,11 +110,21 @@ export function loadPathPolicies(rootDir = process.cwd()) {
           currentSection = "humanApprove";
           continue;
         }
+        if (trimmed.startsWith("aiReviewers:")) {
+          currentSection = "aiReviewers";
+          continue;
+        }
+        // Any other top-level key ends the current list.
+        if (/^[A-Za-z_][\w-]*:/.test(trimmed)) {
+          currentSection = null;
+          continue;
+        }
         if (trimmed.startsWith("-")) {
           const val = trimmed.replace(/^-\s*/, "").replace(/["']/g, "").trim();
           if (val) {
             if (currentSection === "humanOnly") humanOnly.push(val);
             else if (currentSection === "humanApprove") humanApprove.push(val);
+            else if (currentSection === "aiReviewers") aiReviewers.push(val);
           }
         }
       }
@@ -126,7 +138,7 @@ export function loadPathPolicies(rootDir = process.cwd()) {
     if (!humanApprove.includes(def)) humanApprove.push(def);
   }
 
-  return { humanOnly, humanApprove };
+  return { humanOnly, humanApprove, aiReviewers };
 }
 
 /**

@@ -1,6 +1,10 @@
 # Path Access Matrix for mirql
-# humanOnly: Files that autonomous agents are strictly forbidden from touching. Any PR modifying these is rejected (MP-001).
+# humanOnly: Files that autonomous agents are strictly forbidden from touching. Any PR modifying these is rejected (MP-001),
+#   unless an aiReviewers account approved the exact head commit; then every other rule still runs and the
+#   best verdict is needs_human (never auto_merge).
 # humanApprove: Core files that require explicit affirmative human authorization before merging.
+# aiReviewers: GitHub logins whose Approve review on the PR head commit clears MP-001 in CI. Only the BASE
+#   branch's copy of this list is read, so a PR cannot add its own reviewer.
 
 humanOnly:
   - "CONSTITUTION.md"
@@ -10,6 +14,7 @@ humanOnly:
   - ".github/**"
   - "scripts/**"
   - "bin/**"
+  - ".coderabbit.yaml"
 
 humanApprove:
   - "schemas/**"
@@ -18,3 +23,7 @@ humanApprove:
   - "packages/queue/**"
   - "packages/run/verify*"
   - "package.json"
+
+aiReviewers:
+  - "coderabbitai[bot]"
+  - "chatgpt-codex-connector[bot]"
