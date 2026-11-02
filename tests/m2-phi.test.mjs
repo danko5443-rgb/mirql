@@ -73,7 +73,7 @@ describe("Milestone M2: Monotone Potential Phi Engine & Thrift Gate (Law 13)", (
       assert.ok(phi.max_nesting_depth >= 4, "Nesting depth must reflect nested blocks");
     });
 
-    it("counts package modules unreachable from tests as test gaps (Law 13 test-gap term)", () => {
+    it("counts package modules unreachable from tests as diagnostic test gaps", () => {
       const pkgDir = join(tempDir, "packages", "lib");
       const testsDir = join(tempDir, "tests");
       mkdirSync(pkgDir, { recursive: true });
@@ -89,9 +89,8 @@ describe("Milestone M2: Monotone Potential Phi Engine & Thrift Gate (Law 13)", (
       assert.ok(Number.isSafeInteger(before.test_gaps), "test_gaps must be safe integer (Law 17)");
       assert.equal(before.test_gaps, 1, "package module unreachable from tests must count as a gap");
 
-      // Covering the module from a test file removes the gap and lowers total.
-      // The cover file is a single bare side-effect import so its own metric
-      // contribution is exactly +1 loc — the drop is then exactly the gap weight.
+      // Covering the module from a test file removes the diagnostic gap.
+      // Coverage updates the diagnostic gap count while source potential stays fixed.
       writeFileSync(
         join(testsDir, "cover.test.mjs"),
         `import "../packages/lib/a.mjs";\n`,
@@ -99,9 +98,8 @@ describe("Milestone M2: Monotone Potential Phi Engine & Thrift Gate (Law 13)", (
       );
       const after = computePhi(tempDir);
       assert.equal(after.test_gaps, 0, "imported module must no longer be a gap");
-      assert.equal(after.loc, before.loc + 1, "cover file contributes exactly one loc");
-      assert.equal(after.total, before.total - 6 + 1, "total must drop by the gap weight (6) minus the cover file's one loc");
-      assert.ok(after.total < before.total, "covering a test gap must strictly lower total");
+      assert.equal(after.total, before.total, "test coverage diagnostics must not change source potential");
+      assert.equal(after.loc, before.loc, "adding a test must not increase source LOC");
     });
 
     it("counts transitive import coverage, not just direct imports", () => {
