@@ -1,5 +1,6 @@
 // packages/run/phi.mjs — Law 11, Law 13 & Law 17: Complexity Potential PHI and Thrift Engine.
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
+import { readGitPhiSnapshot } from "./git-phi-snapshot.mjs";
 import { isTestFilePath } from "../core/anti-cheat.mjs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -41,8 +42,22 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
  */
 export function computePhi(workspaceDir = process.cwd()) {
   const root = resolve(workspaceDir);
-  const files = collectSourceFiles(root);
+  const contentsByFile = new Map(collectSourceFiles(root).map(file => [file, readFileSync(file, "utf8")]));
+  let packageJson = {};
+  try { if (existsSync(join(root, "package.json"))) packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")); }
+  catch { packageJson = {}; } // Workspace diagnostics preserve their existing tolerant behavior.
+  return computeSnapshotPhi(root, contentsByFile, packageJson);
+}
 
+/** Measure exactly the named Git commit, with no working-directory evidence. */
+export function computeGitTreePhi(repoDir, ref) {
+  const snapshot = readGitPhiSnapshot(repoDir, ref);
+  return { commit_sha: snapshot.commitSha, tree_sha: snapshot.treeSha,
+    metrics: computeSnapshotPhi(snapshot.root, snapshot.contentsByFile, snapshot.packageJson) };
+}
+
+function computeSnapshotPhi(root, contentsByFile, packageJson) {
+  const files = [...contentsByFile.keys()].sort();
   let loc = 0;
   let exportCount = 0;
   let cyclomatic = 0;
@@ -50,11 +65,8 @@ export function computePhi(workspaceDir = process.cwd()) {
   let dupBlocks = 0;
   let debtMarkers = 0;
   let maxNestingDepth = 0;
-  const contentsByFile = new Map();
-
   for (const file of files) {
-    const content = readFileSync(file, "utf8");
-    contentsByFile.set(file, content);
+    const content = contentsByFile.get(file);
     const path = relative(root, file).split(sep).join("/");
     if (isTestFilePath(path) || path.startsWith("__tests__/") || path.startsWith("conformance/")) continue;
     const lines = content.split(/\r?\n/);
@@ -124,20 +136,8 @@ export function computePhi(workspaceDir = process.cwd()) {
     }
   }
 
-  // Count external dependencies from package.json if present
-  let depCount = 0;
-  const pkgPath = join(root, "package.json");
-  if (existsSync(pkgPath)) {
-    try {
-      const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-      depCount += Object.keys(pkg.dependencies || {}).length;
-      depCount += Object.keys(pkg.devDependencies || {}).length;
-      depCount += Object.keys(pkg.peerDependencies || {}).length;
-      depCount += Object.keys(pkg.optionalDependencies || {}).length;
-    } catch {
-      // ignore parse errors
-    }
-  }
+  const depCount = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]
+    .reduce((sum, key) => sum + Object.keys(packageJson?.[key] || {}).length, 0);
 
   // Report test gaps separately; test changes must not alter source potential.
   const testGaps = computeTestGaps(root, files, contentsByFile);
