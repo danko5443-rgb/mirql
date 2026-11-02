@@ -174,6 +174,8 @@ describe("ai review gate: evaluator", () => {
       ["packages/core/AGENTS.md"],
       ["CLAUDE.md", ".github/workflows/x.yml"],
       [".cursor/rules/review.mdc", "policy/paths.yaml"],
+      ["pkg/.cursor/rules/x.mdc", "policy/paths.yaml"],
+      ["sub/.github/instructions/a.md", "policy/paths.yaml"],
       [".github/workflows/x.yml", "AGENTS.md"],
     ];
     for (const files of cases) {

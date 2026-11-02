@@ -161,7 +161,8 @@ export function isTestFilePath(p) {
 /**
  * Files that steer an aiReviewers account: CodeRabbit config, AGENTS.md (Codex
  * review guidelines) and the agent instruction files CodeRabbit reads as code
- * guidelines by default. Plain names match at any depth. An AI approval never
+ * guidelines by default. Every pattern matches at any depth (see
+ * isReviewerConfigPath). An AI approval never
  * clears a PR that touches one: that PR may be reviewed under its own
  * instructions.
  */
@@ -181,6 +182,18 @@ const AI_REVIEWER_CONFIG_PATTERNS = Object.freeze([
   ".github/copilot-instructions.md",
   ".github/instructions/**",
 ]);
+
+/** True when a path is, or lies under, a reviewer config pattern at any depth. */
+function isReviewerConfigPath(filePath) {
+  const norm = normalizePath(filePath);
+  return AI_REVIEWER_CONFIG_PATTERNS.some((pat) => {
+    const normPat = normalizePath(pat);
+    if (normPat.endsWith("/**")) {
+      return `/${norm}/`.includes(`/${normPat.slice(0, -3)}/`);
+    }
+    return isPathMatchingPattern(norm, pat);
+  });
+}
 
 const REVIEWER_LOGIN_RE =/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/;
 
@@ -363,9 +376,7 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
   );
   // A PR that changes an AI reviewer's own config may be reviewed under that
   // config, so its approval cannot clear MP-001; a human must merge it.
-  const touchesReviewerConfig = filesChanged.some((f) =>
-    AI_REVIEWER_CONFIG_PATTERNS.some((pat) => isPathMatchingPattern(normalizePath(f), pat)),
-  );
+  const touchesReviewerConfig = filesChanged.some(isReviewerConfigPath);
   const humanOnlyReviewer = touchesReviewerConfig ? null : validReviewerLogin(options.humanOnlyReviewer);
   if (forbidden.length > 0) {
     checks.human_only = false;
