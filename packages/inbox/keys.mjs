@@ -11,7 +11,7 @@ import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/tr
 //   There is no implicit fallback; omitted credentials fail closed.
 //
 // Law 3 (Single-Writer ACL) / keyring namespace binding:
-// - `ledger/keyring.json` entries are objects binding each key to exactly one
+// - `trust-root keyring.json` entries are objects binding each key to exactly one
 //   writer namespace: `{ "<keyId>": { "ns": "<namespace>", "publicKey": "<pub>" } }`
 //   (legacy plain-string entries are still readable). A key registered for one
 //   namespace can never authenticate events claiming another namespace.
@@ -222,7 +222,7 @@ function purgeStaleHumanKeys(keysDir) {
 
 /**
  * Generate (or reload) every canonical writer keypair and register their
- * public keys in `<mirqlDir>/ledger/keyring.json` with explicit namespace
+ * public keys in `<trustRoot>/keyring.json` with explicit namespace
  * binding: `{ "<keyId>": { ns, publicKey }, "<ns>": { ns, publicKey } }`.
  *
  * The keyring is REBUILT from scratch so attacker-planted entries in a
@@ -283,7 +283,7 @@ export function generateFactoryKeypairs(mirqlDir, options = {}) {
   result[HUMAN_WRITER_NS] = humanEntry;
   registerKeyringEntry(keyring, HUMAN_WRITER_NS, humanEntry);
 
-  // Factory writers — machine keys persisted inside .mirql/keys/.
+  // Factory writers — machine keys persisted inside the external trust root.
   for (const item of FACTORY_WRITERS) {
     const keyPath = trustFile(mirqlDir, "keys", item.file);
     let kp = null;
@@ -334,7 +334,7 @@ function registerKeyringEntry(keyring, ns, kp) {
 }
 
 /**
- * Load keyring from <mirqlDir>/ledger/keyring.json.
+ * Load keyring from <trustRoot>/keyring.json.
  * @param {string} mirqlDir
  * @returns {Record<string, unknown>}
  */
@@ -351,7 +351,7 @@ export function loadKeyring(mirqlDir) {
 
 /**
  * Load the private key for a FACTORY writer namespace, falling back to
- * `<mirqlDir>/keys/<name>.key.json`. For `human:owner` there is deliberately
+ * `<trustRoot>/keys/<name>.key.json`. For `human:owner` there is deliberately
  * NO filesystem fallback: human credentials must be passed explicitly
  * (see requireHumanKey) and never load implicitly from `.mirql/` (Law 6).
  *

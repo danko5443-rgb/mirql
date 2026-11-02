@@ -124,7 +124,7 @@ export function runSupervisor(options = {}) {
     );
   }
 
-  // 2. Supervisor keys are kept strictly in mirqlDir outside agent workspace
+  // 2. Supervisor keys are loaded from the external trust root.
   const keypair =
     options.keypair ??
     (options.signingKey

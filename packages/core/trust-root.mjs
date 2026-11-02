@@ -64,8 +64,13 @@ export function resolveTrustRoot(mirqlDir, options = {}) {
   }
   if (linked) throw new Error("UNSAFE_TRUST_ROOT: a ledger trust directory cannot be a symlink");
   const root = assertExternalTrustPath(candidate, workspace);
+  const legacyKeyring = [
+    join(ledger, "ledger", "keyring.json"),
+    join(ledger, "keys", "keyring.json"),
+    join(ledger, "keyring.json"),
+  ].some(path => existsSync(path));
   if (existsSync(join(ledger, "ledger", "events.jsonl")) &&
-      existsSync(join(ledger, "ledger", "keyring.json")) &&
+      legacyKeyring &&
       !existsSync(join(root, "keyring.json"))) {
     throw new Error("TRUST_MIGRATION_REQUIRED: move the existing keys and keyring to " + root + " before using this ledger");
   }

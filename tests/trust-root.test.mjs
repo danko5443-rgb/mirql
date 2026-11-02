@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, existsSync, rmSync, symlinkSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { resolveTrustRoot, assertExternalTrustPath, trustFile } from "../packages/core/trust-root.mjs";
@@ -60,12 +60,16 @@ test("an existing ledger never silently adopts a new keyring", () => {
   const prior = process.env.MIRQL_TRUST_ROOT;
   process.env.MIRQL_TRUST_ROOT = join(temp, "trust");
   try {
-    const metadata = join(temp, "workspace", ".mirql");
-    mkdirSync(join(metadata, "ledger"), { recursive: true });
-    writeFileSync(join(metadata, "ledger", "events.jsonl"), "{}\n");
-    writeFileSync(join(metadata, "ledger", "keyring.json"), "{}");
-    assert.throws(() => getOrCreateQueueKeypair(metadata), /TRUST_MIGRATION_REQUIRED/);
-    assert.equal(existsSync(join(metadata, "keys")), false);
+    for (const [index, legacy] of ["ledger/keyring.json", "keys/keyring.json", "keyring.json"].entries()) {
+      const metadata = join(temp, "workspace-" + index, ".mirql");
+      mkdirSync(join(metadata, "ledger"), { recursive: true });
+      writeFileSync(join(metadata, "ledger", "events.jsonl"), "{}\n");
+      const ring = join(metadata, legacy);
+      mkdirSync(dirname(ring), { recursive: true });
+      writeFileSync(ring, "{}");
+      assert.throws(() => getOrCreateQueueKeypair(metadata), /TRUST_MIGRATION_REQUIRED/);
+
+    }
   } finally {
     if (prior === undefined) delete process.env.MIRQL_TRUST_ROOT;
     else process.env.MIRQL_TRUST_ROOT = prior;

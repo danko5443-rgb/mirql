@@ -46,7 +46,7 @@ export {
 // withLedgerLock is imported and re-exported from @mirql/core
 
 /**
- * Load keyring from <mirqlDir>/ledger/keyring.json.
+ * Load keyring from <trustRoot>/keyring.json.
  * @param {string} mirqlDir
  * @returns {object | null}
  */
@@ -65,7 +65,7 @@ export function loadKeyring(mirqlDir) {
 }
 
 /**
- * Write or update keyring at <mirqlDir>/ledger/keyring.json.
+ * Write or update keyring at <trustRoot>/keyring.json.
  * @param {string} mirqlDir
  * @param {object} keyring
  * @param {object} [options]
@@ -139,7 +139,7 @@ export function getOrCreateQueueKeypair(mirqlDir, customKeyFile) {
     } catch {}
   }
 
-  // Ensure tool:queue is registered in <mirqlDir>/ledger/keyring.json
+  // Ensure tool:queue is registered in <trustRoot>/keyring.json
   const keyringPath = trustFile(mirqlDir, "keyring.json");
   let keyring = {};
   if (existsSync(keyringPath)) {

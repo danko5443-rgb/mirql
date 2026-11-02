@@ -5,10 +5,10 @@ import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/tr
 // Responsibilities:
 // - Load or generate the `notary:mergeproof` Ed25519 keypair:
 //     1. an explicit key file (--key <path>), never inside agent sandboxes;
-//     2. <mirqlDir>/keys/notary.key.json (provisioned by `mirql i genesis`);
-//     3. <mirqlDir>/keys/mergeproof.key.json (W2 alias);
+//     2. <trustRoot>/keys/notary.key.json (provisioned by `mirql i genesis`);
+//     3. <trustRoot>/keys/mergeproof.key.json (W2 alias);
 //     4. else generate + persist to keys/notary.key.json with mode 0o600
-//        (H4) and register the public key in ledger/keyring.json.
+//        (H4) and register the public key in trust-root keyring.json.
 // - Sign verdict documents into canonical JCS Ed25519 event envelopes under
 //   writer { ns: "notary:mergeproof", key_id } (Law 3 single-writer ACL).
 // - Append signed verdicts (verdict.issued / verdict.rejected /
@@ -136,7 +136,7 @@ function keypairIsCoherent(kp) {
 }
 
 /**
- * Register the notary public key in <mirqlDir>/ledger/keyring.json under both
+ * Register the notary public key in <trustRoot>/keyring.json under both
  * its keyId and its namespace (namespace-bound entries, Law 3).
  *
  * @param {string} mirqlDir
@@ -181,8 +181,8 @@ function updateKeyring(mirqlDir, kp) {
 /**
  * Load or generate the notary keypair. Resolution order:
  *   1. options.keyPath / options.key  — explicit key file (--key)
- *   2. <mirqlDir>/keys/notary.key.json
- *   3. <mirqlDir>/keys/mergeproof.key.json (alias)
+ *   2. <trustRoot>/keys/notary.key.json
+ *   3. <trustRoot>/keys/mergeproof.key.json (alias)
  *   4. generate fresh, persist to keys/notary.key.json (0o600) + keyring
  *
  * @param {string} mirqlDir

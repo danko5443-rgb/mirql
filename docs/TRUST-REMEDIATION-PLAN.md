@@ -1,5 +1,14 @@
 # Trust Remediation Plan
 
+Execution checkpoint on 2 November 2026. Phase 0 code and the original issue fixes have landed.
+Item 1.4, disposable worker homes, and the breaker recovery follow-up have also landed.
+Item 1.1 is implemented on the external-trust-root branch and requires review.
+Items 1.2 and 1.3, signed enrollment and Windows ACL enforcement, remain open, as do the
+later authority, proof, telemetry, isolation and consolidation phases. The owner chose
+to keep the repository private and leave the unavailable main ruleset requirement open.
+The historical status table below records the original audit, rather than current completion.
+
+
 Goal: make mirql's core promise ("nothing auto-merges without real, unforgeable
 proof") true, in that order of priority, before adding any new law or feature.
 

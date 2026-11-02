@@ -6,7 +6,7 @@ import {
   writeFileSync,
   appendFileSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import {
   jcs,
   sha256,
@@ -149,7 +149,8 @@ export function getOrGenerateSupervisorKey(mirqlDir, options = {}) {
   const keysDir = options.keysDir ? assertExternalTrustPath(options.keysDir, mirqlDir) : trustFile(mirqlDir, "keys");
   const primaryPath = join(keysDir, "run_supervisor.key.json");
   const fallbackPath = join(keysDir, "run_supervisor.json");
-  const keyPath = existsSync(primaryPath) ? primaryPath : (existsSync(fallbackPath) ? fallbackPath : primaryPath);
+  const candidate = existsSync(primaryPath) ? primaryPath : (existsSync(fallbackPath) ? fallbackPath : primaryPath);
+  const keyPath = assertExternalTrustPath(candidate, mirqlDir);
   if (existsSync(keyPath)) {
     try {
       const parsed = JSON.parse(readFileSync(keyPath, "utf8"));
