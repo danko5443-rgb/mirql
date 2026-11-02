@@ -40,8 +40,8 @@ test("private publication protects real files and preserves unrelated parent per
   try {
     const file = join(root, "key ; $literal ' name.json");
     const parentAcl = process.platform === "win32" ? readWindowsAcl(root) : null;
-    writePrivateFile(file, "private bytes");
-    assert.equal(readFileSync(file, "utf8"), "private bytes");
+    writePrivateFile(file, "private bytes naïve 🔐");
+    assert.equal(readFileSync(file, "utf8"), "private bytes naïve 🔐");
     if (process.platform === "win32") {
       assertOwnerOnly(file);
       assert.deepEqual(readWindowsAcl(root), parentAcl);
@@ -138,4 +138,37 @@ test("genesis refuses unavailable Windows ACL enforcement before publishing keys
     assert.equal(existsSync(join(trust, "owner.pub.json")), false);
     assert.equal(existsSync(join(metadata, "ledger", "events.jsonl")), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+
+test("replacing a verified temporary pathname cannot redirect credential bytes", {
+  skip: process.platform === "win32",
+}, () => {
+  const root = mkdtempSync(join(tmpdir(), "mirql-permission-race-"));
+  const destination = join(root, "key.json");
+  const leaked = join(root, "attacker-file");
+  writeFileSync(leaked, "unchanged");
+  const originalWrite = fs.writeFileSync;
+  let swapped = false;
+  try {
+    fs.writeFileSync = (target, contents, ...options) => {
+      if (contents === "race-test-secret" && !swapped) {
+        const temp = readdirSync(root).find(name => name.endsWith(".tmp"));
+        fs.unlinkSync(join(root, temp));
+        fs.symlinkSync(leaked, join(root, temp));
+        swapped = true;
+      }
+      return originalWrite(target, contents, ...options);
+    };
+    syncBuiltinESMExports();
+    assert.throws(() => writePrivateFile(destination, "race-test-secret"));
+    assert.equal(swapped, true);
+    assert.equal(readFileSync(leaked, "utf8"), "unchanged");
+  } finally {
+    fs.writeFileSync = originalWrite;
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
