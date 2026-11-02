@@ -1,3 +1,4 @@
+import { assertKeyEnrolled } from "../core/keyring.mjs";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -110,8 +111,6 @@ export function runBingBong(options = {}) {
   const mirqlDir =
     options.mirqlDir ?? options.dir ?? join(process.cwd(), ".mirql");
   const maxRounds = Number.isSafeInteger(options.rounds) ? options.rounds : 3;
-  const keypair =
-    options.keypair ?? getOrGenerateSupervisorKey(mirqlDir);
 
   // 1. Resolve and parse warrant
   let warrant = null;
@@ -204,6 +203,8 @@ export function runBingBong(options = {}) {
   }
 
   const panel = options.panel;
+  const keypair = options.keypair ?? getOrGenerateSupervisorKey(mirqlDir);
+  assertKeyEnrolled(mirqlDir, "tool:run_supervisor", keypair);
 
   // 4. B8: Escalate immediately if rounds < 1
   if (maxRounds < 1) {

@@ -437,8 +437,7 @@ describe("Work Package W5b: mirql-inbox test suite (hardened)", () => {
         },
       );
 
-      // Direct namespace-binding check: keyring with tool:queue registered and
-      // NO human:owner entry — the queue key must be denied by binding.
+      // Removing the human entry without its signature invalidates the keyring.
       const keyring = loadKeyring(mirqlDir);
       const stripped = {};
       for (const [k, v] of Object.entries(keyring)) {
@@ -459,8 +458,8 @@ describe("Work Package W5b: mirql-inbox test suite (hardened)", () => {
             { signingKey: queueKp.privateKey },
           ),
         (err) => {
-          assert.equal(err.errorCode, "namespace_binding_violation");
-          assert.equal(err.exitCode, EXIT_CODES.POLICY_DENIAL);
+          assert.equal(err.errorCode, "KEYRING_INTEGRITY");
+          assert.equal(err.exitCode, EXIT_CODES.INTEGRITY_VIOLATION);
           return true;
         },
       );

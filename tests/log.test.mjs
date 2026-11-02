@@ -1,3 +1,4 @@
+import { saveTestKeyring } from "./helpers/keyring.mjs";
 import { trustFile, resolveTrustRoot } from "../packages/core/trust-root.mjs";
 // W3 tests: packages/log — the cryptographic append-only ledger and its
 // deterministic projections. Covers signed appends and hash chaining,
@@ -134,7 +135,7 @@ function trustTestKeys(mirqlDir) {
     keyring[kp.keyId] = kp.publicKey;
   }
   mkdirSync(resolveTrustRoot(mirqlDir), { recursive: true });
-  writeFileSync(trustFile(mirqlDir, "keyring.json"), jcs(keyring), "utf8");
+  saveTestKeyring(mirqlDir, keyring);
 }
 
 /**
@@ -1040,10 +1041,7 @@ describe("appendEvent — pre-signed envelopes and keyring verification", () => 
     const dir = makeTmp();
     mkdirSync(join(dir, "ledger"), { recursive: true });
     mkdirSync(resolveTrustRoot(dir), { recursive: true });
-    writeFileSync(trustFile(dir, "keyring.json"),
-      jcs({ [QUEUE_KP.keyId]: QUEUE_KP.publicKey }),
-      "utf8",
-    );
+    saveTestKeyring(dir, { [QUEUE_KP.keyId]: QUEUE_KP.publicKey });
     const envelope = makeEnvelope(QUEUE_KP, { seq: 1, prevHash: GENESIS_PREV_HASH });
     const result = appendEvent(dir, envelope);
     assert.deepEqual(
@@ -1397,10 +1395,7 @@ describe("Claude Opus 5.5 High Review Findings — Regression Suite", () => {
 
     // Keyring contains ONLY QUEUE_KP (real key)
     mkdirSync(resolveTrustRoot(dir), { recursive: true });
-    writeFileSync(trustFile(dir, "keyring.json"),
-      jcs({ [QUEUE_KP.keyId]: QUEUE_KP.publicKey }),
-      "utf8",
-    );
+    saveTestKeyring(dir, { [QUEUE_KP.keyId]: QUEUE_KP.publicKey });
 
     // Other / evil keypair whose key is NOT in keyring.json
     const EVIL_KP = generateEd25519Keypair();

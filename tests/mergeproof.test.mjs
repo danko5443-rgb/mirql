@@ -1,3 +1,4 @@
+import { provisionTestTrust, authorizeTestKey } from "./helpers/keyring.mjs";
 import { trustFile, resolveTrustRoot } from "../packages/core/trust-root.mjs";
 // Work Package W2: mergeproof — the mechanical merge gate.
 //
@@ -23,6 +24,7 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
+  unlinkSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -393,8 +395,9 @@ describe("mergeproof: notary signing & ledger append", () => {
     assert.equal(NOTARY_WRITER_NS, "notary:mergeproof");
   });
 
-  it("loadOrCreateNotaryKey generates a 0o600 keypair + keyring entry when absent", () => {
+  it("loadOrCreateNotaryKey reloads the owner-enrolled 0o600 notary key", () => {
     const tmp = mkdtempSync(join(tmpdir(), "mirql-mp-key-"));
+    provisionTestTrust(tmp);
     try {
       const kp = loadOrCreateNotaryKey(tmp);
       assert.equal(kp.keyId.startsWith("ed25519:"), true);
@@ -422,13 +425,16 @@ describe("mergeproof: notary signing & ledger append", () => {
 
   it("the mergeproof.key.json alias is preferred when present", () => {
     const tmp = mkdtempSync(join(tmpdir(), "mirql-mp-alias-"));
+    provisionTestTrust(tmp);
     try {
       const generated = generateEd25519Keypair();
+      authorizeTestKey(tmp, "notary:mergeproof", generated);
       mkdirSync(trustFile(tmp, "keys"), { recursive: true });
       writeFileSync(
         trustFile(tmp, "keys", NOTARY_KEY_ALIAS_FILE),
         JSON.stringify(generated, null, 2) + "\n",
       );
+      unlinkSync(trustFile(tmp, "keys", NOTARY_KEY_FILE));
       const kp = loadOrCreateNotaryKey(tmp);
       assert.equal(kp.keyId, generated.keyId);
       assert.equal(kp.sourceFile, trustFile(tmp, "keys", NOTARY_KEY_ALIAS_FILE));
@@ -439,8 +445,10 @@ describe("mergeproof: notary signing & ledger append", () => {
 
   it("an explicit --key path wins over the keys/ directory", () => {
     const tmp = mkdtempSync(join(tmpdir(), "mirql-mp-explicit-"));
+    provisionTestTrust(tmp);
     try {
       const generated = generateEd25519Keypair();
+      authorizeTestKey(tmp, "notary:mergeproof", generated);
       mkdirSync(resolveTrustRoot(tmp), { recursive: true });
       const explicit = trustFile(tmp, "outside-notary.key.json");
       writeFileSync(explicit, JSON.stringify(generated, null, 2) + "\n");
@@ -454,6 +462,7 @@ describe("mergeproof: notary signing & ledger append", () => {
 
   it("an invalid --key file fails closed with USAGE_ERROR", () => {
     const tmp = mkdtempSync(join(tmpdir(), "mirql-mp-badkey-"));
+    provisionTestTrust(tmp);
     try {
       mkdirSync(resolveTrustRoot(tmp), { recursive: true });
       const bad = trustFile(tmp, "bad.key.json");
@@ -469,6 +478,7 @@ describe("mergeproof: notary signing & ledger append", () => {
 
   it("signAndAppendVerdict writes a schema-valid verdict.issued event anchored at genesis", () => {
     const tmp = mkdtempSync(join(tmpdir(), "mirql-mp-sign-"));
+    provisionTestTrust(tmp);
     try {
       // The signer maps whatever verdict it is handed. No PR doc can reach
       // auto_merge since Phase 0.2, so hand it one directly.
@@ -512,6 +522,7 @@ describe("mergeproof: notary signing & ledger append", () => {
 
   it("re-signing the same verdict dedupes instead of double-appending (Law 4)", () => {
     const tmp = mkdtempSync(join(tmpdir(), "mirql-mp-dedup-"));
+    provisionTestTrust(tmp);
     try {
       const fixture = loadFixture(CONFORMANCE_GOOD, "01-valid-repro-fix.json");
       const base = {
@@ -541,6 +552,7 @@ describe("mergeproof: notary signing & ledger append", () => {
 
   it("distinct verdicts chain: seq 2 prev_hash links to the seq 1 event hash", () => {
     const tmp = mkdtempSync(join(tmpdir(), "mirql-mp-chain-"));
+    provisionTestTrust(tmp);
     try {
       const good = loadFixture(CONFORMANCE_GOOD, "01-valid-repro-fix.json");
       const bad = loadFixture(CONFORMANCE_BAD, "01-touch-human-only.json");
@@ -589,6 +601,7 @@ describe("mergeproof: notary signing & ledger append", () => {
 
   it("CLI --sign appends the verdict to <dir>/ledger/events.jsonl and reports it", () => {
     const tmp = mkdtempSync(join(tmpdir(), "mirql-mp-cli-sign-"));
+    provisionTestTrust(tmp);
     try {
       const res = runMirql([
         "m", "check",
@@ -628,6 +641,7 @@ describe("mergeproof: notary signing & ledger append", () => {
 
   it("CLI --sign with an invalid --key exits USAGE_ERROR without touching the ledger", () => {
     const tmp = mkdtempSync(join(tmpdir(), "mirql-mp-cli-badkey-"));
+    provisionTestTrust(tmp);
     try {
       mkdirSync(resolveTrustRoot(tmp), { recursive: true });
       const bad = trustFile(tmp, "not-a-key.json");
@@ -647,6 +661,7 @@ describe("mergeproof: notary signing & ledger append", () => {
 
   it("two concurrent --sign processes serialize under withLedgerLock into a valid chain", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "mirql-mp-race-"));
+    provisionTestTrust(tmp);
     try {
       // Pre-provision the notary key so both racers share one identity.
       const kp = loadOrCreateNotaryKey(tmp);

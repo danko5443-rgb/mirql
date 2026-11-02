@@ -1,3 +1,4 @@
+import { provisionTestTrust } from "./helpers/keyring.mjs";
 // tests/breaker-enforcement.test.mjs — circuit breakers are binding (issue #15).
 // Pins the enforcement chain end to end: a tripped breaker (folded from
 // verified ledger events, Law 4) makes the queue REFUSE new leases until the
@@ -55,6 +56,7 @@ describe("circuit breakers are binding, not advisory (issue #15)", () => {
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "mirql-breaker-enf-"));
+    provisionTestTrust(tempDir);
   });
 
   afterEach(() => {

@@ -1,3 +1,4 @@
+import { provisionTestTrust } from "./helpers/keyring.mjs";
 // Phase 0 (docs/TRUST-REMEDIATION-PLAN.md): fail-closed regression tests.
 //
 // Each test reproduces an exploit that worked on main before Phase 0:
@@ -325,6 +326,7 @@ describe("security review: option injection and fail-open gates", () => {
     try {
       const dir = join(work, ".mirql");
       mkdirSync(dir, { recursive: true });
+      provisionTestTrust(dir);
       getOrCreateQueueKeypair(dir);
       const wid = ulid();
       const sub = submitWarrant(dir, {

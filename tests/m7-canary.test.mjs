@@ -1,3 +1,4 @@
+import { provisionTestTrust, saveTestKeyring } from "./helpers/keyring.mjs";
 // tests/m7-canary.test.mjs — Milestone M7: Keyless Canary Promotion Gauntlet & Ouroboros Self-Hosting Test Suite.
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -27,7 +28,6 @@ import {
 import {
   appendLedgerEventRaw,
   getOrCreateQueueKeypair,
-  saveKeyring,
 } from "../packages/queue/ledger.mjs";
 
 describe("Milestone M7: Keyless Canary Promotion Gauntlet & Ouroboros Self-Hosting", () => {
@@ -38,6 +38,7 @@ describe("Milestone M7: Keyless Canary Promotion Gauntlet & Ouroboros Self-Hosti
     tmpDir = mkdtempSync(join(tmpdir(), "mirql-m7-test-"));
     mirqlDir = join(tmpDir, ".mirql");
     mkdirSync(mirqlDir, { recursive: true });
+    provisionTestTrust(mirqlDir);
     getOrCreateQueueKeypair(mirqlDir);
   });
 
@@ -68,7 +69,7 @@ describe("Milestone M7: Keyless Canary Promotion Gauntlet & Ouroboros Self-Hosti
     leaseNextJob(mirqlDir, { workerId: "worker-canary-test" });
     // stageCanary fails closed without an accepted notary verdict.
     const notaryKp = generateEd25519Keypair();
-    saveKeyring(mirqlDir, { "notary:mergeproof": notaryKp.publicKey });
+    saveTestKeyring(mirqlDir, { "notary:mergeproof": notaryKp.publicKey });
     appendLedgerEventRaw(
       mirqlDir,
       { type: "verdict.accepted", payload: { job_id: res.job_id, status: "accepted" } },

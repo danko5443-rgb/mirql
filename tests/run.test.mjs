@@ -1,3 +1,4 @@
+import { provisionTestTrust, authorizeTestKey } from "./helpers/keyring.mjs";
 import { test, describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -58,6 +59,7 @@ describe("Work Package W5a: `mirql-run` and `bing-bong` Consensus Loop", () => {
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "mirql-w5a-test-"));
+    provisionTestTrust(tempDir);
   });
 
   afterEach(() => {
@@ -498,6 +500,7 @@ test("tautological test", () => {
 
     it("B3: supervisor produces a valid schema-checked Outcome with real computed metrics", () => {
       const kp = generateEd25519Keypair();
+      authorizeTestKey(tempDir, "tool:run_supervisor", kp);
 
       const res = runSupervisor({
         mirqlDir: tempDir,
@@ -547,6 +550,7 @@ test("tautological test", () => {
 
     it("B3: supervisor rejects and signs fail if agent worker command fails", () => {
       const kp = generateEd25519Keypair();
+      authorizeTestKey(tempDir, "tool:run_supervisor", kp);
 
       const res = runSupervisor({
         mirqlDir: tempDir,
@@ -569,6 +573,7 @@ test("tautological test", () => {
   describe("4. 0-Token Probes", () => {
     it("B4: tests probe with MEASURED counts records a signed pass (issue #16: no fake 189)", () => {
       const kp = generateEd25519Keypair();
+      authorizeTestKey(tempDir, "tool:run_supervisor", kp);
       const res = runProbe({
         mirqlDir: tempDir,
         probe: "tests",
@@ -594,6 +599,7 @@ test("tautological test", () => {
 
     it("B4: tests probe without measured counts NEVER signs a pass (inside a test run)", () => {
       const kp = generateEd25519Keypair();
+      authorizeTestKey(tempDir, "tool:run_supervisor", kp);
       const res = runProbe({
         mirqlDir: tempDir,
         probe: "tests",
@@ -608,6 +614,7 @@ test("tautological test", () => {
 
     it("B4: complexity probe computes real metrics and checks threshold from policy/probes.toml", () => {
       const kp = generateEd25519Keypair();
+      authorizeTestKey(tempDir, "tool:run_supervisor", kp);
       const res = runProbe({
         mirqlDir: tempDir,
         probe: "complexity",
@@ -636,6 +643,7 @@ test("tautological test", () => {
 
     it("B4: unimplemented probe reports status not_implemented", () => {
       const kp = generateEd25519Keypair();
+      authorizeTestKey(tempDir, "tool:run_supervisor", kp);
       const res = runProbe({
         mirqlDir: tempDir,
         probe: "drift",
@@ -1038,6 +1046,7 @@ describe("P0 Remediation: C1, H1, H2, H3, H5", () => {
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "mirql-p0-test-"));
+    provisionTestTrust(tempDir);
   });
 
   afterEach(() => {

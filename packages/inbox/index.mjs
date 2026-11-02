@@ -1,5 +1,6 @@
 // packages/inbox/index.mjs — Cryptographic Human Sovereignty Portal (Law 6, Milestone M6).
 import { resolve as resolvePath, join } from "node:path";
+import { enrollKey } from "../core/keyring.mjs";
 import { EXIT_CODES, WRITER_ACL } from "../core/index.mjs";
 
 import { runGenesis } from "./genesis.mjs";
@@ -72,7 +73,7 @@ export {
 
 export { FACTORY_WRITERS, CANONICAL_WRITERS, HUMAN_WRITER_NS, HUMAN_KEY_FILENAME };
 
-const SUBCOMMANDS = Object.freeze(["genesis", "send", "digest", "act", "propose"]);
+const SUBCOMMANDS = Object.freeze(["genesis", "send", "digest", "act", "propose", "enroll-key"]);
 
 // Law 3 note: WRITER_ACL is imported so this module fails fast if the frozen
 // ACL table is ever absent — but it is NEVER mutated here. The canonical
@@ -100,6 +101,7 @@ const BOOLEAN_FLAGS = new Set([
   "help",
   "version",
   "all",
+  "initialize",
 ]);
 
 /**
@@ -120,6 +122,12 @@ function parseArgs(args) {
   }
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    // Base64url public keys can start with one or two hyphens.
+    if (positional[0] === "enroll-key" && positional.length === 2 &&
+        /^[A-Za-z0-9_-]{43}$/.test(arg)) {
+      positional.push(arg);
+      continue;
+    }
     if (arg.startsWith("--")) {
       const eqIdx = arg.indexOf("=");
       if (eqIdx !== -1) {
@@ -162,6 +170,7 @@ function emitUsage() {
       subcommands: {
         genesis:
           "bootstrap .mirql/, provision factory keys, sign mirql.genesis; --human-key-out <path> (default: <trustRoot>/human_owner.key.private.json, mode 0600)",
+        "enroll-key": "enroll a public key for a writer namespace; requires --key <human-private-key>",
         send:
           "submit human intent & mint a warrant; REQUIRES --key <path> or MIRQL_HUMAN_KEY (outside .mirql)",
         digest: "keyless read-only factory digest; --format markdown|json",
@@ -201,6 +210,12 @@ export function runCli(argv = []) {
 
   try {
     switch (subcommand) {
+      case "enroll-key": {
+        const owner = requireHumanKey(mirqlDir, options);
+        const result = enrollKey(mirqlDir, positional[1], positional[2], owner, { initialize: options.initialize === true });
+        process.stdout.write(JSON.stringify(result) + "\n");
+        return EXIT_CODES.OK;
+      }
       case "genesis": {
         const result = runGenesis(mirqlDir, options);
         process.stdout.write(JSON.stringify(result) + "\n");

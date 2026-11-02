@@ -1,5 +1,6 @@
 import { requireTrustForKeyCreation } from "../core/trust-root.mjs";
-import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
+import { assertKeyEnrolled } from "../core/keyring.mjs";
+import { trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 // packages/mergeproof/notary.mjs — the mergeproof notary (Law 7: the notary
 // sits OUTSIDE the blast radius of the agents whose work it judges).
 //
@@ -9,7 +10,7 @@ import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/tr
 //     2. <trustRoot>/keys/notary.key.json (provisioned by `mirql i genesis`);
 //     3. <trustRoot>/keys/mergeproof.key.json (W2 alias);
 //     4. else generate + persist to keys/notary.key.json with mode 0o600
-//        (H4) and register the public key in trust-root keyring.json.
+//        (H4) and require human enrollment before the key can sign ledger events.
 // - Sign verdict documents into canonical JCS Ed25519 event envelopes under
 //   writer { ns: "notary:mergeproof", key_id } (Law 3 single-writer ACL).
 // - Append signed verdicts (verdict.issued / verdict.rejected /
@@ -145,38 +146,7 @@ function keypairIsCoherent(kp) {
  * @returns {void}
  */
 function updateKeyring(mirqlDir, kp) {
-  const ledgerDir = resolveTrustRoot(mirqlDir);
-  mkdirSync(ledgerDir, { recursive: true, mode: 0o700 });
-  const keyringPath = trustFile(mirqlDir, "keyring.json");
-  let keyring = {};
-  if (existsSync(keyringPath)) {
-    try {
-      keyring = JSON.parse(readFileSync(keyringPath, "utf8")) ?? {};
-    } catch (err) {
-      throw notaryError(
-        "INTEGRITY_VIOLATION",
-        `Corrupt keyring file at ${keyringPath}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
-  if (keyring[kp.keyId]?.publicKey === kp.publicKey) return;
-
-  // Law 7 / Law 3: Refuse to overwrite an existing registered notary key without owner authorization
-  const existing = keyring[NOTARY_WRITER_NS] ?? keyring[kp.keyId];
-  if (existing) {
-    const existingPub = typeof existing === "string" ? existing : existing.publicKey;
-    if (existingPub && existingPub !== kp.publicKey) {
-      throw notaryError(
-        "INTEGRITY_VIOLATION",
-        `Keyring at ${keyringPath} already registers a different notary key; refusing to overwrite without human:owner authorization.`,
-      );
-    }
-  }
-
-  const entry = { ns: NOTARY_WRITER_NS, publicKey: kp.publicKey };
-  keyring[kp.keyId] = entry;
-  keyring[NOTARY_WRITER_NS] = entry;
-  writeFileSync(keyringPath, jcs(keyring) + "\n", { encoding: "utf8", mode: 0o600 });
+  assertKeyEnrolled(mirqlDir, "notary:mergeproof", kp);
 }
 
 /**
@@ -202,6 +172,7 @@ export function loadOrCreateNotaryKey(mirqlDir, options = {}) {
         `--key ${explicit} is not a valid Ed25519 keypair document ({ privateKey, publicKey, keyId })`,
       );
     }
+    assertKeyEnrolled(mirqlDir, "notary:mergeproof", kp);
     return { ...kp, sourceFile: abs };
   }
 
@@ -210,6 +181,7 @@ export function loadOrCreateNotaryKey(mirqlDir, options = {}) {
     if (existsSync(keyPath)) {
       const kp = readKeypairFile(keyPath);
       if (kp !== null && keypairIsCoherent(kp)) {
+        assertKeyEnrolled(mirqlDir, "notary:mergeproof", kp);
         return { ...kp, sourceFile: keyPath };
       }
       throw notaryError(
@@ -373,6 +345,7 @@ export function signAndAppendVerdict(mirqlDir, verdictDoc, options = {}) {
       options.keypair ??
       loadOrCreateNotaryKey(dir, { keyPath: options.keyPath, key: options.key });
 
+    assertKeyEnrolled(dir, NOTARY_WRITER_NS, keypair);
     const { events, rawLines } = readLedgerEvents(dir);
 
     // Idempotency dedup (Law 4) scoped by writer namespace.

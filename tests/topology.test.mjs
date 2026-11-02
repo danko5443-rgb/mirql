@@ -1,3 +1,4 @@
+import { provisionTestTrust } from "./helpers/keyring.mjs";
 // tests/topology.test.mjs — Production Topology, Containerization & Sidecar Gates.
 // Verifies Dockerfiles, Compose network isolation, LLM Gateway budgeting (Law 1 & 17), and Lifeguard (Law 2).
 
@@ -444,6 +445,7 @@ describe("Production Containerization & Topology Gates", () => {
         touchHeartbeat(mirqlDir);
         assert.ok(existsSync(hbFile), "Heartbeat file must be created by touchHeartbeat");
 
+        provisionTestTrust(mirqlDir);
         // Run supervisor writes heartbeat and launcher.pid, then cleans up pid on exit
         runSupervisor({
           mirqlDir,

@@ -1,3 +1,4 @@
+import { provisionTestTrust } from "./helpers/keyring.mjs";
 // tests/m1-wake.test.mjs — Milestone M1: Event-Driven Wake Rules & Concurrency 1 Gates.
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -60,6 +61,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "mirql-m1-test-"));
+    provisionTestTrust(tempDir);
   });
 
   afterEach(() => {

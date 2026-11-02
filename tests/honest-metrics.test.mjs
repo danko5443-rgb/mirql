@@ -1,3 +1,4 @@
+import { provisionTestTrust, authorizeTestKey } from "./helpers/keyring.mjs";
 import { git } from "./helpers/git.mjs";
 // tests/honest-metrics.test.mjs — measured-or-flagged telemetry (issue #16).
 // The ledger is honest that an event happened; its payload must not lie.
@@ -39,7 +40,8 @@ const RUN = {
 };
 
 function supervisorRun(overrides = {}) {
-  const kp = generateEd25519Keypair();
+  const kp = overrides.keypair ?? generateEd25519Keypair();
+  authorizeTestKey(overrides.mirqlDir ?? RUN.mirqlDir, "tool:run_supervisor", kp);
   return runSupervisor({
     ...RUN,
     signingKey: kp.privateKey,
@@ -53,6 +55,7 @@ describe("supervisor telemetry honesty (issue #16)", () => {
   let tempDir;
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "mirql-honest-"));
+    provisionTestTrust(tempDir);
     RUN.mirqlDir = tempDir;
     RUN.workspaceDir = tempDir;
   });

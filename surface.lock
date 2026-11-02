@@ -10,6 +10,7 @@
   "commands": [
     "mirql m check",
     "mirql i genesis",
+    "mirql i enroll-key",
     "mirql i send",
     "mirql i digest",
     "mirql i act",

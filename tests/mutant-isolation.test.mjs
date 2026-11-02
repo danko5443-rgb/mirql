@@ -1,3 +1,4 @@
+import { provisionTestTrust } from "./helpers/keyring.mjs";
 import { git } from "./helpers/git.mjs";
 // tests/mutant-isolation.test.mjs — sandboxed mutation + incremental kill gate
 // (issue #14). Two contracts:
@@ -185,6 +186,7 @@ test("sub", () => { assert.equal(sub(5, 2), 3); });
   it("derives changed sources from the diff and pairs them via real import edges", () => {
     const ws = makeRepo();
     const controlDir = mkdtempSync(join(tmpdir(), "mirql-mutant-probe-ctl-"));
+    provisionTestTrust(join(controlDir, ".mirql"));
     try {
       const importers = findImportingTests(ws, "packages/run/calc.mjs");
       assert.deepEqual(
@@ -229,6 +231,7 @@ test("sub", () => { assert.equal(sub(5, 2), 3); });
     git(ws, "add", "-A");
     git(ws, "commit", "-q", "-m", "head");
     const controlDir = mkdtempSync(join(tmpdir(), "mirql-mutant-lonely-ctl-"));
+    provisionTestTrust(join(controlDir, ".mirql"));
     try {
       const res = runProbe({
         probe: "mutants",

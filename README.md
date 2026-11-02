@@ -137,3 +137,23 @@ key remains possible; creating a replacement for an initialized ledger is refuse
 
 This storage placement implements trust remediation item 1.1. Signed key enrollment,
 Windows ACL enforcement, and worker process isolation remain later plan requirements.
+
+Signed enrollment keeps keyring.json beside keyring.sig and a pinned owner.pub.json
+in the external trust directory. Genesis provisions the initial signed registry.
+Later machine-key changes require the human private key explicitly. A generated
+machine key has no authority until it is enrolled.
+
+```sh
+mirql i enroll-key tool:reviewer <public-key> --key <human-key-path> --dir .mirql
+```
+
+After migrating an older unsigned registry, add --initialize to authorize its
+initial signature with the matching human key. The same flag rebinds migrated
+signed storage to its new ledger location using the previous signed contents.
+Normal enrollment retries use signed contents to repair an interrupted publication
+and discard unsigned edits to the JSON mirror.
+
+Enrollment can add namespaces or repeat an existing registration. Replacing a
+namespace key is refused pending a key-rotation policy that preserves verification
+of historical ledger entries. Windows ACL enforcement and worker isolation remain
+separate trust-remediation requirements.
