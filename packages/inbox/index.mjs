@@ -161,7 +161,7 @@ function emitUsage() {
       dir: "--dir <path> | MIRQL_DIR | <cwd>/.mirql",
       subcommands: {
         genesis:
-          "bootstrap .mirql/, provision factory keys, sign mirql.genesis; --human-key-out <path> (default: <operatorDir>/human_owner.key.private.json, mode 0600)",
+          "bootstrap .mirql/, provision factory keys, sign mirql.genesis; --human-key-out <path> (default: <trustRoot>/human_owner.key.private.json, mode 0600)",
         send:
           "submit human intent & mint a warrant; REQUIRES --key <path> or MIRQL_HUMAN_KEY (outside .mirql)",
         digest: "keyless read-only factory digest; --format markdown|json",

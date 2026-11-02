@@ -1,3 +1,4 @@
+import { trustFile } from "../packages/core/trust-root.mjs";
 // tests/e2e-tracer.test.mjs — End-to-End Self-Hosting Tracer Bullet (W5b hardened).
 //
 // Drives the REAL CLIs across the full autonomous mirql factory loop:
@@ -89,19 +90,19 @@ describe("End-to-End Self-Hosting Tracer Bullet (W5b hardened: full 5-binary aut
       // The human private key lives OUTSIDE .mirql, factory keys inside.
       assert.ok(existsSync(humanKeyPath), "human key file must exist");
       assert.equal(
-        existsSync(join(mirqlDir, "keys", "human.key.json")), false,
+        existsSync(trustFile(mirqlDir, "keys", "human.key.json")), false,
         "no human private key may remain inside .mirql/keys/",
       );
-      assert.ok(existsSync(join(mirqlDir, "keys", "queue.key.json")));
-      assert.ok(existsSync(join(mirqlDir, "keys", "run_supervisor.key.json")));
-      assert.ok(existsSync(join(mirqlDir, "keys", "notary.key.json")));
+      assert.ok(existsSync(trustFile(mirqlDir, "keys", "queue.key.json")));
+      assert.ok(existsSync(trustFile(mirqlDir, "keys", "run_supervisor.key.json")));
+      assert.ok(existsSync(trustFile(mirqlDir, "keys", "notary.key.json")));
 
       const humanKeyDoc = JSON.parse(readFileSync(humanKeyPath, "utf8"));
       assert.equal(humanKeyDoc.writer.ns, "human:owner");
 
       // Keyring entries are namespace-bound objects { ns, publicKey } (B3).
       const keyring = JSON.parse(
-        readFileSync(join(mirqlDir, "ledger", "keyring.json"), "utf8"),
+        readFileSync(trustFile(mirqlDir, "keyring.json"), "utf8"),
       );
       assert.equal(keyring["human:owner"].ns, "human:owner");
       assert.equal(keyring["human:owner"].publicKey, humanKeyDoc.publicKey);

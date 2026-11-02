@@ -1,13 +1,15 @@
+import { requireTrustForKeyCreation } from "../core/trust-root.mjs";
+import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 // packages/mergeproof/notary.mjs — the mergeproof notary (Law 7: the notary
 // sits OUTSIDE the blast radius of the agents whose work it judges).
 //
 // Responsibilities:
 // - Load or generate the `notary:mergeproof` Ed25519 keypair:
 //     1. an explicit key file (--key <path>), never inside agent sandboxes;
-//     2. <mirqlDir>/keys/notary.key.json (provisioned by `mirql i genesis`);
-//     3. <mirqlDir>/keys/mergeproof.key.json (W2 alias);
+//     2. <trustRoot>/keys/notary.key.json (provisioned by `mirql i genesis`);
+//     3. <trustRoot>/keys/mergeproof.key.json (W2 alias);
 //     4. else generate + persist to keys/notary.key.json with mode 0o600
-//        (H4) and register the public key in ledger/keyring.json.
+//        (H4) and register the public key in trust-root keyring.json.
 // - Sign verdict documents into canonical JCS Ed25519 event envelopes under
 //   writer { ns: "notary:mergeproof", key_id } (Law 3 single-writer ACL).
 // - Append signed verdicts (verdict.issued / verdict.rejected /
@@ -135,7 +137,7 @@ function keypairIsCoherent(kp) {
 }
 
 /**
- * Register the notary public key in <mirqlDir>/ledger/keyring.json under both
+ * Register the notary public key in <trustRoot>/keyring.json under both
  * its keyId and its namespace (namespace-bound entries, Law 3).
  *
  * @param {string} mirqlDir
@@ -143,9 +145,9 @@ function keypairIsCoherent(kp) {
  * @returns {void}
  */
 function updateKeyring(mirqlDir, kp) {
-  const ledgerDir = join(mirqlDir, "ledger");
+  const ledgerDir = resolveTrustRoot(mirqlDir);
   mkdirSync(ledgerDir, { recursive: true, mode: 0o700 });
-  const keyringPath = join(ledgerDir, "keyring.json");
+  const keyringPath = trustFile(mirqlDir, "keyring.json");
   let keyring = {};
   if (existsSync(keyringPath)) {
     try {
@@ -180,8 +182,8 @@ function updateKeyring(mirqlDir, kp) {
 /**
  * Load or generate the notary keypair. Resolution order:
  *   1. options.keyPath / options.key  — explicit key file (--key)
- *   2. <mirqlDir>/keys/notary.key.json
- *   3. <mirqlDir>/keys/mergeproof.key.json (alias)
+ *   2. <trustRoot>/keys/notary.key.json
+ *   3. <trustRoot>/keys/mergeproof.key.json (alias)
  *   4. generate fresh, persist to keys/notary.key.json (0o600) + keyring
  *
  * @param {string} mirqlDir
@@ -192,7 +194,7 @@ function updateKeyring(mirqlDir, kp) {
 export function loadOrCreateNotaryKey(mirqlDir, options = {}) {
   const explicit = options.keyPath ?? options.key;
   if (typeof explicit === "string" && explicit.length > 0) {
-    const abs = resolvePath(explicit);
+    const abs = assertExternalTrustPath(explicit, mirqlDir);
     const kp = readKeypairFile(abs);
     if (kp === null || !keypairIsCoherent(kp)) {
       throw notaryError(
@@ -203,9 +205,8 @@ export function loadOrCreateNotaryKey(mirqlDir, options = {}) {
     return { ...kp, sourceFile: abs };
   }
 
-  const keysDir = join(mirqlDir, "keys");
   for (const name of [NOTARY_KEY_FILE, NOTARY_KEY_ALIAS_FILE]) {
-    const keyPath = join(keysDir, name);
+    const keyPath = trustFile(mirqlDir, "keys", name);
     if (existsSync(keyPath)) {
       const kp = readKeypairFile(keyPath);
       if (kp !== null && keypairIsCoherent(kp)) {
@@ -218,8 +219,9 @@ export function loadOrCreateNotaryKey(mirqlDir, options = {}) {
     }
   }
 
+  requireTrustForKeyCreation(mirqlDir);
   const generated = generateEd25519Keypair();
-  const keyPath = join(keysDir, NOTARY_KEY_FILE);
+  const keyPath = trustFile(mirqlDir, "keys", NOTARY_KEY_FILE);
   writePrivateFile(keyPath, JSON.stringify(generated, null, 2) + "\n");
   updateKeyring(mirqlDir, generated);
   return { ...generated, sourceFile: keyPath };

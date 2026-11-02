@@ -1,3 +1,4 @@
+import { resolveTrustRoot } from "../core/trust-root.mjs";
 import { spawn, spawnSync } from "node:child_process";
 import { join, resolve, relative, dirname } from "node:path";
 import {
@@ -36,6 +37,7 @@ export function runSupervisor(options = {}) {
   const mirqlDir =
     options.mirqlDir ?? options.dir ?? join(process.cwd(), ".mirql");
   const workspaceDir = options.workspaceDir ?? process.cwd();
+  resolveTrustRoot(mirqlDir, { workspaceDir });
 
   // Touch heartbeat and write launcher PID for watchdog monitoring
   const stateDir = join(mirqlDir, "state");
@@ -122,7 +124,7 @@ export function runSupervisor(options = {}) {
     );
   }
 
-  // 2. Supervisor keys are kept strictly in mirqlDir outside agent workspace
+  // 2. Supervisor keys are loaded from the external trust root.
   const keypair =
     options.keypair ??
     (options.signingKey

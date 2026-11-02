@@ -1,3 +1,4 @@
+import { trustFile } from "../packages/core/trust-root.mjs";
 // tests/inbox.test.mjs — Comprehensive test suite for packages/inbox (W5b hardened).
 // Covers: drop-in genesis (idempotent & integrity-fail-closed), externalized
 // human private key (Law 6), explicit-only human credentials (fail closed),
@@ -95,15 +96,15 @@ describe("Work Package W5b: mirql-inbox test suite (hardened)", () => {
 
       // Directory layout
       assert.ok(existsSync(join(mirqlDir, "ledger", "events.jsonl")));
-      assert.ok(existsSync(join(mirqlDir, "ledger", "keyring.json")));
+      assert.ok(existsSync(trustFile(mirqlDir, "keyring.json")));
       assert.ok(existsSync(join(mirqlDir, "ledger", "snapshots")));
       assert.ok(existsSync(join(mirqlDir, "cache", "state.json")));
-      assert.ok(existsSync(join(mirqlDir, "keys", "queue.key.json")));
-      assert.ok(existsSync(join(mirqlDir, "keys", "run_supervisor.key.json")));
-      assert.ok(existsSync(join(mirqlDir, "keys", "log.key.json")));
-      assert.ok(existsSync(join(mirqlDir, "keys", "inbox.key.json")));
-      assert.ok(existsSync(join(mirqlDir, "keys", "notary.key.json")));
-      assert.ok(existsSync(join(mirqlDir, "keys", "lifeguard.key.json")));
+      assert.ok(existsSync(trustFile(mirqlDir, "keys", "queue.key.json")));
+      assert.ok(existsSync(trustFile(mirqlDir, "keys", "run_supervisor.key.json")));
+      assert.ok(existsSync(trustFile(mirqlDir, "keys", "log.key.json")));
+      assert.ok(existsSync(trustFile(mirqlDir, "keys", "inbox.key.json")));
+      assert.ok(existsSync(trustFile(mirqlDir, "keys", "notary.key.json")));
+      assert.ok(existsSync(trustFile(mirqlDir, "keys", "lifeguard.key.json")));
       assert.ok(existsSync(join(mirqlDir, "consensus")));
       assert.ok(existsSync(join(mirqlDir, "proposals")));
       assert.ok(existsSync(join(mirqlDir, "warrants")));
@@ -356,6 +357,7 @@ describe("Work Package W5b: mirql-inbox test suite (hardened)", () => {
       assert.equal(readAllEvents(mirqlDir).length, 1);
 
       // A key file planted INSIDE .mirql must never be usable as a credential.
+      mkdirSync(join(mirqlDir, "keys"), { recursive: true });
       const planted = join(mirqlDir, "keys", "human.key.json");
       writeFileSync(planted, JSON.stringify(generateEd25519Keypair()), "utf8");
       assert.throws(
@@ -445,7 +447,7 @@ describe("Work Package W5b: mirql-inbox test suite (hardened)", () => {
         stripped[k] = v;
       }
       writeFileSync(
-        join(mirqlDir, "ledger", "keyring.json"),
+        trustFile(mirqlDir, "keyring.json"),
         JSON.stringify(stripped, null, 2) + "\n",
         "utf8",
       );
@@ -465,7 +467,7 @@ describe("Work Package W5b: mirql-inbox test suite (hardened)", () => {
 
       // Restore the full keyring for subsequent checks.
       writeFileSync(
-        join(mirqlDir, "ledger", "keyring.json"),
+        trustFile(mirqlDir, "keyring.json"),
         JSON.stringify(keyring, null, 2) + "\n",
         "utf8",
       );
@@ -939,7 +941,7 @@ describe("Work Package W5b: mirql-inbox test suite (hardened)", () => {
       generateFactoryKeypairs(mirqlDir);
 
       for (const w of FACTORY_WRITERS) {
-        const keyPath = join(mirqlDir, "keys", w.file);
+        const keyPath = trustFile(mirqlDir, "keys", w.file);
         assert.ok(existsSync(keyPath), `${w.file} must exist`);
         const doc = JSON.parse(readFileSync(keyPath, "utf8"));
         assert.ok(typeof doc.privateKey === "string" && doc.privateKey.length > 0);
@@ -953,11 +955,11 @@ describe("Work Package W5b: mirql-inbox test suite (hardened)", () => {
       }
 
       // The notary alias file carries the same private key and permissions.
-      const aliasPath = join(mirqlDir, "keys", "mergeproof.key.json");
+      const aliasPath = trustFile(mirqlDir, "keys", "mergeproof.key.json");
       assert.ok(existsSync(aliasPath), "notary alias key must exist");
       if (process.platform !== "win32") {
         assert.equal(statSync(aliasPath).mode & 0o777, 0o600);
-        assert.equal(statSync(join(mirqlDir, "keys")).mode & 0o777, 0o700);
+        assert.equal(statSync(trustFile(mirqlDir, "keys")).mode & 0o777, 0o700);
       }
     } finally {
       rmSync(tmp, { recursive: true, force: true });

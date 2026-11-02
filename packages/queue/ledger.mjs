@@ -1,3 +1,5 @@
+import { requireTrustForKeyCreation } from "../core/trust-root.mjs";
+import { trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 // packages/queue/ledger.mjs — Ledger I/O, Key Management, Event Folding, and Concurrency Lockfile.
 import {
   readFileSync,
@@ -45,14 +47,13 @@ export {
 // withLedgerLock is imported and re-exported from @mirql/core
 
 /**
- * Load keyring from <mirqlDir>/ledger/keyring.json.
+ * Load keyring from <trustRoot>/keyring.json.
  * @param {string} mirqlDir
  * @returns {object | null}
  */
 export function loadKeyring(mirqlDir) {
   const candidates = [
-    join(mirqlDir, "ledger", "keyring.json"),
-    join(mirqlDir, "keyring.json"),
+    trustFile(mirqlDir, "keyring.json"),
   ];
   for (const p of candidates) {
     if (existsSync(p)) {
@@ -65,13 +66,13 @@ export function loadKeyring(mirqlDir) {
 }
 
 /**
- * Write or update keyring at <mirqlDir>/ledger/keyring.json.
+ * Write or update keyring at <trustRoot>/keyring.json.
  * @param {string} mirqlDir
  * @param {object} keyring
  * @param {object} [options]
  */
 export function saveKeyring(mirqlDir, keyring, options = {}) {
-  const p = join(mirqlDir, "ledger", "keyring.json");
+  const p = trustFile(mirqlDir, "keyring.json");
   mkdirSync(dirname(p), { recursive: true });
   let existing = {};
   if (!options.overwrite && existsSync(p)) {
@@ -102,7 +103,7 @@ export function saveKeyring(mirqlDir, keyring, options = {}) {
  * @returns {{ publicKey: string, privateKey: string, keyId: string, writer: { ns: string, key_id: string } }}
  */
 export function getOrCreateQueueKeypair(mirqlDir, customKeyFile) {
-  const keyPath = customKeyFile || join(mirqlDir, "keys", "queue.key.json");
+  const keyPath = customKeyFile ? assertExternalTrustPath(customKeyFile, mirqlDir) : trustFile(mirqlDir, "keys", "queue.key.json");
   let kp;
 
   if (existsSync(keyPath)) {
@@ -115,6 +116,7 @@ export function getOrCreateQueueKeypair(mirqlDir, customKeyFile) {
   }
 
   if (!kp) {
+    requireTrustForKeyCreation(mirqlDir);
     const generated = generateEd25519Keypair();
     kp = {
       ...generated,
@@ -139,8 +141,8 @@ export function getOrCreateQueueKeypair(mirqlDir, customKeyFile) {
     } catch {}
   }
 
-  // Ensure tool:queue is registered in <mirqlDir>/ledger/keyring.json
-  const keyringPath = join(mirqlDir, "ledger", "keyring.json");
+  // Ensure tool:queue is registered in <trustRoot>/keyring.json
+  const keyringPath = trustFile(mirqlDir, "keyring.json");
   let keyring = {};
   if (existsSync(keyringPath)) {
     try {

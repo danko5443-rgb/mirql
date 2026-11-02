@@ -124,7 +124,6 @@ export function runGenesis(mirqlDir, options = {}) {
   // 2. Initialize directory layout
   mkdirSync(join(dir, "ledger", "snapshots"), { recursive: true });
   mkdirSync(join(dir, "cache"), { recursive: true });
-  mkdirSync(join(dir, "keys"), { recursive: true });
   mkdirSync(join(dir, "consensus"), { recursive: true });
   mkdirSync(join(dir, "proposals"), { recursive: true });
   mkdirSync(join(dir, "warrants"), { recursive: true });
@@ -134,6 +133,7 @@ export function runGenesis(mirqlDir, options = {}) {
   // 3. Provision all canonical writer keypairs. Factory (machine) keys are
   //    written under <dir>/keys; the human:owner private key is returned and
   //    persisted OUTSIDE .mirql below. keyring.json is rebuilt cleanly (B4).
+  purgeStaleHumanKeys(dir);
   const humanKeyOut = resolveHumanKeyPath(dir, options);
   const keypairs = generateFactoryKeypairs(dir, { humanKeyPath: humanKeyOut });
   const humanKp = keypairs[HUMAN_WRITER_NS];

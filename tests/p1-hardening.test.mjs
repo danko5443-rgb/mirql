@@ -1,6 +1,7 @@
+import { trustFile, resolveTrustRoot } from "../packages/core/trust-root.mjs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -133,7 +134,8 @@ describe("P1 Hardening: Multi-Process Locking, ACL Parity, Trust Root, & Anti-Ch
   it("P1.3: verifyLedger anchors trust root via --expect-head hash checking and fail-closed validation", () => {
     const tmp = mkdtempSync(join(tmpdir(), "mirql-p1-head-"));
     try {
-      const keyOut = join(tmp, "human.key.json");
+      mkdirSync(resolveTrustRoot(tmp), { recursive: true });
+      const keyOut = trustFile(tmp, "human.key.json");
       const genesisRes = runGenesis(tmp, { humanKeyOut: keyOut });
       assert.ok(genesisRes.head_hash, "genesis must return head_hash");
       assert.equal(genesisRes.head_hash, genesisRes.hash);

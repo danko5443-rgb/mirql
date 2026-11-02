@@ -1,3 +1,4 @@
+import { trustFile, resolveTrustRoot } from "../packages/core/trust-root.mjs";
 // W3 tests: packages/log — the cryptographic append-only ledger and its
 // deterministic projections. Covers signed appends and hash chaining,
 // idempotency dedup, the Law 3 single-writer ACL, Law 4 tamper detection and
@@ -132,7 +133,8 @@ function trustTestKeys(mirqlDir) {
   for (const kp of [QUEUE_KP, RUN_KP, NOTARY_KP, INBOX_KP, LIFEGUARD_KP, LOG_KP]) {
     keyring[kp.keyId] = kp.publicKey;
   }
-  writeFileSync(join(mirqlDir, "ledger", "keyring.json"), jcs(keyring), "utf8");
+  mkdirSync(resolveTrustRoot(mirqlDir), { recursive: true });
+  writeFileSync(trustFile(mirqlDir, "keyring.json"), jcs(keyring), "utf8");
 }
 
 /**
@@ -1037,8 +1039,8 @@ describe("appendEvent — pre-signed envelopes and keyring verification", () => 
   test("verifies a caller-supplied envelope against ledger/keyring.json", () => {
     const dir = makeTmp();
     mkdirSync(join(dir, "ledger"), { recursive: true });
-    writeFileSync(
-      join(dir, "ledger", "keyring.json"),
+    mkdirSync(resolveTrustRoot(dir), { recursive: true });
+    writeFileSync(trustFile(dir, "keyring.json"),
       jcs({ [QUEUE_KP.keyId]: QUEUE_KP.publicKey }),
       "utf8",
     );
@@ -1394,8 +1396,8 @@ describe("Claude Opus 5.5 High Review Findings — Regression Suite", () => {
     mkdirSync(join(dir, "ledger"), { recursive: true });
 
     // Keyring contains ONLY QUEUE_KP (real key)
-    writeFileSync(
-      join(dir, "ledger", "keyring.json"),
+    mkdirSync(resolveTrustRoot(dir), { recursive: true });
+    writeFileSync(trustFile(dir, "keyring.json"),
       jcs({ [QUEUE_KP.keyId]: QUEUE_KP.publicKey }),
       "utf8",
     );

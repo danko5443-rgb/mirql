@@ -1,3 +1,5 @@
+import { requireTrustForKeyCreation } from "../core/trust-root.mjs";
+import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 import {
   existsSync,
   mkdirSync,
@@ -62,6 +64,7 @@ export function appendSupervisorEvent(mirqlDir, eventInput, keypair) {
         : GENESIS_PREV_HASH;
 
   const kp = keypair ?? getOrGenerateSupervisorKey(mirqlDir);
+  updateKeyring(mirqlDir, kp);
   const keyId = kp.keyId;
 
   const unsigned = {
@@ -102,8 +105,6 @@ export function appendSupervisorEvent(mirqlDir, eventInput, keypair) {
   const signed = signEvent(unsigned, kp.privateKey, keyId);
   appendFileSync(eventsFile, jcs(signed) + "\n", "utf8");
 
-  // Keep keyring in sync if needed
-  updateKeyring(mirqlDir, kp);
 
   return signed;
   });
@@ -116,9 +117,9 @@ export function appendSupervisorEvent(mirqlDir, eventInput, keypair) {
  * @param {{ keyId: string, publicKey: string }} kp
  */
 export function updateKeyring(mirqlDir, kp) {
-  const ledgerDir = join(mirqlDir, "ledger");
+  const ledgerDir = resolveTrustRoot(mirqlDir);
   mkdirSync(ledgerDir, { recursive: true, mode: 0o700 });
-  const keyringPath = join(ledgerDir, "keyring.json");
+  const keyringPath = trustFile(mirqlDir, "keyring.json");
   let keyring = {};
   if (existsSync(keyringPath)) {
     try {
@@ -145,10 +146,11 @@ export function updateKeyring(mirqlDir, kp) {
  * @returns {{ privateKey: string, publicKey: string, keyId: string }}
  */
 export function getOrGenerateSupervisorKey(mirqlDir, options = {}) {
-  const keysDir = options.keysDir ?? join(mirqlDir, "keys");
+  const keysDir = options.keysDir ? assertExternalTrustPath(options.keysDir, mirqlDir) : trustFile(mirqlDir, "keys");
   const primaryPath = join(keysDir, "run_supervisor.key.json");
   const fallbackPath = join(keysDir, "run_supervisor.json");
-  const keyPath = existsSync(primaryPath) ? primaryPath : (existsSync(fallbackPath) ? fallbackPath : primaryPath);
+  const candidate = existsSync(primaryPath) ? primaryPath : (existsSync(fallbackPath) ? fallbackPath : primaryPath);
+  const keyPath = assertExternalTrustPath(candidate, mirqlDir);
   if (existsSync(keyPath)) {
     try {
       const parsed = JSON.parse(readFileSync(keyPath, "utf8"));
@@ -161,6 +163,7 @@ export function getOrGenerateSupervisorKey(mirqlDir, options = {}) {
     }
   }
 
+  requireTrustForKeyCreation(mirqlDir);
   const kp = generateEd25519Keypair();
   mkdirSync(keysDir, { recursive: true, mode: 0o700 });
   writeFileSync(keyPath, jcs(kp) + "\n", { encoding: "utf8", mode: 0o600 });

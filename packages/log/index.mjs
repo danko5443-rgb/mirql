@@ -1,3 +1,4 @@
+import { trustFile } from "../core/trust-root.mjs";
 /**
  * mirql-log — the factory's cryptographic append-only ledger (Law 4).
  *
@@ -5,7 +6,7 @@
  * Law 17 integer-only):
  *
  *   <mirqlDir>/ledger/events.jsonl   append-only newline-delimited events
- *   <mirqlDir>/ledger/keyring.json   optional { [key_id]: publicKeyBase64Url }
+ *   <trustRoot>/keyring.json   optional { [key_id]: publicKeyBase64Url }
  *   <mirqlDir>/ledger/snapshots/     snapshot-<seq>.json fold snapshots
  *   <mirqlDir>/cache/state.json      disposable materialized fold cache
  *
@@ -116,7 +117,7 @@ function eventsFile(mirqlDir) {
 
 /** @param {string} mirqlDir @returns {string} */
 function keyringFile(mirqlDir) {
-  return join(mirqlDir, "ledger", "keyring.json");
+  return trustFile(mirqlDir, "keyring.json");
 }
 
 /** @param {string} mirqlDir @returns {string} */
@@ -202,7 +203,7 @@ function eventHashOf(event, rawLine, allowRawLine = false) {
 // ---------------------------------------------------------------------------
 
 /**
- * Load `ledger/keyring.json`: a map of key_id (and/or writer namespace) to
+ * Load `trust-root keyring.json`: a map of key_id (and/or writer namespace) to
  * either a base64url public key string (legacy) or a namespace-bound entry
  * `{ ns, publicKey }` (canonical since W5b). A missing or unparsable keyring
  * is treated as empty — the ledger itself still verifies via embedded writer
