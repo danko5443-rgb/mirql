@@ -3,9 +3,8 @@
 Execution checkpoint on 2 November 2026. Phase 0 code and the original issue fixes have landed.
 Item 1.4, disposable worker homes, and the breaker recovery follow-up have also landed.
 Item 1.1 is implemented on the external-trust-root branch and requires review.
-Item 1.2 is implemented on the signed-key-enrollment branch for review. Item 1.3,
-Windows ACL enforcement, remains open, as do the
-later authority, proof, telemetry, isolation and consolidation phases. The owner chose
+Item 1.2 is implemented on the signed-key-enrollment branch for review. Item 1.3, Windows ACL enforcement, is implemented on the private-credential-permissions
+branch for review. The later authority, proof, telemetry, isolation and consolidation phases remain open. The owner chose
 to keep the repository private and leave the unavailable main ruleset requirement open.
 The historical status table below records the original audit, rather than current completion.
 

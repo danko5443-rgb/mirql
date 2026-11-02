@@ -1,13 +1,8 @@
+import { writePrivateFile, protectPrivatePaths } from "../core/private-files.mjs";
 import { requireTrustForKeyCreation } from "../core/trust-root.mjs";
 import { assertKeyEnrolled } from "../core/keyring.mjs";
 import { trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-  appendFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   jcs,
@@ -137,6 +132,7 @@ export function getOrGenerateSupervisorKey(mirqlDir, options = {}) {
   const keyPath = assertExternalTrustPath(candidate, mirqlDir);
   if (existsSync(keyPath)) {
     try {
+      protectPrivatePaths([keyPath]);
       const parsed = JSON.parse(readFileSync(keyPath, "utf8"));
       if (parsed.privateKey && parsed.publicKey && parsed.keyId) {
         assertKeyEnrolled(mirqlDir, "tool:run_supervisor", parsed);
@@ -144,7 +140,7 @@ export function getOrGenerateSupervisorKey(mirqlDir, options = {}) {
       }
       throw new Error(`Incomplete supervisor keypair structure in ${keyPath}`);
     } catch (err) {
-      if (err.code === "KEYRING_INTEGRITY") throw err;
+      if (err.code === "KEYRING_INTEGRITY" || err.code === "PRIVATE_PERMISSIONS") throw err;
       throw new Error(`Corrupt supervisor key file at ${keyPath}: ${err.message}`);
     }
   }
@@ -152,7 +148,7 @@ export function getOrGenerateSupervisorKey(mirqlDir, options = {}) {
   requireTrustForKeyCreation(mirqlDir);
   const kp = generateEd25519Keypair();
   mkdirSync(keysDir, { recursive: true, mode: 0o700 });
-  writeFileSync(keyPath, jcs(kp) + "\n", { encoding: "utf8", mode: 0o600 });
+  writePrivateFile(keyPath, jcs(kp) + "\n");
   updateKeyring(mirqlDir, kp);
   return kp;
 }

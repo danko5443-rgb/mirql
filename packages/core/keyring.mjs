@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { writePrivateFiles, writePrivateFile, protectPrivatePaths } from "./private-files.mjs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { randomUUID } from "node:crypto";
 import { signEvent, verifyEvent } from "./ed25519.mjs";
 import { withLedgerLock } from "./lock.mjs";
 import { jcs } from "./jcs.mjs";
@@ -22,19 +22,10 @@ function readJson(file) {
   }
 }
 
-function atomicWrite(file, value) {
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-  const temp = file + "." + randomUUID() + ".tmp";
-  try {
-    writeFileSync(temp, jcs(value) + "\n", { mode: 0o600, flag: "wx" });
-    renameSync(temp, file);
-  } finally {
-    if (existsSync(temp)) unlinkSync(temp);
-  }
-}
-
 export function readOwnerPin(mirqlDir) {
-  const pin = readJson(trustFile(mirqlDir, "owner.pub.json"));
+  const file = trustFile(mirqlDir, "owner.pub.json");
+  if (existsSync(file)) protectPrivatePaths([file]);
+  const pin = readJson(file);
   if (!pin || typeof pin.publicKey !== "string" || pin.keyId !== "ed25519:" + pin.publicKey) {
     throw denial("Invalid pinned human public key");
   }
@@ -43,7 +34,9 @@ export function readOwnerPin(mirqlDir) {
 
 function verifiedDocument(mirqlDir) {
   const pin = readOwnerPin(mirqlDir);
-  const document = readJson(trustFile(mirqlDir, "keyring.sig"));
+  const signature = trustFile(mirqlDir, "keyring.sig");
+  if (existsSync(signature)) protectPrivatePaths([signature]);
+  const document = readJson(signature);
   if (!document || document.domain !== "mirql/keyring/v1" ||
       document.ledgerId !== basename(resolveTrustRoot(mirqlDir)) ||
       document.ownerKeyId !== pin.keyId || !verifyEvent(document, pin.publicKey).ok) {
@@ -63,7 +56,10 @@ export function readSignedKeyring(mirqlDir) {
   const file = trustFile(mirqlDir, "keyring.json");
   const signature = trustFile(mirqlDir, "keyring.sig");
   if (!existsSync(file) && !existsSync(signature)) return {};
+  const paths = [resolveTrustRoot(mirqlDir), file, signature, trustFile(mirqlDir, "owner.pub.json")];
+  protectPrivatePaths(paths.filter(path => existsSync(path)));
   const document = verifiedDocument(mirqlDir);
+  if (existsSync(file)) protectPrivatePaths([file]);
   const mirror = readJson(file);
   if (jcs(mirror) !== jcs(document.keyring)) {
     throw denial("Keyring was modified without the pinned human owner's signature");
@@ -93,11 +89,13 @@ export function sealKeyring(mirqlDir, keyring, owner, { initialize = false } = {
     if (!initialize) throw denial("Initialize the owner pin explicitly before enrollment");
     // Exclusive creation prevents concurrent bootstrap from replacing an owner pin.
     mkdirSync(dirname(pinPath), { recursive: true, mode: 0o700 });
-    writeFileSync(pinPath, jcs({ keyId: owner.keyId, publicKey: owner.publicKey }) + "\n",
-      { mode: 0o600, flag: "wx" });
+    writePrivateFile(pinPath, jcs({ keyId: owner.keyId, publicKey: owner.publicKey }) + "\n",
+      { directories: [resolveTrustRoot(mirqlDir)], exclusive: true });
   }
-  atomicWrite(trustFile(mirqlDir, "keyring.json"), keyring);
-  atomicWrite(trustFile(mirqlDir, "keyring.sig"), signature);
+  writePrivateFiles([
+    { path: trustFile(mirqlDir, "keyring.json"), contents: jcs(keyring) + "\n" },
+    { path: trustFile(mirqlDir, "keyring.sig"), contents: jcs(signature) + "\n" },
+  ], { directories: [resolveTrustRoot(mirqlDir)] });
 }
 
 /** Retry from the last signed document, never from an altered unsigned mirror. */

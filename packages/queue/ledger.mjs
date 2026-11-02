@@ -1,15 +1,9 @@
+import { writePrivateFile, protectPrivatePaths } from "../core/private-files.mjs";
 import { requireTrustForKeyCreation } from "../core/trust-root.mjs";
 import { readSignedKeyring, sealKeyring, assertKeyEnrolled } from "../core/keyring.mjs";
 import { trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 // packages/queue/ledger.mjs — Ledger I/O, Key Management, Event Folding, and Concurrency Lockfile.
-import {
-  readFileSync,
-  writeFileSync,
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  chmodSync,
-} from "node:fs";
+import { readFileSync, appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import {
   jcs,
@@ -95,8 +89,10 @@ export function getOrCreateQueueKeypair(mirqlDir, customKeyFile) {
   if (existsSync(keyPath)) {
     let parsed;
     try {
+      protectPrivatePaths([keyPath]);
       parsed = JSON.parse(readFileSync(keyPath, "utf8"));
     } catch (error) {
+      if (error.code === "PRIVATE_PERMISSIONS") throw error;
       throw new Error("Invalid persisted queue key: " + error.message);
     }
     if (!parsed.privateKey || !parsed.publicKey || !parsed.keyId) {
@@ -116,19 +112,8 @@ export function getOrCreateQueueKeypair(mirqlDir, customKeyFile) {
       },
     };
 
-    // H4: private keys are written with mode 0o600 inside a 0o700 directory.
-    const keysDir = dirname(keyPath);
-    mkdirSync(keysDir, { recursive: true, mode: 0o700 });
-    try {
-      chmodSync(keysDir, 0o700);
-    } catch {}
-    writeFileSync(keyPath, JSON.stringify(kp, null, 2) + "\n", {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-    try {
-      chmodSync(keyPath, 0o600);
-    } catch {}
+    writePrivateFile(keyPath, JSON.stringify(kp, null, 2) + "\n");
+
   }
 
   assertKeyEnrolled(mirqlDir, "tool:queue", kp);

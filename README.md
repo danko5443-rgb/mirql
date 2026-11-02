@@ -155,5 +155,19 @@ and discard unsigned edits to the JSON mirror.
 
 Enrollment can add namespaces or repeat an existing registration. Replacing a
 namespace key is refused pending a key-rotation policy that preserves verification
-of historical ledger entries. Windows ACL enforcement and worker isolation remain
-separate trust-remediation requirements.
+of historical ledger entries. Worker isolation remains a separate trust-remediation requirement.
+
+Credential publication creates a private temporary file and writes secret bytes
+through its retained file handle. On Windows,
+the credential directories and files receive a protected ACL granting FullControl
+only to the current user. Existing files owned by another identity are refused.
+PowerShell uses the native Windows security APIs in a hidden process. If that
+enforcement is unavailable or verification fails, credential publication stops.
+
+Linux and macOS retain owner-only 0700 directories and 0600 files. Publication
+uses protected temporary files and atomic replacement. Temporary pathname changes
+are detected without redirecting secret writes. Existing unrelated parent
+directory permissions are preserved. Existing credentials are checked before use,
+and cached checks are invalidated by metadata changes, including NTFS ACL changes.
+These file permissions protect against other OS identities. Worker process
+isolation remains a separate requirement.

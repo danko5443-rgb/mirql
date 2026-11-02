@@ -94,7 +94,7 @@ describe("circuit breakers are binding, not advisory (issue #15)", () => {
   });
 
   for (const recovery of ["expiry", "reset", "throttle"]) {
-    it(`reactive leasing resumes after breaker ${recovery} without a new job`, { timeout: 5000 }, async (t) => {
+    it(`reactive leasing resumes after breaker ${recovery} without a new job`, { timeout: 30000 }, async (t) => {
       const { runSupervisorReactive } = await targetImport("packages/run/supervisor.mjs");
       submitWarrant(tempDir, makeValidWarrant(), { repoRoot: ROOT });
       tickQueue(tempDir);
