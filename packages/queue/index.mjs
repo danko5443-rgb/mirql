@@ -395,7 +395,7 @@ export function leaseNextJob(mirqlDir, options = {}) {
     // breaker is actively TRIPPED, no new work may start. The queue refuses
     // to lease (fail-closed, Law 14) until the cooldown expires or a human
     // resets the breaker via the doctor. Throttle does NOT block — only trips.
-    const trippedBreakers = getActiveTrippedBreakers(mirqlDir, nowMs);
+    const trippedBreakers = getActiveTrippedBreakers(mirqlDir, nowMs, options);
     if (trippedBreakers.length > 0) {
       return {
         ok: false,
