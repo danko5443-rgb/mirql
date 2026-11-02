@@ -1,6 +1,7 @@
 import { test, describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
+  chmodSync,
   mkdtempSync,
   mkdirSync,
   rmSync,
@@ -1525,4 +1526,70 @@ test("add correctly computes sum", () => {
       assert.equal(result.checks?.anti_cheat?.passed, true);
     });
   });
+});
+
+test("each worker receives an empty temporary home and removes it after exit", () => {
+  const workspace = mkdtempSync(join(tmpdir(), "mirql-home-test-"));
+  const script = join(workspace, "inspect-home.mjs");
+  writeFileSync(script, `import {readdirSync,writeFileSync} from "node:fs";
+    const home=process.env.HOME;
+    const drive=process.env.HOMEDRIVE;
+    const path=process.env.HOMEPATH;
+    console.log(JSON.stringify({home,profile:process.env.USERPROFILE,drive,path,files:readdirSync(home)}));
+    writeFileSync(home+"/private-marker","test");
+    process.exit(Number(process.argv[2]));`);
+  try {
+    const homes = [];
+    for (const exit of [0, 1]) {
+      const result = runAgent({
+        command: `"${process.execPath}" "${script}" ${exit}`,
+        cwd: workspace,
+        env: { ...process.env, HOME: workspace, USERPROFILE: workspace, home: workspace },
+        allowedEnv: ["HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"],
+      });
+      const report = JSON.parse(result.stdout.trim());
+      assert.equal(result.exitCode, exit);
+      assert.equal(report.home, report.profile);
+      assert.notEqual(report.home, workspace);
+      if (process.platform === "win32" && report.drive && report.path) {
+        assert.equal(report.home.toLowerCase(), (report.drive + report.path).toLowerCase());
+      }
+      assert.deepEqual(report.files, []);
+      assert.equal(existsSync(report.home), false);
+      homes.push(report.home);
+    }
+    assert.notEqual(homes[0], homes[1]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a worker cleanup failure preserves output and exit status", {
+  skip: process.platform === "win32" || process.getuid?.() === 0,
+}, () => {
+  const workspace = mkdtempSync(join(tmpdir(), "mirql-cleanup-test-"));
+  const script = join(workspace, "lock-home.mjs");
+  writeFileSync(script, `import {mkdirSync,writeFileSync,chmodSync} from "node:fs";
+    const locked=process.env.HOME+"/locked";
+    mkdirSync(locked);
+    writeFileSync(locked+"/file","data");
+    chmodSync(locked,0o500);
+    console.log("worker output");
+    process.exit(7);`);
+  let home;
+  try {
+    const result = runAgent({ command: `"${process.execPath}" "${script}"`, cwd: workspace });
+    home = result.workerHome;
+    assert.equal(result.ok, false);
+    assert.equal(result.exitCode, EXIT_CODES.POLICY_DENIAL);
+    assert.equal(result.workerExitCode, 7);
+    assert.match(result.stdout, /worker output/);
+    assert.ok(result.cleanupError);
+  } finally {
+    if (home) {
+      chmodSync(join(home, "locked"), 0o700);
+      rmSync(home, { recursive: true, force: true });
+    }
+    rmSync(workspace, { recursive: true, force: true });
+  }
 });

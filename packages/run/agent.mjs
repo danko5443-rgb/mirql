@@ -1,3 +1,6 @@
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { EXIT_CODES } from "../core/index.mjs";
 import { checkHumanOnlyPaths } from "./anti-cheat.mjs";
@@ -91,13 +94,41 @@ export function runAgent(options = {}) {
 
   // If a command is specified, spawn it in the clean sandbox environment
   if (typeof options.command === "string" && options.command.length > 0) {
-    const res = spawnSync(options.command, {
-      shell: true,
-      env: cleanEnv,
-      cwd: options.cwd ?? process.cwd(),
-      timeout: options.timeout_ms ?? 30000,
-      encoding: "utf8",
-    });
+    const workerHome = mkdtempSync(join(tmpdir(), "mirql-agent-home-"));
+    for (const key of Object.keys(cleanEnv)) {
+      const u = key.toUpperCase();
+      if (u === "HOME" || u === "USERPROFILE" || u === "HOMEDRIVE" || u === "HOMEPATH") {
+        delete cleanEnv[key];
+      }
+    }
+    const workerEnv = { ...cleanEnv, HOME: workerHome, USERPROFILE: workerHome };
+    if (process.platform === "win32") {
+      const match = workerHome.match(/^([a-zA-Z]:)(.*)$/);
+      if (match) {
+        workerEnv.HOMEDRIVE = match[1];
+        workerEnv.HOMEPATH = match[2];
+      }
+    }
+    let res;
+    let cleanupError;
+    try {
+      res = spawnSync(options.command, {
+        shell: true,
+        env: workerEnv,
+        cwd: options.cwd ?? process.cwd(),
+        timeout: options.timeout_ms ?? 30000,
+        encoding: "utf8",
+      });
+    } finally {
+      try {
+        rmSync(workerHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      } catch (error) {
+        cleanupError = error.code ? `${error.code}: ${error.message}` : error.message;
+      }
+      if (!cleanupError && existsSync(workerHome)) {
+        cleanupError = "EEXIST: workerHome path retained after cleanup";
+      }
+    }
 
     let exitCode = res.status;
     // A process terminated by a signal must not report exit 0
@@ -108,8 +139,9 @@ export function runAgent(options = {}) {
     }
 
     return {
-      exitCode,
-      ok: exitCode === 0 && !res.signal,
+      exitCode: cleanupError ? EXIT_CODES.POLICY_DENIAL : exitCode,
+      ok: exitCode === 0 && !res.signal && !cleanupError,
+      ...(cleanupError ? { workerExitCode: exitCode, cleanupError, workerHome } : {}),
       stdout: res.stdout ?? "",
       stderr: res.stderr ?? "",
       strippedEnv: stripped,
