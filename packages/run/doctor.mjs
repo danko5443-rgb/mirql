@@ -753,6 +753,39 @@ export class BreakerStore {
     return this.load(nowMs).subsystems[subsystem];
   }
 
+  throttle(subsystem, cooldownMs = 3600000, nowMs = Date.now()) {
+    if (subsystem === "lifeguard" || subsystem === "all") {
+      throw new Error(`Invalid subsystem to throttle: "${subsystem}". Lifeguard has unblockable authority.`);
+    }
+
+    const safeCd = Number.isSafeInteger(cooldownMs) && cooldownMs >= 0 ? cooldownMs : 3600000;
+    const expiresAt = Math.min(Number.MAX_SAFE_INTEGER, nowMs + safeCd);
+
+    const keypair = this.keypair || getOrGenerateSupervisorKey(this.mirqlDir);
+    appendSupervisorEvent(
+      this.mirqlDir,
+      {
+        type: "probe.completed",
+        payload: {
+          probe: "doctor",
+          type: "doctor",
+          status: "pass",
+          breaker: {
+            action: "throttle",
+            target_subsystem: subsystem,
+            cooldown_ms: safeCd,
+            reason: "throttle_rate_limit",
+          },
+          expires_at_ms: expiresAt,
+        },
+        nowMs,
+      },
+      keypair,
+    );
+
+    return this.load(nowMs).subsystems[subsystem];
+  }
+
   reset(subsystem, nowMs = Date.now()) {
     if (subsystem === "lifeguard") {
       throw new Error("Lifeguard is not managed by circuit breakers");

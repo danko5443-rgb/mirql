@@ -545,6 +545,7 @@ export async function runSupervisorReactive(options = {}) {
   let queuedRerun = false;
   const pendingEvents = [];
   let expiryTimer = null;
+  let wakeAtMs = Infinity;
 
   const watcher = createLedgerWatcher(ledgerPath, {
     debounceMs: options.debounceMs ?? 25,
@@ -558,11 +559,14 @@ export async function runSupervisorReactive(options = {}) {
   });
 
   const scheduleExpiryWake = (expiresAtMs) => {
-    if (expiryTimer || watcher.closed) return;
+    if (watcher.closed || !Number.isSafeInteger(expiresAtMs) || expiresAtMs >= wakeAtMs) return;
+    clearTimeout(expiryTimer);
+    wakeAtMs = expiresAtMs;
     const now = Date.now();
-    const delay = Math.max(50, (expiresAtMs - now) + 50);
+    const delay = Math.min(2 ** 31 - 1, Math.max(50, expiresAtMs - now + 50));
     expiryTimer = setTimeout(() => {
       expiryTimer = null;
+      wakeAtMs = Infinity;
       if (!watcher.closed) {
         runStep(null).catch(() => {});
       }
@@ -614,6 +618,20 @@ export async function runSupervisorReactive(options = {}) {
             break;
           }
 
+          if (leaseRes?.status === "breaker_tripped") {
+            // All active trips must expire before leasing is possible. A signed
+            // doctor reset or throttle can release the queue earlier and has its own wake.
+            const deadlines = Array.isArray(leaseRes.breakers)
+              ? leaseRes.breakers.map((b) => b?.expires_at_ms).filter(Number.isSafeInteger)
+              : [];
+            if (deadlines.length > 0) {
+              scheduleExpiryWake(Math.max(...deadlines));
+            }
+            if (queuedRerun) {
+              continue;
+            }
+            break;
+          }
           if (!leaseRes || !leaseRes.ok) {
             break;
           }
@@ -710,6 +728,29 @@ export async function runSupervisorReactive(options = {}) {
     }
     return lastResult;
   };
+
+  if (typeof options.leaseJob === "function") {
+    const isBreakerReleaseEvent = (event) => {
+      if (!event) return false;
+      const p = event.payload || {};
+      if (p.probe === "doctor" && p.breaker) {
+        // Reset or throttle removes binding trips; cooldown changes adjust deadlines
+        return true;
+      }
+      return event.type === "doctor_breaker";
+    };
+    watcher.on("probe.completed", (event) => {
+      if (isBreakerReleaseEvent(event)) {
+        // Events only wake the scheduler. Lease admission rechecks the signed ledger.
+        runStep(null).catch((err) => watcher.emit("error", err));
+      }
+    });
+    watcher.on("doctor_breaker", (event) => {
+      if (isBreakerReleaseEvent(event)) {
+        runStep(null).catch((err) => watcher.emit("error", err));
+      }
+    });
+  }
 
   const reactiveEvents = ["job.enqueued", "warrant.minted", "human.intent"];
 

@@ -1,10 +1,9 @@
 // reproducer/breaker-enforcement.mjs — Law 16 verified reproducer for issue #15.
 //
 // Runs the candidate's breaker enforcement suite against the checkout under
-// test (MIRQL_TARGET_ROOT, set by the ci-evidence reproducer pipeline). The
-// suite imports the target's core/queue/doctor modules, so on the advisory-only
-// base it fails (no getActiveTrippedBreakers; leases granted despite trips),
-// and on the fixed head it passes. Exit code mirrors the suite.
+// test (MIRQL_TARGET_ROOT, set by the ci-evidence reproducer pipeline).
+// On the base without reactive breaker recovery, the test times out (fail),
+// and on the fixed head with expiry/reset/throttle wakes it passes.
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
@@ -15,7 +14,7 @@ if (!root) {
   process.exit(5);
 }
 const suite = resolve(fileURLToPath(import.meta.url), "..", "..", "tests", "breaker-enforcement.test.mjs");
-const res = spawnSync(process.execPath, ["--test", suite], {
+const res = spawnSync(process.execPath, ["--test", "--test-name-pattern", "reactive leasing resumes after breaker", suite], {
   cwd: root,
   env: { ...process.env, MIRQL_TARGET_ROOT: root },
   stdio: "inherit",

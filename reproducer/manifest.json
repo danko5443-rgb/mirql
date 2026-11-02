@@ -1,5 +1,5 @@
 {
-  "description": "Circuit-breaker enforcement regression suite (issue #15): the candidate's tests/breaker-enforcement.test.mjs is executed against the checkout under test (MIRQL_TARGET_ROOT) — it must fail on the advisory-only base (tripped breakers do not refuse leases) and pass on the fixed head (binding enforcement).",
+  "description": "Issue #15 recovery: verify reactive supervisor resumes queued leasing after circuit breakers clear or expire without requiring unrelated wake events.",
   "entry": "reproducer/breaker-enforcement.mjs",
   "expect_base": "fail",
   "expect_head": "pass"
