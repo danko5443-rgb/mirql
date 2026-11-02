@@ -72,6 +72,77 @@ describe("Milestone M2: Monotone Potential Phi Engine & Thrift Gate (Law 13)", (
       const phi = computePhi(tempDir);
       assert.ok(phi.max_nesting_depth >= 4, "Nesting depth must reflect nested blocks");
     });
+
+    it("counts package modules unreachable from tests as test gaps (Law 13 test-gap term)", () => {
+      const pkgDir = join(tempDir, "packages", "lib");
+      const testsDir = join(tempDir, "tests");
+      mkdirSync(pkgDir, { recursive: true });
+      mkdirSync(testsDir, { recursive: true });
+      writeFileSync(join(pkgDir, "a.mjs"), "export const a = 1;\n", "utf8");
+      writeFileSync(
+        join(testsDir, "other.test.mjs"),
+        `import assert from "node:assert/strict";\nit("t", () => assert.ok(true));\n`,
+        "utf8",
+      );
+
+      const before = computePhi(tempDir);
+      assert.ok(Number.isSafeInteger(before.test_gaps), "test_gaps must be safe integer (Law 17)");
+      assert.equal(before.test_gaps, 1, "package module unreachable from tests must count as a gap");
+
+      // Covering the module from a test file removes the gap and lowers total.
+      // The cover file is a single bare side-effect import so its own metric
+      // contribution is exactly +1 loc — the drop is then exactly the gap weight.
+      writeFileSync(
+        join(testsDir, "cover.test.mjs"),
+        `import "../packages/lib/a.mjs";\n`,
+        "utf8",
+      );
+      const after = computePhi(tempDir);
+      assert.equal(after.test_gaps, 0, "imported module must no longer be a gap");
+      assert.equal(after.loc, before.loc + 1, "cover file contributes exactly one loc");
+      assert.equal(after.total, before.total - 6 + 1, "total must drop by the gap weight (6) minus the cover file's one loc");
+      assert.ok(after.total < before.total, "covering a test gap must strictly lower total");
+    });
+
+    it("counts transitive import coverage, not just direct imports", () => {
+      const pkgDir = join(tempDir, "packages", "lib");
+      const testsDir = join(tempDir, "tests");
+      mkdirSync(pkgDir, { recursive: true });
+      mkdirSync(testsDir, { recursive: true });
+      writeFileSync(join(pkgDir, "inner.mjs"), "export const inner = 1;\n", "utf8");
+      writeFileSync(
+        join(pkgDir, "outer.mjs"),
+        `import { inner } from "./inner.mjs";\nexport const outer = inner + 1;\n`,
+        "utf8",
+      );
+      writeFileSync(
+        join(testsDir, "t.test.mjs"),
+        `import { outer } from "../packages/lib/outer.mjs";\nit("t", () => { if (outer !== 2) throw new Error("x"); });\n`,
+        "utf8",
+      );
+
+      const phi = computePhi(tempDir);
+      assert.equal(phi.test_gaps, 0, "transitively imported module must count as covered");
+    });
+
+    it("scopes test gaps to packages/ — bin and scripts tooling never counted", () => {
+      const binDir = join(tempDir, "bin");
+      const scriptsDir = join(tempDir, "scripts");
+      const testsDir = join(tempDir, "tests");
+      mkdirSync(binDir, { recursive: true });
+      mkdirSync(scriptsDir, { recursive: true });
+      mkdirSync(testsDir, { recursive: true });
+      writeFileSync(join(binDir, "cli.mjs"), "export const cli = 1;\n", "utf8");
+      writeFileSync(join(scriptsDir, "tool.mjs"), "export const tool = 1;\n", "utf8");
+      writeFileSync(
+        join(testsDir, "t.test.mjs"),
+        `it("t", () => {});\n`,
+        "utf8",
+      );
+
+      const phi = computePhi(tempDir);
+      assert.equal(phi.test_gaps, 0, "bin/ and scripts/ files are not gap candidates");
+    });
   });
 
   describe("2. Monotone Potential Ratchet (Law 13)", () => {

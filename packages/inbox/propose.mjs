@@ -1,5 +1,6 @@
 // packages/inbox/propose.mjs — Bounded proposer intake gate and Intent Synthesiser (Law 3, Law 9, Law 6, Law 16, roles/proposer.md).
 import { writeFileSync, mkdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { ulid, EXIT_CODES } from "../core/index.mjs";
 import {
@@ -10,6 +11,53 @@ import {
 
 /** Valid canonical intent categories (roles/proposer.md) */
 export const INTENT_CATEGORIES = Object.freeze(["bugfix", "feature", "refactor", "docs"]);
+
+/**
+ * Law 16 — Executes a (Law-1-screened) reproducer command and returns honest
+ * evidence. Verification means the process actually ran to completion within
+ * the timeout; ANY exit code is valid evidence (a bugfix reproducer is
+ * expected to exit non-zero before the fix). Fail closed: spawn errors and
+ * timeouts are never verified. Integer-only math (Law 17).
+ *
+ * @param {string} command - Law-1-screened shell command
+ * @param {object} [options]
+ * @param {number} [options.reproducerTimeoutMs=120000] - bounded to [1000, 600000]
+ * @param {string} [options.reproducerCwd]
+ * @returns {{ executed: boolean, timed_out: boolean, exit_code: number | null, duration_ms: number, error?: string }}
+ */
+export function executeReproducer(command, options = {}) {
+  const rawTimeout = options.reproducerTimeoutMs ?? options["reproducer-timeout-ms"] ?? 120000;
+  if (!Number.isSafeInteger(rawTimeout)) {
+    const err = new Error("reproducerTimeoutMs must be a safe integer (Law 17)");
+    err.exitCode = EXIT_CODES.USAGE_ERROR;
+    throw err;
+  }
+  const timeoutMs = Math.min(600000, Math.max(1000, rawTimeout));
+
+  const startedAt = Date.now();
+  let res;
+  try {
+    res = spawnSync(command, {
+      shell: true,
+      cwd: options.reproducerCwd ?? options["reproducer-cwd"] ?? process.cwd(),
+      timeout: timeoutMs,
+      encoding: "utf8",
+    });
+  } catch (err) {
+    return { executed: false, timed_out: false, exit_code: null, duration_ms: 0, error: err.message };
+  }
+  const durationMs = Math.trunc(Date.now() - startedAt);
+
+  if (res.error) {
+    return { executed: false, timed_out: false, exit_code: null, duration_ms: durationMs, error: res.error.message };
+  }
+  if (res.signal) {
+    // A process terminated by a signal (including timeout's SIGTERM) did not
+    // complete — fail closed, but report the fact honestly.
+    return { executed: false, timed_out: true, exit_code: null, duration_ms: durationMs, error: `terminated by signal ${res.signal}` };
+  }
+  return { executed: true, timed_out: false, exit_code: Math.trunc(res.status ?? 0), duration_ms: durationMs };
+}
 
 /**
  * Distills raw human text, issue reports, or chat interactions into an unambiguous,
@@ -138,7 +186,16 @@ export function distillIntent(rawInput, options = {}) {
     throw err;
   }
 
-  const reproducerVerified = Boolean(redCheck && redCheck.trim().length > 0);
+  // Law 16 honesty: a command string alone is NOT verification. Only recorded
+  // execution evidence (supplied by the caller after actually running it) can
+  // mark the reproducer verified. Fail closed by default.
+  const evidence = options.reproducerEvidence ?? options["reproducer-evidence"];
+  const reproducerVerified = Boolean(
+    evidence &&
+    typeof evidence === "object" &&
+    evidence.executed === true &&
+    evidence.timed_out !== true,
+  );
 
   return {
     kind,
@@ -199,6 +256,8 @@ export function formatProposalCreatedEvent(proposal, options = {}) {
       action_type: proposal.action_type || "1_tap_approve",
       roadmap_ref: proposal.roadmap_ref,
       reproducer_command: proposal.red_check || "npm test",
+      reproducer_exit_code: Number.isSafeInteger(proposal.reproducer_exit_code) ? proposal.reproducer_exit_code : null,
+      reproducer_verified: proposal.reproducer_verified === true,
       timestamp_ms: nowMs,
     },
   };
@@ -249,7 +308,9 @@ export function createProposal(mirqlDir, proposalInput, options = {}) {
       description: proposalInput.description || distilled.description,
       surface_impact: proposalInput.surface_impact || distilled.surface_impact,
       proposed_invariants: proposalInput.proposed_invariants || distilled.proposed_invariants,
-      red_check: proposalInput.red_check || distilled.red_check,
+      // explicit-only: distilled.red_check may be the "npm test" fallback,
+      // which must never masquerade as a caller-provided reproducer
+      red_check: proposalInput.red_check || options["red-check"] || options.redCheck || "",
     };
   }
 
@@ -259,7 +320,14 @@ export function createProposal(mirqlDir, proposalInput, options = {}) {
   const surfaceImpact = inputToProcess.surface_impact || options["surface-impact"] || options.surfaceImpact || "none";
   const rawInvariants = inputToProcess.proposed_invariants || options["proposed-invariants"] || options.proposedInvariants || [];
   const proposedInvariants = Array.isArray(rawInvariants) ? rawInvariants : [rawInvariants].filter(Boolean);
-  const redCheck = inputToProcess.red_check || options["red-check"] || options.redCheck || "npm test";
+  const explicitRedCheck = inputToProcess.red_check || options["red-check"] || options.redCheck || "";
+  const redCheckProvided = Boolean(
+    (typeof explicitRedCheck === "string" && explicitRedCheck.trim().length > 0) ||
+    (typeof explicitRedCheck === "object" && explicitRedCheck !== null && explicitRedCheck.command),
+  );
+  const redCheck = redCheckProvided
+    ? (typeof explicitRedCheck === "object" ? explicitRedCheck.command : explicitRedCheck)
+    : "npm test";
   const kind = inputToProcess.kind || options.kind || "feature";
 
   if (!title) {
@@ -321,6 +389,15 @@ export function createProposal(mirqlDir, proposalInput, options = {}) {
   const nowMs = Number.isSafeInteger(options.nowMs) ? options.nowMs : Date.now();
   const proposalId = ulid(nowMs);
 
+  // Law 16: reproduce-on-request execution evidence. Only an EXPLICITLY
+  // provided reproducer is executed (the "npm test" fallback is never run
+  // silently — an unverified default must not masquerade as verification).
+  const wantExecution = options.executeReproducer === true || options["execute-reproducer"] === true;
+  const evidence =
+    wantExecution && redCheckProvided
+      ? executeReproducer(redCheck, options)
+      : { executed: false, timed_out: false, exit_code: null, duration_ms: 0 };
+
   const proposalDoc = {
     action_type: "1_tap_approve",
     created_at: new Date(nowMs).toISOString(),
@@ -330,7 +407,11 @@ export function createProposal(mirqlDir, proposalInput, options = {}) {
     kind,
     proposed_invariants: proposedInvariants.length > 0 ? proposedInvariants : ["invariants-checked"],
     red_check: redCheck,
-    reproducer_verified: Boolean(redCheck),
+    reproducer_executed: evidence.executed === true,
+    reproducer_exit_code: Number.isSafeInteger(evidence.exit_code) ? evidence.exit_code : null,
+    reproducer_duration_ms: Number.isSafeInteger(evidence.duration_ms) ? evidence.duration_ms : 0,
+    reproducer_timed_out: evidence.timed_out === true,
+    reproducer_verified: evidence.executed === true && evidence.timed_out !== true,
     roadmap_ref: roadmapRef.toUpperCase(),
     status: "pending",
     surface_impact: surfaceImpact,
@@ -352,7 +433,10 @@ export function createProposal(mirqlDir, proposalInput, options = {}) {
 }
 
 /**
- * 1-tap proposer intake helper.
+ * 1-tap proposer intake helper. The 1-tap path is the "fully proven,
+ * pre-validated" proposal flow (roles/proposer.md), so it executes an
+ * explicitly provided reproducer by default to attach Law 16 execution
+ * evidence. Pass executeReproducer: false to opt out.
  *
  * @param {string} mirqlDir
  * @param {object|string} input
@@ -361,5 +445,9 @@ export function createProposal(mirqlDir, proposalInput, options = {}) {
  */
 export function create1TapProposal(mirqlDir, input, options = {}) {
   const proposalInput = typeof input === "string" ? { text: input } : (input || {});
-  return createProposal(mirqlDir, proposalInput, options);
+  const mergedOptions =
+    options.executeReproducer === undefined && options["execute-reproducer"] === undefined
+      ? { ...options, executeReproducer: true }
+      : options;
+  return createProposal(mirqlDir, proposalInput, mergedOptions);
 }
