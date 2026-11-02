@@ -104,6 +104,11 @@ export function validateDocument(kind, doc) {
     );
   }
 
+  if (kind === "event" && doc.type === "merge.approved") {
+    const payload = validateMergeApprovalPayload(doc.payload);
+    errors.push(...payload.errors.map(error => "$.payload" + error.slice(1)));
+  }
+
   return { valid: errors.length === 0, errors };
 }
 
@@ -259,4 +264,27 @@ function compile(pattern) {
     patternCache.set(pattern, re);
   }
   return re;
+}
+
+
+/** The approval is an event payload, rather than a fifth top-level document kind. */
+export function validateMergeApprovalPayload(value) {
+  const errors = [];
+  try { jcs(value); } catch (error) { return { valid: false, errors: ["$: " + error.message] }; }
+  const key = "event:merge.approved";
+  let schema = schemaCache.get(key);
+  if (!schema) {
+    schema = JSON.parse(readFileSync(new URL("../../schemas/merge-approval.schema.json", import.meta.url), "utf8"));
+    if (schema.$id !== "https://mirql.local/schemas/merge-approval/v1.json") throw new Error("Invalid merge approval schema identity");
+    schemaCache.set(key, schema);
+  }
+  validateAgainstSchema(schema, value, "$", errors);
+  if (errors.length === 0) {
+    const canonical = [...new Set(value.paths)].sort();
+    if (jcs(canonical) !== jcs(value.paths) || value.paths.some(path => path.startsWith("/") || path.includes("\\") ||
+        path.includes("\0") || /^[a-zA-Z]:/.test(path) || path.split("/").some(part => !part || part === "." || part === ".."))) {
+      errors.push("$.paths: expected sorted, unique repository-relative paths");
+    }
+  }
+  return { valid: errors.length === 0, errors };
 }

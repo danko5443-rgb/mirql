@@ -17,9 +17,9 @@ export const WRITER_ACL = Object.freeze(
     /** Inbox tool: human-facing events it records. */
     "tool:inbox": /^(human|inbox)\.[a-z_]+$/,
     /** The human owner: direct human intervention (intents, approvals, genesis, halt, resume). */
-    "human:owner": /^(human\.[a-z_]+|warrant\.(created|revoked)|mirql\.(genesis|halt|resume)|factory\.resumed)$/,
+    "human:owner": /^(human\.[a-z_]+|warrant\.(created|revoked)|mirql\.(genesis|halt|resume)|factory\.resumed|merge\.approved)$/,
     /** The mergeproof notary: verdicts, promotions, and merges. */
-    "notary:mergeproof": /^(verdict|promotion|merge)\.[a-z_]+$/,
+    "notary:mergeproof": /^(verdict|promotion)\.[a-z_]+$|^merge\.(?!approved$)[a-z_]+$/,
     /** Lifeguard daemon: out-of-band health, circuit breakers, and rollbacks. */
     "daemon:lifeguard": /^(lifeguard\.[a-z_]+|(promotion|factory|mirql)\.rollback)$/,
   }),

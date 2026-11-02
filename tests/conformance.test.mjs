@@ -262,6 +262,7 @@ describe("Work Package W2: Conformance Suite", () => {
         "mirql i send",
         "mirql i digest",
         "mirql i act",
+        "mirql i approve-merge",
         "mirql i propose",
         "mirql r supervisor",
         "mirql r agent",

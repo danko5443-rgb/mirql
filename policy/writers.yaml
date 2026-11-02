@@ -7,6 +7,6 @@ writers:
   "tool:run_supervisor": "^(attempt|probe|warrant)\\.[a-z_]+$"
   "tool:log": "^(ledger|log)\\.[a-z_]+$"
   "tool:inbox": "^(human|inbox)\\.[a-z_]+$"
-  "human:owner": "^(human\\.[a-z_]+|warrant\\.(created|revoked)|mirql\\.(genesis|halt|resume)|factory\\.resumed)$"
-  "notary:mergeproof": "^(verdict|promotion|merge)\\.[a-z_]+$"
+  "human:owner": "^(human\\.[a-z_]+|warrant\\.(created|revoked)|mirql\\.(genesis|halt|resume)|factory\\.resumed|merge\\.approved)$"
+  "notary:mergeproof": "^(verdict|promotion)\\.[a-z_]+$|^merge\\.(?!approved$)[a-z_]+$"
   "daemon:lifeguard": "^(lifeguard\\.[a-z_]+|(promotion|factory|mirql)\\.rollback)$"
