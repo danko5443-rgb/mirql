@@ -1,3 +1,4 @@
+import { trustFile } from "../core/trust-root.mjs";
 /**
  * mirql-log — the factory's cryptographic append-only ledger (Law 4).
  *
@@ -116,7 +117,7 @@ function eventsFile(mirqlDir) {
 
 /** @param {string} mirqlDir @returns {string} */
 function keyringFile(mirqlDir) {
-  return join(mirqlDir, "ledger", "keyring.json");
+  return trustFile(mirqlDir, "keyring.json");
 }
 
 /** @param {string} mirqlDir @returns {string} */

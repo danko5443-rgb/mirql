@@ -1,3 +1,4 @@
+import { trustFile, resolveTrustRoot } from "../packages/core/trust-root.mjs";
 // Work Package W2: mergeproof — the mechanical merge gate.
 //
 // Covers:
@@ -398,7 +399,7 @@ describe("mergeproof: notary signing & ledger append", () => {
       const kp = loadOrCreateNotaryKey(tmp);
       assert.equal(kp.keyId.startsWith("ed25519:"), true);
       assert.equal(kp.keyId.length, "ed25519:".length + 43);
-      assert.equal(kp.sourceFile, join(tmp, "keys", NOTARY_KEY_FILE));
+      assert.equal(kp.sourceFile, trustFile(tmp, "keys", NOTARY_KEY_FILE));
       assert.equal(existsSync(kp.sourceFile), true);
       const persisted = JSON.parse(readFileSync(kp.sourceFile, "utf8"));
       assert.equal(persisted.keyId, kp.keyId);
@@ -406,7 +407,7 @@ describe("mergeproof: notary signing & ledger append", () => {
         const mode = (statSync(kp.sourceFile).mode & 0o777);
         assert.equal(mode, 0o600, "notary private key file must be 0o600");
       }
-      const keyring = JSON.parse(readFileSync(join(tmp, "ledger", "keyring.json"), "utf8"));
+      const keyring = JSON.parse(readFileSync(trustFile(tmp, "keyring.json"), "utf8"));
       assert.equal(keyring[kp.keyId].ns, NOTARY_WRITER_NS);
       assert.equal(keyring[kp.keyId].publicKey, kp.publicKey);
       assert.equal(keyring[NOTARY_WRITER_NS].publicKey, kp.publicKey);
@@ -423,14 +424,14 @@ describe("mergeproof: notary signing & ledger append", () => {
     const tmp = mkdtempSync(join(tmpdir(), "mirql-mp-alias-"));
     try {
       const generated = generateEd25519Keypair();
-      mkdirSync(join(tmp, "keys"), { recursive: true });
+      mkdirSync(trustFile(tmp, "keys"), { recursive: true });
       writeFileSync(
-        join(tmp, "keys", NOTARY_KEY_ALIAS_FILE),
+        trustFile(tmp, "keys", NOTARY_KEY_ALIAS_FILE),
         JSON.stringify(generated, null, 2) + "\n",
       );
       const kp = loadOrCreateNotaryKey(tmp);
       assert.equal(kp.keyId, generated.keyId);
-      assert.equal(kp.sourceFile, join(tmp, "keys", NOTARY_KEY_ALIAS_FILE));
+      assert.equal(kp.sourceFile, trustFile(tmp, "keys", NOTARY_KEY_ALIAS_FILE));
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -440,7 +441,8 @@ describe("mergeproof: notary signing & ledger append", () => {
     const tmp = mkdtempSync(join(tmpdir(), "mirql-mp-explicit-"));
     try {
       const generated = generateEd25519Keypair();
-      const explicit = join(tmp, "outside-notary.key.json");
+      mkdirSync(resolveTrustRoot(tmp), { recursive: true });
+      const explicit = trustFile(tmp, "outside-notary.key.json");
       writeFileSync(explicit, JSON.stringify(generated, null, 2) + "\n");
       const kp = loadOrCreateNotaryKey(tmp, { keyPath: explicit });
       assert.equal(kp.keyId, generated.keyId);
@@ -453,7 +455,8 @@ describe("mergeproof: notary signing & ledger append", () => {
   it("an invalid --key file fails closed with USAGE_ERROR", () => {
     const tmp = mkdtempSync(join(tmpdir(), "mirql-mp-badkey-"));
     try {
-      const bad = join(tmp, "bad.key.json");
+      mkdirSync(resolveTrustRoot(tmp), { recursive: true });
+      const bad = trustFile(tmp, "bad.key.json");
       writeFileSync(bad, JSON.stringify({ privateKey: "junk" }), "utf8");
       assert.throws(
         () => loadOrCreateNotaryKey(tmp, { keyPath: bad }),
@@ -495,7 +498,7 @@ describe("mergeproof: notary signing & ledger append", () => {
 
       // Canonical schema + signature + ledger line all check out.
       assert.equal(validateDocument("event", event).valid, true);
-      const kp = JSON.parse(readFileSync(join(tmp, "keys", NOTARY_KEY_FILE), "utf8"));
+      const kp = JSON.parse(readFileSync(trustFile(tmp, "keys", NOTARY_KEY_FILE), "utf8"));
       assert.equal(verifyEvent(event, kp.publicKey).ok, true);
 
       const lines = readFileSync(join(tmp, "ledger", "events.jsonl"), "utf8")
@@ -626,7 +629,8 @@ describe("mergeproof: notary signing & ledger append", () => {
   it("CLI --sign with an invalid --key exits USAGE_ERROR without touching the ledger", () => {
     const tmp = mkdtempSync(join(tmpdir(), "mirql-mp-cli-badkey-"));
     try {
-      const bad = join(tmp, "not-a-key.json");
+      mkdirSync(resolveTrustRoot(tmp), { recursive: true });
+      const bad = trustFile(tmp, "not-a-key.json");
       writeFileSync(bad, JSON.stringify({ hello: "world" }), "utf8");
       const res = runMirql([
         "m", "check",

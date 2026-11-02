@@ -1,3 +1,4 @@
+import { trustFile } from "../packages/core/trust-root.mjs";
 // tests/queue.test.mjs — Comprehensive test suite for Work Package W4: mirql-queue
 import { test, describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -1081,7 +1082,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       assert.equal(getQueueStatus(tempDir).halted, true);
 
       // Ensure keyring does NOT exist
-      const keyringPath = join(tempDir, "ledger", "keyring.json");
+      const keyringPath = trustFile(tempDir, "keyring.json");
       if (existsSync(keyringPath)) {
         unlinkSync(keyringPath);
       }
@@ -1848,7 +1849,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
 
     it("H4: getOrCreateQueueKeypair writes the private key 0o600 inside a 0o700 keys directory", () => {
       const kp = getOrCreateQueueKeypair(tempDir);
-      const keyPath = join(tempDir, "keys", "queue.key.json");
+      const keyPath = trustFile(tempDir, "keys", "queue.key.json");
       assert.ok(existsSync(keyPath), "queue key file must exist");
       assert.equal(typeof kp.privateKey, "string");
 

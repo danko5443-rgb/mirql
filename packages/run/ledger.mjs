@@ -1,3 +1,4 @@
+import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 import {
   existsSync,
   mkdirSync,
@@ -5,7 +6,7 @@ import {
   writeFileSync,
   appendFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import {
   jcs,
   sha256,
@@ -116,9 +117,9 @@ export function appendSupervisorEvent(mirqlDir, eventInput, keypair) {
  * @param {{ keyId: string, publicKey: string }} kp
  */
 export function updateKeyring(mirqlDir, kp) {
-  const ledgerDir = join(mirqlDir, "ledger");
+  const ledgerDir = resolveTrustRoot(mirqlDir);
   mkdirSync(ledgerDir, { recursive: true, mode: 0o700 });
-  const keyringPath = join(ledgerDir, "keyring.json");
+  const keyringPath = trustFile(mirqlDir, "keyring.json");
   let keyring = {};
   if (existsSync(keyringPath)) {
     try {
@@ -145,7 +146,7 @@ export function updateKeyring(mirqlDir, kp) {
  * @returns {{ privateKey: string, publicKey: string, keyId: string }}
  */
 export function getOrGenerateSupervisorKey(mirqlDir, options = {}) {
-  const keysDir = options.keysDir ?? join(mirqlDir, "keys");
+  const keysDir = options.keysDir ? assertExternalTrustPath(options.keysDir, mirqlDir) : trustFile(mirqlDir, "keys");
   const primaryPath = join(keysDir, "run_supervisor.key.json");
   const fallbackPath = join(keysDir, "run_supervisor.json");
   const keyPath = existsSync(primaryPath) ? primaryPath : (existsSync(fallbackPath) ? fallbackPath : primaryPath);

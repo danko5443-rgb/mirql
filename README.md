@@ -112,3 +112,25 @@ Inspect policy files and baseline locks:
 - [`policy/writers.yaml`](policy/writers.yaml) — Writer namespace authorization regex.
 - [`policy/probes.toml`](policy/probes.toml) — Declarative probe thresholds.
 - [`surface.lock`](surface.lock) — Baseline command and schema surface lock.
+
+### Trust storage
+
+Machine keys, the default human key, and the public keyring live outside the workspace.
+Set MIRQL_TRUST_ROOT to an operator-controlled directory, or use the default
+~/.mirql-trust. Each ledger receives a separate directory identified by the SHA-256
+of its canonical absolute metadata path. Workspaces and Git worktrees are rejected
+as credential locations, including paths redirected through symlinks.
+
+The workspace keeps its event log and runtime state. Workspace keyrings are ignored.
+Existing ledgers with a workspace keyring are refused with TRUST_MIGRATION_REQUIRED
+and the destination path until credentials have been moved.
+
+Before migrating an existing installation, stop its workers. Create the reported
+destination with owner-only access, move the existing keys directory there, then
+move ledger/keyring.json to keyring.json in that destination. Publish the keyring
+last. Retain the workspace event log. Run mirql l verify before resuming work.
+Do not initialize fresh keys for an existing ledger. Changing the metadata path
+changes its storage identifier, so a relocated ledger needs the same migration.
+
+This storage placement implements trust remediation item 1.1. Signed key enrollment,
+Windows ACL enforcement, and worker process isolation remain later plan requirements.

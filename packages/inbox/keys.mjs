@@ -1,3 +1,4 @@
+import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 // packages/inbox/keys.mjs — Key Management & Keyring Provisioning for mirql-inbox.
 //
 // Law 6 (Human Sovereignty & Credentials):
@@ -201,9 +202,9 @@ export function resolveHumanKeyPath(mirqlDir, options = {}) {
     options.humanKeyPath,
   );
   if (typeof explicit === "string" && explicit.length > 0) {
-    return resolvePath(explicit);
+    return assertExternalTrustPath(explicit, mirqlDir);
   }
-  const operatorDir = dirname(resolvePath(mirqlDir)) || resolvePath(mirqlDir);
+  const operatorDir = resolveTrustRoot(mirqlDir);
   return join(operatorDir, HUMAN_KEY_FILENAME);
 }
 
@@ -237,8 +238,8 @@ function purgeStaleHumanKeys(keysDir) {
  * @returns {Record<string, { publicKey: string, privateKey: string, keyId: string, writer: { ns: string, key_id: string } }>}
  */
 export function generateFactoryKeypairs(mirqlDir, options = {}) {
-  const keysDir = join(mirqlDir, "keys");
-  const ledgerDir = join(mirqlDir, "ledger");
+  const keysDir = trustFile(mirqlDir, "keys");
+  const ledgerDir = resolveTrustRoot(mirqlDir);
   // H4: private-key material lives only under 0o700 directories.
   mkdirSync(keysDir, { recursive: true, mode: 0o700 });
   mkdirSync(ledgerDir, { recursive: true, mode: 0o700 });
@@ -284,7 +285,7 @@ export function generateFactoryKeypairs(mirqlDir, options = {}) {
 
   // Factory writers — machine keys persisted inside .mirql/keys/.
   for (const item of FACTORY_WRITERS) {
-    const keyPath = join(keysDir, item.file);
+    const keyPath = trustFile(mirqlDir, "keys", item.file);
     let kp = null;
 
     if (existsSync(keyPath)) {
@@ -313,7 +314,7 @@ export function generateFactoryKeypairs(mirqlDir, options = {}) {
       // H4: every private key file (including aliases) is written 0o600.
       writePrivateFile(keyPath, JSON.stringify(kp, null, 2) + "\n");
       for (const alias of item.aliases) {
-        writePrivateFile(join(keysDir, alias), JSON.stringify(kp, null, 2) + "\n");
+        writePrivateFile(trustFile(mirqlDir, "keys", alias), JSON.stringify(kp, null, 2) + "\n");
       }
     }
 
@@ -321,7 +322,7 @@ export function generateFactoryKeypairs(mirqlDir, options = {}) {
     registerKeyringEntry(keyring, item.ns, kp);
   }
 
-  writeFileSync(join(ledgerDir, "keyring.json"), JSON.stringify(keyring, null, 2) + "\n", "utf8");
+  writeFileSync(trustFile(mirqlDir, "keyring.json"), JSON.stringify(keyring, null, 2) + "\n", "utf8");
   return result;
 }
 
@@ -338,7 +339,7 @@ function registerKeyringEntry(keyring, ns, kp) {
  * @returns {Record<string, unknown>}
  */
 export function loadKeyring(mirqlDir) {
-  const keyringPath = join(mirqlDir, "ledger", "keyring.json");
+  const keyringPath = trustFile(mirqlDir, "keyring.json");
   if (!existsSync(keyringPath)) return {};
   try {
     const parsed = JSON.parse(readFileSync(keyringPath, "utf8"));
@@ -394,7 +395,7 @@ export function loadWriterKey(mirqlDir, writerNs, options = {}) {
   const writerEntry = FACTORY_WRITERS.find((w) => w.ns === writerNs);
   if (!writerEntry) return null;
 
-  const keyPath = join(mirqlDir, "keys", writerEntry.file);
+  const keyPath = trustFile(mirqlDir, "keys", writerEntry.file);
   if (existsSync(keyPath)) {
     const parsed = readKeypairFile(keyPath);
     if (parsed) {

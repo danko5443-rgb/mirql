@@ -60,3 +60,5 @@ export {
   isCircuitBreakerTripped,
   getActiveTrippedBreakers,
 } from "./breaker.mjs";
+
+export { resolveTrustRoot, assertExternalTrustPath, trustFile } from "./trust-root.mjs";

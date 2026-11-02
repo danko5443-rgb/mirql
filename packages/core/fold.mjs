@@ -1,3 +1,4 @@
+import { trustFile } from "./trust-root.mjs";
 // packages/core/fold.mjs — Canonical mathematical fold over append-only ledger events.
 // Law 4 (State as a pure fold over durable ledger) & Law 3 (Single-Writer ACL).
 
@@ -28,8 +29,7 @@ export const PRIVILEGED_EVENTS = Object.freeze(new Set([
  */
 export function loadKeyring(mirqlDir) {
   const candidates = [
-    join(mirqlDir, "ledger", "keyring.json"),
-    join(mirqlDir, "keys", "keyring.json"),
+    trustFile(mirqlDir, "keyring.json"),
   ];
   for (const c of candidates) {
     if (existsSync(c)) {

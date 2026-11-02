@@ -1,3 +1,4 @@
+import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 // packages/mergeproof/notary.mjs — the mergeproof notary (Law 7: the notary
 // sits OUTSIDE the blast radius of the agents whose work it judges).
 //
@@ -143,9 +144,9 @@ function keypairIsCoherent(kp) {
  * @returns {void}
  */
 function updateKeyring(mirqlDir, kp) {
-  const ledgerDir = join(mirqlDir, "ledger");
+  const ledgerDir = resolveTrustRoot(mirqlDir);
   mkdirSync(ledgerDir, { recursive: true, mode: 0o700 });
-  const keyringPath = join(ledgerDir, "keyring.json");
+  const keyringPath = trustFile(mirqlDir, "keyring.json");
   let keyring = {};
   if (existsSync(keyringPath)) {
     try {
@@ -192,7 +193,7 @@ function updateKeyring(mirqlDir, kp) {
 export function loadOrCreateNotaryKey(mirqlDir, options = {}) {
   const explicit = options.keyPath ?? options.key;
   if (typeof explicit === "string" && explicit.length > 0) {
-    const abs = resolvePath(explicit);
+    const abs = assertExternalTrustPath(explicit, mirqlDir);
     const kp = readKeypairFile(abs);
     if (kp === null || !keypairIsCoherent(kp)) {
       throw notaryError(
@@ -203,9 +204,8 @@ export function loadOrCreateNotaryKey(mirqlDir, options = {}) {
     return { ...kp, sourceFile: abs };
   }
 
-  const keysDir = join(mirqlDir, "keys");
   for (const name of [NOTARY_KEY_FILE, NOTARY_KEY_ALIAS_FILE]) {
-    const keyPath = join(keysDir, name);
+    const keyPath = trustFile(mirqlDir, "keys", name);
     if (existsSync(keyPath)) {
       const kp = readKeypairFile(keyPath);
       if (kp !== null && keypairIsCoherent(kp)) {
@@ -219,7 +219,7 @@ export function loadOrCreateNotaryKey(mirqlDir, options = {}) {
   }
 
   const generated = generateEd25519Keypair();
-  const keyPath = join(keysDir, NOTARY_KEY_FILE);
+  const keyPath = trustFile(mirqlDir, "keys", NOTARY_KEY_FILE);
   writePrivateFile(keyPath, JSON.stringify(generated, null, 2) + "\n");
   updateKeyring(mirqlDir, generated);
   return { ...generated, sourceFile: keyPath };
