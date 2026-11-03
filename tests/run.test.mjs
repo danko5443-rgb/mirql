@@ -480,6 +480,7 @@ test("tautological test", () => {
   // -------------------------------------------------------------------------
   describe("3. Two-Process Privilege Split", () => {
     it("B10: agent strips secrets and retains ONLY safe allowlist variables", () => {
+      initEmptyRepo(tempDir);
       const dirtyEnv = {
         ...process.env,
         NODE_ENV: "production",
@@ -490,6 +491,7 @@ test("tautological test", () => {
       };
 
       const res = runAgent({
+        cwd: tempDir,
         env: dirtyEnv,
         command: "node -v",
       });
@@ -502,11 +504,13 @@ test("tautological test", () => {
     });
 
     it("B3: supervisor produces a valid schema-checked Outcome with real computed metrics", async () => {
+      initEmptyRepo(tempDir);
       const kp = generateEd25519Keypair();
       authorizeTestKey(tempDir, "tool:run_supervisor", kp);
 
       authorizeTestWarrant(tempDir, "01HWWWWWWWWWWWWWWWWWWWWWWW");
       const res = await runSupervisor({
+        workspaceDir: tempDir,
         mirqlDir: tempDir,
         signingKey: kp.privateKey,
         keyId: kp.keyId,
