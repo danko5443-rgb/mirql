@@ -22,10 +22,18 @@ const GENESIS_PREV_HASH = `sha256:${"0".repeat(64)}`;
  * @param {string} mirqlDir - active .mirql directory
  * @param {object} eventInput - event properties (type, payload, idempotency_key, etc.)
  * @param {object} [keypair] - Ed25519 keypair ({ privateKey, publicKey, keyId })
- * @returns {object} the appended signed event envelope
+ * @param {object} [options]
+ * @param {() => object|undefined} [options.precondition] - runs inside the ledger
+ *   lock before the append; it may throw to refuse, or return an existing event
+ *   to make the append an idempotent no-op.
+ * @returns {object} the appended (or pre-existing) signed event envelope
  */
-export function appendSupervisorEvent(mirqlDir, eventInput, keypair) {
+export function appendSupervisorEvent(mirqlDir, eventInput, keypair, options = {}) {
   return withLedgerLock(mirqlDir, () => {
+  if (typeof options.precondition === "function") {
+    const existing = options.precondition();
+    if (existing) return existing;
+  }
   const ledgerDir = join(mirqlDir, "ledger");
   mkdirSync(ledgerDir, { recursive: true });
   const eventsFile = join(ledgerDir, "events.jsonl");

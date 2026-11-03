@@ -245,7 +245,7 @@ export function runCli(argv = []) {
       try {
         // Daemon mode composes queue leasing with the reactive loop; packages
         // must not cross-import, so the wiring lives in bin/mirql.mjs.
-        if (flags.daemon === true) {
+        if (flags.daemon !== undefined) {
           emitError({
             error: "USAGE_ERROR",
             reason: "--daemon is composed by the mirql router (it wires the queue); run: mirql r supervisor --daemon",

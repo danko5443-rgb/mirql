@@ -566,6 +566,15 @@ RestrictSUIDSGID=true
       assert.ok(res.errors.includes("Service unit must not run as root User"));
     });
 
+    it("the shipped launcher unit runs the long-lived daemon that renderLauncherUnit renders", () => {
+      // A one-shot `r supervisor` exits 0, and Restart=on-failure never revives
+      // it, so an installed factory would stop after a single pass.
+      const shipped = readFileSync(join(ROOT, "deploy", "systemd", "mirql-launcher.service"), "utf8");
+      const execStart = (unit) => unit.split(/\r?\n/).find((line) => line.startsWith("ExecStart="));
+      assert.equal(execStart(shipped), execStart(renderLauncherUnit()));
+      assert.match(execStart(shipped), /\br supervisor --daemon$/);
+    });
+
     it("renderLauncherUnit renders compliant systemd unit and rejects newline injections", () => {
       const unit = renderLauncherUnit({ workingDir: "/opt/mirql", user: "mirql" });
       const res = validateServiceUnit(unit);
