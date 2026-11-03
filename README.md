@@ -24,7 +24,7 @@
  └──────────────┘                         └──────────────┘
 ```
 
-1. **`m` — mergeproof**: The isolated notary gate. Evaluates candidate pull requests against base branch invariants, requiring causal RED-to-GREEN proofs, non-increasing potential $\Phi$, and anti-cheat verification before signing verdicts.
+1. **`m` — mergeproof**: The isolated notary gate. Evaluates candidate pull requests against base branch invariants, requiring causal RED-to-GREEN proofs, potential $\Phi$ within the human-signed allowance, and anti-cheat verification before signing verdicts.
 2. **`i` — inbox**: The communication membrane between human operators and autonomous roles. Ingests human intent, digests activity logs, and facilitates 1-tap warrant sign-off.
 3. **`r` — run**: The sandboxed execution engine and supervisor. Spawns ephemeral, speechless worker sandboxes with explicit resource budgets and enforces lease timeouts.
 4. **`q` — queue**: The deterministic job scheduler. Mints cryptographic warrants, leases jobs to tiered agents (`flash`, `mid`, `max`), and tracks macro-state transitions (`BUILD`, `HARDEN`, `PATROL`, `QUIESCENT`).
@@ -47,7 +47,7 @@ All operations in `mirql` are strictly governed by [CONSTITUTION.md](CONSTITUTIO
 - **Law 10: Ship Invariants Not Features** — Merges require machine-checked behavioral invariants.
 - **Law 11: No Warrant No Work** — Execution prohibited without signed, unexpired warrant.
 - **Law 12: The Probe Doctrine** — Continuous monitoring across tests, drift, mutants, complexity, and surface.
-- **Law 13: Monotone Potential PHI & Thrift Test** — System potential $\Phi$ must never increase ($\Delta \Phi \le 0$).
+- **Law 13: Monotone Potential PHI & Thrift Test** — Production-source potential $\Phi$ may grow only within the warrant's cumulative, human-signed `phi_budget` (absent = 0); refactors must strictly decrease it.
 - **Law 14: Quiescence Is Success** — System idles to minimal budget when invariants hold.
 - **Law 15: Semantic Identity / Mechanical Location** — Content hashes define entity identity.
 - **Law 16: GREEN Must Be Causal** — Passing tests require RED-on-base, GREEN-on-head, and Re-Red confirmation.
@@ -183,7 +183,30 @@ expired grants stop execution before worker dispatch.
 
 Both `mirql i send` and proposal approval issue explicit signed grants.
 Queue admission accepts a verified grant once. Historical intent-only warrants
-need a new human authorization before execution. Signed merge approvals remain a separate pending plan item.
+need a new human authorization before execution. `mirql i approve-merge` records
+an owner approval bound to the exact base, head, tree, changed paths and warrant.
+
+### Complexity budget (Law 13)
+
+`mirql i send --phi-budget <N>` signs a non-negative integer allowance into the
+warrant. Without it the allowance is 0. The allowance is cumulative: every
+transition `r verify` accepts under the warrant spends its measured increase,
+recorded as a supervisor-signed `warrant.phi_consumed` ledger event. Only
+increases are counted. A decrease never refunds the allowance, because an
+accepted transition is not proof that it was merged. Re-verifying the same
+base/head pair spends nothing extra. The remaining allowance is re-checked
+under the ledger lock, so concurrent verifications cannot spend it twice.
+Refactor and consolidation warrants must still strictly decrease $\Phi$.
+
+$\Phi$ is measured from immutable Git blobs and counts production source only.
+Test and `conformance/` files are exempt only while no production file imports
+them, so complexity cannot be hidden behind a test-shaped path. Computed
+`import(variable)` specifiers cannot be resolved statically and remain a
+residual risk.
+
+The CI notary runs without a ledger, so its allowance is always 0. A pull
+request that grows $\Phi$ is rejected in CI. It can land only through a human
+merge decision, never an agent's.
 
 
 Worker commands require a readable, committed Git baseline. After execution,

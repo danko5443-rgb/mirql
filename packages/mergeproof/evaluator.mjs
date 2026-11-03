@@ -578,7 +578,7 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
       "LAW_13",
       "PHI_INCREASE",
       "reject",
-      `Law 13 invariant violation: complexity potential increased (delta_phi = +${deltaPhi} > 0).`,
+      `Law 13 invariant violation: complexity potential increased (delta_phi = +${deltaPhi} > 0). The notary sees no signed warrant, so the authorized allowance is 0; a human must decide this merge.`,
       { checks, delta_phi: deltaPhi },
     );
   }

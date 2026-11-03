@@ -35,10 +35,10 @@ This document defines the normative sequence of milestones for `mirql`'s autonom
 - **Objective:** Build automated metric collection and strict potential ratchets.
 - **Deliverables:**
   - Deterministic metric extractor computing total debt, complexity, and coverage gaps into an integer score $\Phi$.
-  - Gating engine rejecting any patch that increases system potential ($\Delta \Phi > 0$).
+  - Gating engine rejecting any patch whose increase exceeds the warrant's remaining cumulative, human-signed allowance (absent = 0).
   - Refactoring thrift verification requiring strictly negative $\Delta \Phi$ for consolidation PRs.
 - **Invariants & Gates:**
-  - $\Phi_{t+1} \le \Phi_t$ enforced on every merge candidate (Law 13).
+  - $\Phi_{t+1} - \Phi_t \le$ remaining `warrant.phi_budget` enforced on every merge candidate (Law 13).
   - Integer-only math without floating-point drift (Law 17).
 
 ### M3: Claim-Check Drift Harness
