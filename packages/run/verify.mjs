@@ -10,6 +10,7 @@ import {
   checkSwallowedExceptions,
   checkTestWeakenings,
 } from "./anti-cheat.mjs";
+import { findExactMergeApproval } from "../core/merge-approval.mjs";
 import { parsePathPolicies } from "../core/anti-cheat.mjs";
 import { evaluatePhiGate } from "./phi.mjs";
 import { extractChangedLines } from "./mutant.mjs";
@@ -349,7 +350,7 @@ function verifyGitRepository(options) {
     .filter((e) => e.status === "D" && isTestFilePath(e.path))
     .map((e) => e.path);
 
-  const antiCheatCheck = checkAntiCheat({
+  let antiCheatCheck = checkAntiCheat({
     diff_stat: { files_changed: allChanged },
     evidence: {
       tests_deleted: deletedTests,
@@ -358,6 +359,18 @@ function verifyGitRepository(options) {
         : {}),
     },
   }, policies);
+  let approvalRecord = null;
+  if (antiCheatCheck.rule === "MP-005" && options.mirqlDir && options.warrantId) {
+    try {
+      approvalRecord = findExactMergeApproval(options.mirqlDir, {
+        workspaceDir: repoDir, baseSha, headSha, warrantId: options.warrantId,
+      });
+      if (approvalRecord) antiCheatCheck = { ok: true, rule: "MP-000", verdict: "auto_merge" };
+    } catch {
+      // Invalid authority is a closed gate, never permission to continue.
+      antiCheatCheck = { ...antiCheatCheck, detail: "The exact owner approval could not be verified." };
+    }
+  }
 
   if (!antiCheatCheck.ok) {
     return {
@@ -686,6 +699,7 @@ function verifyGitRepository(options) {
       verdict: conformance ? "conformance_pass" : "auto_merge",
       rule: conformance ? "CONFORMANCE_ONLY" : "MP-000",
       proof: {
+        ...(approvalRecord ? { human_approval_hash: approvalRecord.hash } : {}),
         causal_cycle_completed: true,
         base_fail_runs: 2,
         head_pass_runs: 2,
