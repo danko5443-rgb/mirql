@@ -10,6 +10,10 @@ import {
   checkSwallowedExceptions,
   checkTestWeakenings,
 } from "./anti-cheat.mjs";
+import { findExactMergeApproval } from "../core/merge-approval.mjs";
+import { parsePathPolicies } from "../core/anti-cheat.mjs";
+import { measureAuthorizedPhi } from "./authorized-phi.mjs";
+import { requireAuthorizedWarrant } from "../core/warrant.mjs";
 import { evaluatePhiGate } from "./phi.mjs";
 import { extractChangedLines } from "./mutant.mjs";
 import { parseTapOutput, checkV8Coverage } from "./causal-evidence.mjs";
@@ -230,18 +234,23 @@ function evaluateCheckResult(check, fixture = {}) {
  * Executes honest causal proof against a real git repository (Phase 3).
  */
 function verifyGitRepository(options) {
-  const repoDir = options.workspaceDir ?? options.repoDir ?? process.cwd();
+  let repoDir = options.workspaceDir ?? options.repoDir ?? process.cwd();
   const baseRef = options.baseCommit ?? options.baseSha ?? "HEAD~1";
   const headRef = options.headCommit ?? options.headSha ?? "HEAD";
 
   function git(args, cwd = repoDir) {
-    return spawnSync("git", args, { cwd, encoding: "utf8", timeout: 30000 });
+    return spawnSync("git", ["--no-replace-objects", "--no-pager", "-c", "core.fsmonitor=false", ...args], { cwd, encoding: "utf8", timeout: 30000, windowsHide: true });
   }
 
   // Resolve the installed npm CLI outside the candidate before executing it.
   // Searching from its working directory would let a candidate-local npm.cmd win.
   const rootInfo = git(["--no-replace-objects", "rev-parse", "--show-toplevel"]);
-  const npmRepository = resolve(rootInfo.status === 0 ? rootInfo.stdout.replace(/\r?\n$/, "") : repoDir);
+  if (rootInfo.error || rootInfo.status !== 0) {
+    return { verified: false, verdict: "reject", rule: "GIT_DIFF_FAILED", violation: "GIT_DIFF_FAILED",
+      detail: "Cannot resolve the authoritative Git repository root." };
+  }
+  repoDir = resolve(rootInfo.stdout.replace(/\r?\n$/, ""));
+  const npmRepository = repoDir;
   const npmRoots = [dirname(process.execPath), ...(process.env.PATH ?? process.env.Path ?? "").split(delimiter).filter(isAbsolute)];
   const npmCandidates = npmRoots.flatMap(root => [
     join(root, "node_modules", "npm", "bin", "npm-cli.js"),
@@ -278,7 +287,7 @@ function verifyGitRepository(options) {
   }
 
   const resolveCommit = (ref) => {
-    const res = git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+    const res = git(["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`]);
     return res.error || res.status !== 0 ? null : res.stdout.trim();
   };
   const baseSha = resolveCommit(baseRef);
@@ -294,7 +303,7 @@ function verifyGitRepository(options) {
     };
   }
 
-  const diffRes = git(["diff", "--name-status", baseSha, headSha]);
+  const diffRes = git(["diff", "--no-relative", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-status", "-z", baseSha, headSha, "--"]);
   if (diffRes.error || diffRes.status !== 0) {
     return {
       verified: false,
@@ -308,25 +317,42 @@ function verifyGitRepository(options) {
   }
 
   const changeEntries = [];
-  for (const line of diffRes.stdout.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
-    const parts = trimmed.split("\t");
-    if (parts.length < 2 || !/^[A-Z]+\d*$/.test(parts[0])) continue;
-    const status = parts[0][0];
-    if (status === "R" || status === "C") {
-      changeEntries.push({ status: "A", path: parts[parts.length - 1] });
-    } else {
-      changeEntries.push({ status, path: parts[1] });
-    }
+  const fields = diffRes.stdout.split("\0");
+  if (fields.at(-1) === "") fields.pop();
+  if (fields.length % 2 !== 0) {
+    return { verified: false, verdict: "reject", rule: "GIT_DIFF_FAILED", violation: "GIT_DIFF_FAILED",
+      detail: "Malformed NUL-delimited Git path measurement." };
   }
+  for (let i = 0; i < fields.length; i += 2) {
+    if (!/^[A-Z]$/.test(fields[i]) || !fields[i+1]) {
+      return { verified: false, verdict: "reject", rule: "GIT_DIFF_FAILED", violation: "GIT_DIFF_FAILED",
+        detail: "Invalid measured Git change entry." };
+    }
+    changeEntries.push({ status: fields[i], path: fields[i+1] });
+  }
+  const policyEntry = git(["ls-tree", "-z", baseSha, "--", "policy/paths.yaml"]);
+  let policyText = "";
+  if (policyEntry.error || policyEntry.status !== 0 ||
+      (policyEntry.stdout && !/^100(?:644|755) blob [a-f0-9]+\tpolicy\/paths\.yaml\0$/.test(policyEntry.stdout))) {
+    return { verified: false, verdict: "reject", rule: "POLICY_UNVERIFIED", violation: "POLICY_UNVERIFIED",
+      detail: "Cannot read a regular path-policy blob from the base commit." };
+  }
+  if (policyEntry.stdout) {
+    const policy = git(["show", baseSha + ":policy/paths.yaml"]);
+    if (policy.error || policy.status !== 0) {
+      return { verified: false, verdict: "reject", rule: "POLICY_UNVERIFIED", violation: "POLICY_UNVERIFIED",
+        detail: "Cannot read the immutable base path policy." };
+    }
+    policyText = policy.stdout;
+  }
+  const policies = parsePathPolicies(policyText);
 
   const allChanged = changeEntries.map((e) => e.path);
   const deletedTests = changeEntries
     .filter((e) => e.status === "D" && isTestFilePath(e.path))
     .map((e) => e.path);
 
-  const antiCheatCheck = checkAntiCheat({
+  let antiCheatCheck = checkAntiCheat({
     diff_stat: { files_changed: allChanged },
     evidence: {
       tests_deleted: deletedTests,
@@ -334,7 +360,19 @@ function verifyGitRepository(options) {
         ? { detail: `Git diff deletes test file(s): ${deletedTests.join(", ")}` }
         : {}),
     },
-  });
+  }, policies);
+  let approvalRecord = null;
+  if (antiCheatCheck.rule === "MP-005" && options.mirqlDir && options.warrantId) {
+    try {
+      approvalRecord = findExactMergeApproval(options.mirqlDir, {
+        workspaceDir: repoDir, baseSha, headSha, warrantId: options.warrantId,
+      });
+      if (approvalRecord) antiCheatCheck = { ok: true, rule: "MP-000", verdict: "auto_merge" };
+    } catch {
+      // Invalid authority is a closed gate, never permission to continue.
+      antiCheatCheck = { ...antiCheatCheck, detail: "The exact owner approval could not be verified." };
+    }
+  }
 
   if (!antiCheatCheck.ok) {
     return {
@@ -390,6 +428,18 @@ function verifyGitRepository(options) {
   const runReproducer = (cwd, extraEnv = {}) => reproducerFile !== null
     ? runCommand(process.execPath, ["--test", "--test-reporter=tap", resolve(cwd, reproducerFile)], cwd, extraEnv)
     : runCommand(conformanceCommand, null, cwd, extraEnv);
+
+  let measuredPhi;
+  try {
+    measuredPhi = measureAuthorizedPhi({ repoDir, baseSha, headSha,
+      mirqlDir: options.mirqlDir, warrantId: options.warrantId, conformance });
+  } catch (error) {
+    const rule = error.code === "WARRANT_UNAUTHORIZED" ? error.code : "PHI_UNMEASURED";
+    return { verified: false, verdict: "needs_human", rule, violation: rule,
+      detail: "Immutable complexity and its signed authority could not be verified." };
+  }
+  if (!measuredPhi.ok) return { verified: false, verdict: "reject", rule: measuredPhi.rule,
+    violation: "PHI_INCREASED", phi: measuredPhi };
 
   let worktreeDir = null;
   let covDir = null;
@@ -582,8 +632,22 @@ function verifyGitRepository(options) {
     const necessaryFiles = [];
     const unnecessaryFiles = [];
 
+    const restorePath = (commit, file) => {
+      const entry = gitWt(["ls-tree", "-z", commit, "--", file]);
+      if (entry.error || entry.status !== 0) {
+        return { verified: false, verdict: "reject", rule: "CHECKOUT_FAILED",
+          violation: "CHECKOUT_FAILED", detail: "Cannot measure the rollback path in its Git tree." };
+      }
+      if (entry.stdout) return checkout([commit, "--", file]);
+      // An addition has no base blob; a deletion has no head blob. Restore absence.
+      const remove = gitWt(["rm", "--force", "--ignore-unmatch", "--", file]);
+      return remove.error || remove.status !== 0
+        ? { verified: false, verdict: "reject", rule: "CHECKOUT_FAILED",
+            violation: "CHECKOUT_FAILED", detail: "Cannot restore an absent rollback path." }
+        : null;
+    };
     for (const f of nonTestFiles) {
-      const revCheck = checkout([baseSha, "--", f]);
+      const revCheck = restorePath(baseSha, f);
       if (revCheck !== null) return revCheck;
 
       const revRes = runReproducer(worktreeDir);
@@ -591,11 +655,16 @@ function verifyGitRepository(options) {
 
       if (tapRev.isAssertionFailure) {
         necessaryFiles.push(f);
-      } else {
+      } else if (revRes.exitCode === 0 && !revRes.timedOut) {
         unnecessaryFiles.push(f);
+      } else {
+        const rule = revRes.timedOut ? "NECESSITY_CHECK_TIMEOUT" : "NECESSITY_CHECK_CRASH";
+        return { verified: false, verdict: "reject", rule, violation: rule,
+          detail: `Rollback of ${f} did not produce a passing test or a genuine assertion failure.`,
+          checks: { necessity_check: { passed: false, file: f, exitCode: revRes.exitCode } } };
       }
 
-      const restCheck = checkout([headSha, "--", f]);
+      const restCheck = restorePath(headSha, f);
       if (restCheck !== null) return restCheck;
     }
 
@@ -619,7 +688,7 @@ function verifyGitRepository(options) {
       };
     }
 
-    if (unnecessaryFiles.length > 0 && (options.warrantClass === "surgical" || options.surgical === true)) {
+    if (unnecessaryFiles.length > 0 && measuredPhi.warrant_class === "surgical") {
       return {
         verified: false,
         verdict: "reject",
@@ -639,11 +708,17 @@ function verifyGitRepository(options) {
       };
     }
 
+    if (!conformance) {
+      try { requireAuthorizedWarrant(options.mirqlDir, { warrantId: options.warrantId }); }
+      catch { return { verified: false, verdict: "needs_human", rule: "WARRANT_UNAUTHORIZED", violation: "WARRANT_UNAUTHORIZED" }; }
+    }
     return {
+      phi: measuredPhi,
       verified: !conformance,
       verdict: conformance ? "conformance_pass" : "auto_merge",
       rule: conformance ? "CONFORMANCE_ONLY" : "MP-000",
       proof: {
+        ...(approvalRecord ? { human_approval_hash: approvalRecord.hash } : {}),
         causal_cycle_completed: true,
         base_fail_runs: 2,
         head_pass_runs: 2,
@@ -746,6 +821,11 @@ function verifyExecutionAttempt(options = {}) {
     }
   }
 
+  // C. Git-based execution verification mode
+  if (options.git === true || (options.workspaceDir && options.baseSha && !options.runCheck)) {
+    return verifyGitRepository(options);
+  }
+
   // B. Law 13: Phi Gate
   const phiCheck = checkPhiLaw13(options);
   if (!phiCheck.ok) {
@@ -756,11 +836,6 @@ function verifyExecutionAttempt(options = {}) {
       violation: phiCheck.violation,
       detail: phiCheck.detail,
     };
-  }
-
-  // C. Git-based execution verification mode
-  if (options.git === true || (options.workspaceDir && options.baseSha && !options.runCheck)) {
-    return verifyGitRepository(options);
   }
 
   // D. Execution verification stages via runCheck callback (Phase 3.7: unified pipeline)

@@ -1,12 +1,14 @@
 // packages/run/phi.mjs — Law 11, Law 13 & Law 17: Complexity Potential PHI and Thrift Engine.
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
+import { readGitPhiSnapshot } from "./git-phi-snapshot.mjs";
+import { isTestFilePath } from "../core/anti-cheat.mjs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /**
  * Law 11, 13 & 17 — Complexity Potential Phi (Phi).
  *
  * Computes integer-only complexity metrics for a codebase workspace:
- * - `loc`: lines of code across JS/MJS source files (non-empty).
+ * - `loc`: non-empty production JS/MJS lines; tests and conformance are excluded.
  * - `export_count`: exported symbols / declarations count.
  * - `cyclomatic`: estimate of decision branching points.
  * - `dep_count`: count of external dependencies in package.json (Law 0).
@@ -15,12 +17,13 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
  * - `max_nesting_depth`: maximum indentation/bracket nesting depth.
  * - `test_gaps`: count of `packages/**` source files not reachable from any
  *   `tests/*.test.mjs` file via the relative-import graph (Law 13 "test gaps":
- *   a module no test can even import is untested code). Scoped to `packages/`
+ *   a module no test can even import is untested code). Diagnostic only: it is
+ *   excluded from total so adding a test never changes source potential. Scoped to `packages/`
  *   because that is the shipped library surface; `bin/` entrypoints are thin
  *   wrappers exercised end-to-end via process spawn, and `scripts/` is dev
  *   tooling — neither is import-graph coverage debt.
  * - `total`: composite safe-integer score:
- *   loc + 2*export_count + 3*cyclomatic + 10*dep_count + 5*dup_blocks + 4*debt_markers + 2*max_nesting_depth + 6*test_gaps.
+ *   loc + 2*export_count + 3*cyclomatic + 10*dep_count + 5*dup_blocks + 4*debt_markers + 2*max_nesting_depth.
  *
  * Every number returned is strictly guaranteed to be a safe integer (Law 17).
  *
@@ -39,8 +42,22 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
  */
 export function computePhi(workspaceDir = process.cwd()) {
   const root = resolve(workspaceDir);
-  const files = collectSourceFiles(root);
+  const contentsByFile = new Map(collectSourceFiles(root).map(file => [file, readFileSync(file, "utf8")]));
+  let packageJson = {};
+  try { if (existsSync(join(root, "package.json"))) packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")); }
+  catch { packageJson = {}; } // Workspace diagnostics preserve their existing tolerant behavior.
+  return computeSnapshotPhi(root, contentsByFile, packageJson);
+}
 
+/** Measure exactly the named Git commit, with no working-directory evidence. */
+export function computeGitTreePhi(repoDir, ref) {
+  const snapshot = readGitPhiSnapshot(repoDir, ref);
+  return { commit_sha: snapshot.commitSha, tree_sha: snapshot.treeSha,
+    metrics: computeSnapshotPhi(snapshot.root, snapshot.contentsByFile, snapshot.packageJson) };
+}
+
+function computeSnapshotPhi(root, contentsByFile, packageJson) {
+  const files = [...contentsByFile.keys()].sort();
   let loc = 0;
   let exportCount = 0;
   let cyclomatic = 0;
@@ -48,11 +65,10 @@ export function computePhi(workspaceDir = process.cwd()) {
   let dupBlocks = 0;
   let debtMarkers = 0;
   let maxNestingDepth = 0;
-  const contentsByFile = new Map();
-
   for (const file of files) {
-    const content = readFileSync(file, "utf8");
-    contentsByFile.set(file, content);
+    const content = contentsByFile.get(file);
+    const path = relative(root, file).split(sep).join("/");
+    if (isTestFilePath(path) || path.startsWith("__tests__/") || path.startsWith("conformance/")) continue;
     const lines = content.split(/\r?\n/);
 
     for (const rawLine of lines) {
@@ -120,22 +136,10 @@ export function computePhi(workspaceDir = process.cwd()) {
     }
   }
 
-  // Count external dependencies from package.json if present
-  let depCount = 0;
-  const pkgPath = join(root, "package.json");
-  if (existsSync(pkgPath)) {
-    try {
-      const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-      depCount += Object.keys(pkg.dependencies || {}).length;
-      depCount += Object.keys(pkg.devDependencies || {}).length;
-      depCount += Object.keys(pkg.peerDependencies || {}).length;
-      depCount += Object.keys(pkg.optionalDependencies || {}).length;
-    } catch {
-      // ignore parse errors
-    }
-  }
+  const depCount = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]
+    .reduce((sum, key) => sum + Object.keys(packageJson?.[key] || {}).length, 0);
 
-  // Law 13 "test gaps": package modules unreachable from any test file.
+  // Report test gaps separately; test changes must not alter source potential.
   const testGaps = computeTestGaps(root, files, contentsByFile);
 
   const total =
@@ -145,8 +149,7 @@ export function computePhi(workspaceDir = process.cwd()) {
     depCount * 10 +
     dupBlocks * 5 +
     debtMarkers * 4 +
-    maxNestingDepth * 2 +
-    testGaps * 6;
+    maxNestingDepth * 2;
 
   return {
     loc: Math.trunc(loc),
@@ -165,11 +168,8 @@ export function computePhi(workspaceDir = process.cwd()) {
  * Law 13 test-gap metric: counts `packages/**` source files that no test file
  * reaches via the relative-import graph (direct or transitive). Deterministic,
  * offline (Law 1), and integer-only (Law 17). Workspaces without a `packages/`
- * directory or without `tests/*.test.mjs` files score 0 gaps (metric scoped to
- * the mirql package layout; documented, not silently widened).
- *
- * Weight rationale: an entirely untested module is heavier debt than a TODO
- * marker (4) but lighter than an illicit external dependency (10) — hence 6.
+ * directory score 0 gaps; with no test roots, package modules remain gaps.
+ * This diagnostic is scoped to the mirql package layout.
  *
  * @param {string} root
  * @param {string[]} files

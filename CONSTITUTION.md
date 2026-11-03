@@ -60,9 +60,10 @@ Every functional subsystem and public surface interface must be guarded by decla
 5. `surface`: Public API and CLI interface lock enforcement.
 
 ### Law 13: Monotone Potential PHI & Thrift Test
-System potential $\Phi$ represents the composite technical debt, unresolved defects, cyclomatic complexity, and test gaps. Every state transition must be non-increasing in potential:
-$$\Phi_{t+1} \le \Phi_t$$
-For refactoring and consolidation tasks, $\Phi$ must strictly decrease ($\Phi_{t+1} < \Phi_t$). Any candidate modification that introduces superfluous code, redundant dependencies, or uncompensated complexity fails the Thrift Test and must be rejected.
+System potential $\Phi$ measures production-source complexity and debt. Test files and `conformance/` fixtures do not contribute to the potential; test-gap counts remain separate diagnostics so adding a reproducer never changes $\Phi$.
+Every state transition must stay within the complexity allowance explicitly authorized by the human in the signed warrant:
+$$\Phi_{t+1} - \Phi_t \le \text{warrant.phi\_budget}$$
+An absent allowance means zero. A caller-supplied number or unsigned document grants no allowance. Refactoring and consolidation tasks must still strictly decrease potential ($\Phi_{t+1} < \Phi_t$), regardless of budget. Superfluous code, redundant dependencies, or complexity above the authorized allowance fails the Thrift Test.
 
 ### Law 14: Quiescence Is Success
 When all active warrants are completed and all declarative probes report green, the factory must settle into a stable quiescent state. Continuous idle execution, repetitive non-productive polling, or artificial token expenditure is classified as a runaway malfunction. In quiescence, consumption must drop below the defined budget ceiling (`quiescent_max_budget_bp`).

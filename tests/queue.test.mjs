@@ -1,3 +1,4 @@
+import { initEmptyRepo } from "./helpers/git.mjs";
 import { authorizeTestWarrant } from "./helpers/warrant.mjs";
 import { provisionTestTrust, authorizeTestKey, saveTestKeyring } from "./helpers/keyring.mjs";
 import { trustFile } from "../packages/core/trust-root.mjs";
@@ -1788,7 +1789,9 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       const supervisorKp = generateEd25519Keypair();
       saveTestKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
 
+      initEmptyRepo(tempDir);
       const res = await runSupervisor({
+        workspaceDir: tempDir,
         mirqlDir: tempDir,
         keypair: supervisorKp,
         jobId: leased.job_id,

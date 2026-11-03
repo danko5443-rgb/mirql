@@ -1,3 +1,4 @@
+import {verifyAuthorizedGitFixture} from "./helpers/authorized-verification.mjs";
 import {test} from "node:test";
 import assert from "node:assert/strict";
 import {mkdtempSync,mkdirSync,writeFileSync,rmSync} from "node:fs";
@@ -24,7 +25,7 @@ function candidate({manifest=true,failingSuite=false,file="tests/repro.test.mjs"
  git("add",".");git("commit","-qm","head");const headSha=git("rev-parse","HEAD");
  return {options:{git:true,workspaceDir:root,baseSha,headSha,reproducerFile:changedTest?file:undefined},cleanup:()=>rmSync(root,{recursive:true,force:true})};
 }
-function check(settings,options,assertResult){const fixture=candidate(settings);try{assertResult(verifyAttempt({...fixture.options,...options}));}finally{fixture.cleanup();}}
+function check(settings,options,assertResult){const fixture=candidate(settings);try{assertResult(verifyAuthorizedGitFixture({...fixture.options,...options}));}finally{fixture.cleanup();}}
 
 test("a caller's passing command cannot replace the failing full suite",()=>{
  check({failingSuite:true},{testCommand:'node --eval "process.exit(0)"'},r=>{assert.equal(r.verified,false,JSON.stringify(r));assert.equal(r.checks?.full_suite?.passed,false);});

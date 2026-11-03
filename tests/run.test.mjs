@@ -1,3 +1,4 @@
+import {verifyAuthorizedGitFixture} from "./helpers/authorized-verification.mjs";
 import { initEmptyRepo } from "./helpers/git.mjs";
 import { authorizeTestWarrant } from "./helpers/warrant.mjs";
 import { provisionTestTrust, authorizeTestKey } from "./helpers/keyring.mjs";
@@ -258,7 +259,7 @@ test("add correctly computes sum", () => {
       }).stdout.trim();
 
       // Run real git verification on valid repro fix
-      const validGitResult = verifyAttempt({
+      const validGitResult = verifyAuthorizedGitFixture({
         git: true,
         workspaceDir: repoDir,
         baseSha,
@@ -306,7 +307,7 @@ test("tautological test", () => {
       }).stdout.trim();
 
       // On base, tautology still passes -> RED_ON_BASE_FAILED
-      const tautologyGitResult = verifyAttempt({
+      const tautologyGitResult = verifyAuthorizedGitFixture({
         git: true,
         workspaceDir: repoDir,
         baseSha,
@@ -480,6 +481,7 @@ test("tautological test", () => {
   // -------------------------------------------------------------------------
   describe("3. Two-Process Privilege Split", () => {
     it("B10: agent strips secrets and retains ONLY safe allowlist variables", () => {
+      initEmptyRepo(tempDir);
       const dirtyEnv = {
         ...process.env,
         NODE_ENV: "production",
@@ -490,6 +492,7 @@ test("tautological test", () => {
       };
 
       const res = runAgent({
+        cwd: tempDir,
         env: dirtyEnv,
         command: "node -v",
       });
@@ -502,11 +505,13 @@ test("tautological test", () => {
     });
 
     it("B3: supervisor produces a valid schema-checked Outcome with real computed metrics", async () => {
+      initEmptyRepo(tempDir);
       const kp = generateEd25519Keypair();
       authorizeTestKey(tempDir, "tool:run_supervisor", kp);
 
       authorizeTestWarrant(tempDir, "01HWWWWWWWWWWWWWWWWWWWWWWW");
       const res = await runSupervisor({
+        workspaceDir: tempDir,
         mirqlDir: tempDir,
         signingKey: kp.privateKey,
         keyId: kp.keyId,
@@ -1340,7 +1345,7 @@ test("add correctly computes sum", () => {
         "utf8",
       );
 
-      const result = verifyAttempt({
+      const result = verifyAuthorizedGitFixture({
         git: true,
         workspaceDir: repoDir,
         baseSha,
@@ -1387,7 +1392,7 @@ test("add correctly computes sum", () => {
       const notARepo = join(tempDir, "not-a-repo");
       mkdirSync(notARepo, { recursive: true });
 
-      const result = verifyAttempt({
+      const result = verifyAuthorizedGitFixture({
         git: true,
         workspaceDir: notARepo,
         baseSha: "HEAD~1",
@@ -1436,7 +1441,7 @@ test("add correctly computes sum", () => {
       }
 
       try {
-        const result = verifyAttempt({
+        const result = verifyAuthorizedGitFixture({
           git: true,
           workspaceDir: repoDir,
           baseSha,
@@ -1492,7 +1497,7 @@ test("add correctly computes sum", () => {
         },
       });
 
-      const result = verifyAttempt({
+      const result = verifyAuthorizedGitFixture({
         git: true,
         workspaceDir: repoDir,
         baseSha,
@@ -1574,7 +1579,7 @@ test("add correctly computes sum", () => {
         encoding: "utf8",
       }).stdout.trim();
 
-      const result = verifyAttempt({
+      const result = verifyAuthorizedGitFixture({
         git: true,
         workspaceDir: repoDir,
         baseSha,
@@ -1593,7 +1598,7 @@ test("add correctly computes sum", () => {
       const repoDir = join(tempDir, "clean-repo");
       const { baseSha, headSha } = buildMathRepo(repoDir);
 
-      const result = verifyAttempt({
+      const result = verifyAuthorizedGitFixture({
         git: true,
         workspaceDir: repoDir,
         baseSha,

@@ -1,3 +1,4 @@
+import {verifyAuthorizedGitFixture} from "./helpers/authorized-verification.mjs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -80,7 +81,7 @@ not ok 1 - broken import
         git(repo, ["commit", "-q", "-m", "head without test"]);
         const head = git(repo, ["rev-parse", "HEAD"]);
 
-        const res = verifyAttempt({
+        const res = verifyAuthorizedGitFixture({
           git: true,
           workspaceDir: repo,
           baseSha: base,
@@ -111,7 +112,7 @@ not ok 1 - broken import
         git(repo, ["commit", "-q", "-m", "head without tests"]);
         const head = git(repo, ["rev-parse", "HEAD"]);
 
-        const res = verifyAttempt({
+        const res = verifyAuthorizedGitFixture({
           git: true,
           workspaceDir: repo,
           baseSha: base,
@@ -148,7 +149,7 @@ not ok 1 - broken import
         git(repo, ["commit", "-q", "-m", "head"]);
         const head = git(repo, ["rev-parse", "HEAD"]);
 
-        const res = verifyAttempt({
+        const res = verifyAuthorizedGitFixture({
           git: true,
           workspaceDir: repo,
           baseSha: base,
@@ -186,7 +187,7 @@ not ok 1 - broken import
         git(repo, ["commit", "-q", "-m", "feat: relevant"]);
         const head = git(repo, ["rev-parse", "HEAD"]);
 
-        const res = verifyAttempt({
+        const res = verifyAuthorizedGitFixture({
           git: true,
           workspaceDir: repo,
           baseSha: base,
@@ -227,7 +228,7 @@ not ok 1 - broken import
         const head = git(repo, ["rev-parse", "HEAD"]);
 
         // In standard mode: auto_merges but reports unnecessary_files
-        const resStandard = verifyAttempt({
+        const resStandard = verifyAuthorizedGitFixture({
           git: true,
           workspaceDir: repo,
           baseSha: base,
@@ -238,12 +239,12 @@ not ok 1 - broken import
         assert.deepEqual(resStandard.proof?.necessity_check?.unnecessary_files, ["src/extra.mjs"]);
 
         // In surgical mode: rejects with UNNECESSARY_CHANGE
-        const resSurgical = verifyAttempt({
+        const resSurgical = verifyAuthorizedGitFixture({
           git: true,
           workspaceDir: repo,
           baseSha: base,
           headSha: head,
-          warrantClass: "surgical",
+          fixtureWarrantClass: "surgical",
         });
         assert.equal(resSurgical.verified, false);
         assert.equal(resSurgical.verdict, "reject");
@@ -278,7 +279,7 @@ not ok 1 - broken import
         git(repo, ["commit", "-q", "-m", "head 12 files"]);
         const head = git(repo, ["rev-parse", "HEAD"]);
 
-        const res = verifyAttempt({
+        const res = verifyAuthorizedGitFixture({
           git: true,
           workspaceDir: repo,
           baseSha: base,
@@ -331,7 +332,7 @@ test("flaky test", () => {
         git(repo, ["commit", "-q", "-m", "head with flaky test"]);
         const head = git(repo, ["rev-parse", "HEAD"]);
 
-        const res = verifyAttempt({
+        const res = verifyAuthorizedGitFixture({
           git: true,
           workspaceDir: repo,
           baseSha: base,
