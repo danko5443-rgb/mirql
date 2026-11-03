@@ -78,9 +78,22 @@ export function runAgent(options = {}) {
     options.allowedEnv ?? [],
   );
 
+  const hasCommand = typeof options.command === "string" && options.command.length > 0;
+  let baseline;
+  let patterns;
+  if (hasCommand) {
+    try {
+      baseline = captureWorkerBase(options.cwd ?? process.cwd());
+      patterns = loadHumanOnlyPatterns(baseline.repoDir);
+    } catch (error) {
+      return { ok: false, exitCode: EXIT_CODES.POLICY_DENIAL, violation: "WORKSPACE_UNVERIFIED",
+        rule: "MP-001", detail: error.message, strippedEnv: stripped };
+    }
+  }
+
   // Policy check: agents are strictly forbidden from touching humanOnly paths (MP-001)
   if (Array.isArray(options.modifiedFiles) && options.modifiedFiles.length > 0) {
-    const check = checkHumanOnlyPaths(options.modifiedFiles);
+    const check = checkHumanOnlyPaths(options.modifiedFiles, patterns);
     if (!check.ok) {
       return {
         exitCode: EXIT_CODES.POLICY_DENIAL,
@@ -94,14 +107,7 @@ export function runAgent(options = {}) {
   }
 
   // If a command is specified, spawn it in the sanitized worker environment
-  if (typeof options.command === "string" && options.command.length > 0) {
-    let baseline;
-    const patterns = loadHumanOnlyPatterns();
-    try { baseline = captureWorkerBase(options.cwd ?? process.cwd()); }
-    catch (error) {
-      return { ok: false, exitCode: EXIT_CODES.POLICY_DENIAL, violation: "WORKSPACE_UNVERIFIED",
-        rule: "MP-001", detail: error.message, strippedEnv: stripped };
-    }
+  if (hasCommand) {
     const workerHome = mkdtempSync(join(tmpdir(), "mirql-agent-home-"));
     for (const key of Object.keys(cleanEnv)) {
       const u = key.toUpperCase();

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 function git(args, { cwd, env = process.env } = {}) {
-  const result = spawnSync("git", ["--no-pager", "-c", "core.fsmonitor=false", "-c", "core.sparseCheckout=false", ...args], {
+  const result = spawnSync("git", ["--no-replace-objects", "--no-pager", "-c", "core.fsmonitor=false", "-c", "core.sparseCheckout=false", ...args], {
     cwd, env, encoding: "utf8", timeout: 10000, maxBuffer: 8 * 1024 * 1024, windowsHide: true,
   });
   if (result.error || result.signal || result.status !== 0) {
