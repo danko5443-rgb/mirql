@@ -70,6 +70,12 @@ export function measureAuthorizedPhi({ repoDir, baseSha, headSha, mirqlDir, warr
     phi_before: base.metrics.total, phi_after: head.metrics.total, delta_phi: delta,
     phi_budget: budget, phi_consumed: consumed, phi_remaining: verdict.remaining,
     warrant_id: warrant?.id ?? null, warrant_class: warrant?.class ?? null,
+    // The signed scope patterns authorize changed non-test paths; only the
+    // verified warrant document supplies them, never caller input.
+    warrant_scope_allow: warrant
+      ? (Array.isArray(warrant.scope?.allow) ? warrant.scope.allow
+        : (Array.isArray(warrant.anchors) ? warrant.anchors : []))
+      : null,
     ok: verdict.ok, rule: verdict.rule,
   };
 }

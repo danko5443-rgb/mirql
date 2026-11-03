@@ -1,36 +1,53 @@
 name: Mergeproof External Notary
 
+# pull_request_target: GitHub runs the workflow file from the BASE branch for
+# this event, so a PR can never rewrite its own gate (the trigger list, MP-001
+# handling, or this job's name). A `pull_request` or `pull_request_review`
+# trigger would run the PR's own copy of this file instead.
+#
+# NOTE: `pull_request_review` is deliberately absent, so submitting or
+# dismissing a review does NOT re-trigger this check. After an approving
+# review lands, re-run the `Mergeproof Conscience Gate` job from the checks
+# page, or add/remove a PR label (the `labeled` type). Do not add
+# `pull_request_review` back: it would execute the PR's own copy of this file.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-  # Re-evaluate when an AI reviewer approves (or an approval is dismissed).
-  pull_request_review:
-    types: [submitted, dismissed]
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
 
-permissions:
-  contents: read
-  pull-requests: read
+permissions: {}
 
 concurrency:
   group: mergeproof-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  notary:
-    name: Mergeproof Conscience Gate
+  # Unprivileged job that runs CANDIDATE code: read-only repository access
+  # (checkout of a private repository fails without contents: read; the token
+  # is not left in .git/config), no secrets, no cache, no artifact upload. Its green result is ADVISORY ONLY —
+  # candidate code in that VM can always forge a pass — and is reported
+  # solely through this job's result, which the notary records as the
+  # measured suite_pass_head evidence bit. Never treat it as proof.
+  candidate-tests:
+    name: Candidate Tests (advisory)
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
-      - name: Check out candidate PR head
+      - name: Check out candidate PR head (no credentials kept)
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
+          persist-credentials: false
           path: candidate
 
-      - name: Check out base branch (Authoritative Notary, Law 7 & 9)
+      # Law 7: the BASE notary's runner judges the candidate tree, so a PR
+      # cannot swap the runner that judges it. No bootstrap fallback: if the
+      # base branch lacks scripts/run-tests.mjs this job fails closed.
+      - name: Check out base branch (authoritative runner)
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
           path: base-notary
 
       - name: Set up Node.js 22
@@ -38,10 +55,82 @@ jobs:
         with:
           node-version: 22
 
+      # MIRQL_TEST_ROOT points the base-notary runner at the candidate tree.
+      # No timeout here (same as today): the full suite is slow but legitimate.
+      - name: Run candidate suite under the base-notary runner
+        working-directory: candidate
+        run: MIRQL_TEST_ROOT="$PWD" node ../base-notary/scripts/run-tests.mjs
+
+  # Unprivileged measurement of the BASE suite (Laws 7 & 16): its result is
+  # the evidence for proof.suite_pass_base. Non-blocking — the notary runs via
+  # `if: always()` and records a red base as suite_pass_base=false, which the
+  # evaluator treats as missing suite proof, not as a CI error.
+  base-suite:
+    name: Base Suite (evidence)
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          path: base-notary
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run BASE test suite (authoritative measurement)
+        timeout-minutes: 15
+        run: node base-notary/scripts/run-tests.mjs
+
+  # The privileged conscience. Read-only permissions are its only privilege.
+  # The candidate tree is fetched as DATA ONLY: nothing under candidate/ is
+  # ever executed, imported, or required — every node command runs a
+  # base-notary file from outside the candidate tree, and the candidate's
+  # package.json is read with JSON.parse of its text.
+  notary:
+    name: Mergeproof Conscience Gate
+    permissions:
+      contents: read
+      pull-requests: read
+    needs: [candidate-tests, base-suite]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out base branch (Authoritative Notary, Law 7 & 9)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: base-notary
+
+      # Data only: the steps below read the candidate's files as text and its
+      # git objects as data; nothing in it is executed. persist-credentials:
+      # false on every checkout also leaves no token in any .git/config.
+      - name: Check out candidate PR head (data only — never executed)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: candidate
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Zero-Dependency Law: the candidate's package.json is parsed as data
+      # (JSON.parse of the file's text), never require()d as a module.
       - name: Verify zero dependencies on candidate
         run: |
           node -e "
-            const pkg = require('./candidate/package.json');
+            const pkg = JSON.parse(require('node:fs').readFileSync('./candidate/package.json', 'utf8'));
             const deps = Object.keys(pkg.dependencies || {}).length;
             const devDeps = Object.keys(pkg.devDependencies || {}).length;
             if (deps > 0 || devDeps > 0) {
@@ -50,40 +139,13 @@ jobs:
             }
           "
 
-      # Phase 0.0a: the candidate's tests run under the BASE notary's runner
-      # (MIRQL_TEST_ROOT points it at the candidate tree), so a PR cannot swap
-      # the runner that judges it. Falls back to the candidate's runner only
-      # during bootstrap, while base does not yet support MIRQL_TEST_ROOT.
-      - name: Run Candidate Test Suite (Base-Notary Runner)
-        id: head_suite
-        working-directory: candidate
-        run: |
-          if grep -q MIRQL_TEST_ROOT ../base-notary/scripts/run-tests.mjs 2>/dev/null; then
-            MIRQL_TEST_ROOT="$PWD" node ../base-notary/scripts/run-tests.mjs
-          else
-            echo "::warning::base-notary runner lacks MIRQL_TEST_ROOT; bootstrap fallback to the candidate runner"
-            node scripts/run-tests.mjs
-          fi
-
-      # Law 7 & 16: measure the BASE suite too — its real outcome feeds
-      # proof.suite_pass_base. Non-blocking on purpose: a red base is EVIDENCE
-      # (the notary must reject a PR that cannot prove improvement from a
-      # green base), not a CI infrastructure error.
-      - name: Run BASE test suite (Authoritative Measurement, Law 7)
-        id: base_suite
-        working-directory: base-notary
-        timeout-minutes: 15
-        continue-on-error: true
-        run: node scripts/run-tests.mjs
-
       # Law 6 & 16: every proof field is MEASURED — suite outcomes mirror the
-      # step outcomes above (outcome, not conclusion, so continue-on-error reflects
-      # true test failure), the diff is the authoritative git diff, phi is
+      # real results of the candidate-tests and base-suite jobs (needs.*.result,
+      # not steps of this VM), the diff is the authoritative git diff, phi is
       # computed by the base-notary's own engine, and causal_cycle_completed
-      # stays false until a verified reproducer artifact exists in this
-      # pipeline (never assumed, never faked).
-      # Law 7 & 9: N-1 base-notary executes the evidence builder; falls back to
-      # candidate copy only during bootstrap when base does not yet possess it.
+      # is always false in CI (exit codes of candidate scripts are attestation,
+      # not measurement). No bootstrap fallback: if the base branch lacks
+      # ci-evidence.mjs this job fails closed; the candidate copy is never run.
       - name: Build Honest PR Evidence (Measured Facts Only)
         env:
           BASE_NOTARY_DIR: ./base-notary
@@ -92,19 +154,20 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          SUITE_PASS_BASE: ${{ steps.base_suite.outcome == 'success' }}
-          SUITE_PASS_HEAD: ${{ steps.head_suite.outcome == 'success' }}
-        run: |
-          if [ -f base-notary/scripts/ci-evidence.mjs ]; then
-            node base-notary/scripts/ci-evidence.mjs
-          else
-            node candidate/scripts/ci-evidence.mjs
-          fi
+          SUITE_PASS_BASE: ${{ needs.base-suite.result == 'success' }}
+          SUITE_PASS_HEAD: ${{ needs.candidate-tests.result == 'success' }}
+          PR_DOC_PATH: ${{ github.workspace }}/pr-doc.json
+        run: node base-notary/scripts/ci-evidence.mjs
 
-      # MP-001: a humanOnly PR may proceed only with an Approve review on the
-      # exact head commit from an aiReviewers account in the BASE policy. The
-      # notary then runs every other rule, capped at needs_human. Skipped while
-      # base has no ci-review-gate.mjs (bootstrap).
+      # MP-001 support: look up whether an aiReviewers account from the BASE
+      # policy (policy/paths.yaml) approved this exact head commit. Runs for
+      # EVERY PR, not only humanOnly ones — the final gate below also requires
+      # this approver before needs_human / conformance_pass can pass the check.
+      # The lookup rules live in scripts/ci-review-gate.mjs (base copy): an
+      # allowlisted bot, not the PR author, latest decisive review APPROVED on
+      # the exact head commit, no outstanding CHANGES_REQUESTED from any
+      # allowlisted bot, and no comment commanding a bot to approve.
+      # No bootstrap fallback: base lacking ci-review-gate.mjs fails closed.
       - name: Find AI Reviewer Approval (Base Policy)
         id: ai_review
         env:
@@ -114,52 +177,62 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_NOTARY_DIR: ./base-notary
-          REVIEWS_PATH: ./reviews.jsonl
-          COMMENTS_PATH: ./comments.jsonl
-          REVIEW_COMMENTS_PATH: ./review-comments.jsonl
+          REVIEWS_PATH: ${{ runner.temp }}/reviews.jsonl
+          COMMENTS_PATH: ${{ runner.temp }}/comments.jsonl
+          REVIEW_COMMENTS_PATH: ${{ runner.temp }}/review-comments.jsonl
         run: |
-          if [ -f base-notary/scripts/ci-review-gate.mjs ]; then
-            gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews" --jq '.[]' > "$REVIEWS_PATH"
-            gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[]' > "$COMMENTS_PATH"
-            gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/comments" --jq '.[]' > "$REVIEW_COMMENTS_PATH"
-            node base-notary/scripts/ci-review-gate.mjs
-          else
-            echo "::notice::base-notary has no ci-review-gate.mjs yet; AI approvals are not considered"
-          fi
+          gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews" --jq '.[]' > "$REVIEWS_PATH"
+          gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[]' > "$COMMENTS_PATH"
+          gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/comments" --jq '.[]' > "$REVIEW_COMMENTS_PATH"
+          node base-notary/scripts/ci-review-gate.mjs
 
+      # The evaluator reads policy/paths.yaml and runs its Law 7 git
+      # cross-check from its working directory, so it runs from base-notary
+      # (BASE policy — never the candidate's copy). This step copies the
+      # candidate head's git OBJECTS into the base-notary repository (data
+      # only, no working-tree change) so `git diff base...head` can run there.
+      - name: Fetch candidate head objects into the notary repo
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git -C base-notary fetch --no-tags ../candidate "$HEAD_SHA"
+
+      # Exit policy: only auto_merge passes unconditionally. needs_human and
+      # conformance_pass pass ONLY when the lookup above found an aiReviewers
+      # approver on the exact head commit; otherwise the check stays red until
+      # such a review exists. A reject or any unknown/missing verdict fails.
       - name: Evaluate Mergeproof Notary Gate (Base-Authored Conscience)
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           AI_APPROVER: ${{ steps.ai_review.outputs.approver }}
-        working-directory: candidate
-        # Only auto_merge exits 0, and CI cannot reach auto_merge until a
-        # measured causal proof exists (Phase 3). A humanOnly PR approved by an
-        # aiReviewers account is capped at needs_human. needs_human and
-        # conformance_pass therefore pass this check with a notice: the main
-        # ruleset (Phase 0.0c) requires a human review on every PR. A reject or
-        # any other failure fails the check.
+          PR_DOC: ${{ github.workspace }}/pr-doc.json
+        working-directory: base-notary
         run: |
           reviewer_args=()
           if [ -n "$AI_APPROVER" ]; then
             reviewer_args=(--human-only-reviewer "$AI_APPROVER")
           fi
           set +e
-          node ../base-notary/bin/mirql.mjs m check \
-            --pr ./pr-doc.json \
+          node bin/mirql.mjs m check \
+            --pr "$PR_DOC" \
             --base "$BASE_SHA" \
             --head "$HEAD_SHA" \
-            "${reviewer_args[@]}" > verdict.json
+            "${reviewer_args[@]}" > "$PR_DOC.verdict.json"
           status=$?
           set -e
-          cat verdict.json
-          verdict=$(node -e "try{const l=require('fs').readFileSync('verdict.json','utf8').trim().split(/\r?\n/).pop();process.stdout.write(JSON.parse(l).verdict??'')}catch{}")
+          cat "$PR_DOC.verdict.json"
+          verdict=$(node -e "try{const l=require('node:fs').readFileSync(process.argv[1],'utf8').trim().split(/\r?\n/).pop();process.stdout.write(JSON.parse(l).verdict??'')}catch{}" "$PR_DOC.verdict.json")
           case "$verdict" in
             auto_merge)
+              echo "::notice::mergeproof verdict: auto_merge"
               exit 0 ;;
             needs_human|conformance_pass)
-              echo "::notice::mergeproof verdict: $verdict - human review required"
-              exit 0 ;;
+              if [ -n "$AI_APPROVER" ]; then
+                echo "::notice::mergeproof verdict: $verdict - AI review by $AI_APPROVER on $HEAD_SHA"
+                exit 0
+              fi
+              echo "::error::mergeproof verdict: $verdict requires review: no aiReviewers account (base policy/paths.yaml) approved head commit $HEAD_SHA. After the approval lands, re-run this job or toggle a PR label - a review alone does not re-trigger this check."
+              exit 1 ;;
             *)
               echo "::error::mergeproof verdict: ${verdict:-none} (exit $status)"
               exit 1 ;;

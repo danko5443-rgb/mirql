@@ -107,6 +107,8 @@ export function executeCli(args, ctx = {}) {
     TEMP: process.env.TEMP,
     TMP: process.env.TMP,
     NODE_ENV: process.env.NODE_ENV || "test",
+    // Each journey mints a throwaway owner key in its own sandbox; it guards nothing.
+    MIRQL_ALLOW_PLAINTEXT_OWNER_KEY: "1",
     ...(ctx.mirqlDir ? { MIRQL_DIR: ctx.mirqlDir } : {}),
   };
 

@@ -26,7 +26,7 @@
 
 1. **`m` — mergeproof**: The isolated notary gate. Evaluates candidate pull requests against base branch invariants, requiring causal RED-to-GREEN proofs, potential $\Phi$ within the human-signed allowance, and anti-cheat verification before signing verdicts.
 2. **`i` — inbox**: The communication membrane between human operators and autonomous roles. Ingests human intent, digests activity logs, and facilitates 1-tap warrant sign-off.
-3. **`r` — run**: The sandboxed execution engine and supervisor. Spawns ephemeral, speechless worker sandboxes with explicit resource budgets and enforces lease timeouts.
+3. **`r` — run**: The execution engine and supervisor. Spawns workers with a stripped environment and a disposable home directory, with explicit resource budgets and lease timeouts. Workers run as the same OS user: this is not yet an OS sandbox.
 4. **`q` — queue**: The deterministic job scheduler. Mints cryptographic warrants, leases jobs to tiered agents (`flash`, `mid`, `max`), and tracks macro-state transitions (`BUILD`, `HARDEN`, `PATROL`, `QUIESCENT`).
 5. **`l` — log**: The append-only, tamper-evident cryptographic event ledger. All system state is a pure deterministic fold over immutable ledger events.
 
@@ -41,8 +41,8 @@ All operations in `mirql` are strictly governed by [CONSTITUTION.md](CONSTITUTIO
 - **Law 4: One Durable Ledger** — State is a pure fold over append-only events.
 - **Law 5: Base-Pinned Mortal Verdicts** — Proofs are pinned to base commit SHA and lease TTL.
 - **Law 6: Silence Is Never Consent** — Timeouts and ambiguities always evaluate to refusal.
-- **Law 7: Notary Outside Blast Radius** — Notary operates outside worker sandbox boundaries.
-- **Law 8: Speechless Sandboxes** — Workers possess zero network access or ambient credentials.
+- **Law 7: Notary Outside Blast Radius** — Notary operates outside worker boundaries.
+- **Law 8: Speechless Sandboxes** — The goal is workers with zero network access or ambient credentials. Today only the environment and home directory are isolated; network access and same-user file access remain open until OS isolation lands.
 - **Law 9: N-1 Processes N** — Stable version N-1 gates candidate version N.
 - **Law 10: Ship Invariants Not Features** — Merges require machine-checked behavioral invariants.
 - **Law 11: No Warrant No Work** — Execution prohibited without signed, unexpired warrant.
@@ -68,11 +68,12 @@ The public surface is strictly locked in [`surface.lock`](surface.lock):
 - `mirql i digest` — View pending intents, proposals, and system summaries.
 - `mirql i act` — Sign or reject pending warrant proposals.
 - `mirql i propose` — Submit a structured change proposal.
+- `mirql i protect-key` — Encrypt the owner's private key with a passphrase.
 
 ### Run (`mirql r`)
-- `mirql r supervisor` — Execute the reactive agent supervisor daemon.
-- `mirql r agent` — Run an ephemeral sandboxed role container.
-- `mirql r verify --workspace <repo> --base <ref> --head <ref> --reproducer <changed-test-file>` — Run the measured Git causal checks and the project's full npm test suite. For humanApprove changes, add `--dir <ledger> --warrant-id <id>` to consume an exact owner-signed approval. `--fixture` checks conformance only. Candidate tests currently execute under the invoking user account; OS isolation remains unfinished.
+- `mirql r supervisor` — Execute the reactive agent supervisor daemon. It leases and dispatches jobs, but it cannot accept work yet: it passes the verifier no runner or Git proof, so every daemon attempt ends `reject` (`MISSING_RUNNER`). Use `mirql r verify` to accept a change.
+- `mirql r agent` — Run a worker command with a stripped environment and a disposable home directory (not an OS sandbox).
+- `mirql r verify --workspace <repo> --base <ref> --head <ref> --reproducer <changed-test-file>` — Run the measured Git causal checks and the project's full npm test suite. For humanApprove changes, add `--dir <ledger> --warrant-id <id>` to consume an exact owner-signed approval. `--fixture` checks conformance only. Candidate tests execute with a stripped environment and a disposable home directory, but still under the invoking user account; OS isolation remains unfinished. The verifier refuses to run candidate code while the owner key is plaintext (`OWNER_KEY_UNPROTECTED`).
 - `mirql r probe` — Run declarative health probes (tests, drift, mutants, complexity, surface).
 - `mirql r bing-bong` (alias `mirql r bb`) — Multi-agent frontier consensus loop where 2–3 cross-family agents debate until reaching unanimous `CONVERGED` consensus or escalating to `mirql-inbox` with exit code `10`.
 
@@ -86,7 +87,7 @@ The public surface is strictly locked in [`surface.lock`](surface.lock):
 
 ### Log (`mirql l`)
 - `mirql l append` — Write an event to the append-only ledger.
-- `mirql l view` — Stream and inspect ledger events.
+- `mirql l view <projection>` — Inspect a ledger projection, such as `job_state`.
 - `mirql l replay` — Replay events from genesis to compute current state projection.
 - `mirql l verify` — Cryptographically verify ledger hash chains and signatures.
 - `mirql l snapshot` — Create a verified compact state checkpoint.
@@ -96,7 +97,7 @@ The public surface is strictly locked in [`surface.lock`](surface.lock):
 ## Quickstart
 
 ### Prerequisites
-- Node.js `>= 18.17`
+- Node.js `>= 22`
 - Pure built-in ESM (`node:fs`, `node:path`, `node:test`, `node:assert/strict`)
 - Zero external npm dependencies
 
@@ -114,6 +115,19 @@ Inspect policy files and baseline locks:
 - [`surface.lock`](surface.lock) — Baseline command and schema surface lock.
 
 ### Trust storage
+
+The owner key signs warrants and merge approvals, so it is encrypted at rest
+(scrypt and AES-256-GCM). Genesis requires a passphrase, from
+`MIRQL_HUMAN_PASSPHRASE` or `--passphrase`. The flag is visible in process
+listings, so prefer the variable. Encrypt an existing key with:
+
+```sh
+mirql i protect-key --dir .mirql
+```
+
+`mirql r verify` refuses to run candidate code beside a plaintext owner key.
+`MIRQL_ALLOW_PLAINTEXT_OWNER_KEY=1` turns that off, and exists for throwaway
+test ledgers. Machine keys under `keys/` are still plaintext.
 
 Machine keys, the default human key, and the public keyring live outside the workspace.
 Set MIRQL_TRUST_ROOT to an operator-controlled directory, or use the default
@@ -208,6 +222,12 @@ The CI notary runs without a ledger, so its allowance is always 0. A pull
 request that grows $\Phi$ is rejected in CI, so merging it is a human decision.
 GitHub enforces that only when `main` requires the Mergeproof check and agents
 use an identity without merge rights; otherwise an agent can merge over red.
+
+The gate runs on `pull_request_target`, so it always uses the base branch's
+workflow and a pull request cannot rewrite its own check. A workflow change
+first takes effect on the pull requests opened after it lands. A review does
+not re-trigger the check: after an AI reviewer approves, re-run the job or add a
+label to the pull request.
 
 
 Worker commands require a readable, committed Git baseline. After execution,
