@@ -61,7 +61,7 @@ export function validateServiceUnit(unitContent) {
 export function renderLauncherUnit(options = {}) {
   const workingDir = options.workingDir ?? "/opt/mirql";
   const user = options.user ?? "mirql";
-  const execStart = options.execStart ?? "/usr/bin/node /opt/mirql/bin/mirql.mjs r supervisor";
+  const execStart = options.execStart ?? "/usr/bin/node /opt/mirql/bin/mirql.mjs r supervisor --daemon";
 
   // Prevent newline / directive injection
   if (/[\r\n]/.test(user) || /[\r\n]/.test(workingDir) || /[\r\n]/.test(execStart)) {

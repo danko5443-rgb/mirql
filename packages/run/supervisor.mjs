@@ -511,11 +511,26 @@ export async function runSupervisorReactive(options = {}) {
   const ledgerPath = join(mirqlDir, "ledger", "events.jsonl");
 
   let stepsExecuted = 0;
+  let lastResult = null;
   let inFlight = false;
   let queuedRerun = false;
   const pendingEvents = [];
   let expiryTimer = null;
   let wakeAtMs = Infinity;
+  let finished = false;
+  let resolveDone;
+  const done = new Promise((res) => { resolveDone = res; });
+
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    if (expiryTimer) {
+      clearTimeout(expiryTimer);
+      expiryTimer = null;
+    }
+    if (!watcher.closed) watcher.close();
+    resolveDone();
+  };
 
   const watcher = createLedgerWatcher(ledgerPath, {
     debounceMs: options.debounceMs ?? 25,
@@ -553,7 +568,6 @@ export async function runSupervisorReactive(options = {}) {
     }
 
     inFlight = true;
-    let lastResult = null;
     try {
       let leasedThisPass = false;
       do {
@@ -673,6 +687,11 @@ export async function runSupervisorReactive(options = {}) {
             stepsExecuted++;
             lastResult = stepResult;
             watcher.emit("step", stepResult);
+            // Drain mode: stop after maxSteps executed steps (the watcher's
+            // do-while exits on watcher.closed, so no further leases happen).
+            if (Number.isSafeInteger(options.maxSteps) && stepsExecuted >= options.maxSteps) {
+              finish();
+            }
           }
         } catch (stepErr) {
           if (process.env.MIRQL_DEBUG) {
@@ -741,13 +760,9 @@ export async function runSupervisorReactive(options = {}) {
   return {
     watcher,
     getStepsExecuted: () => stepsExecuted,
-    close: () => {
-      if (expiryTimer) {
-        clearTimeout(expiryTimer);
-        expiryTimer = null;
-      }
-      watcher.close();
-    },
+    getLastStep: () => lastResult,
+    done,
+    close: finish,
   };
 }
 

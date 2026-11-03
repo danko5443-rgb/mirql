@@ -1,8 +1,8 @@
 // packages/run — attempt supervisor, AST anti-cheat gate, 0-token probe runner,
 // and bing-bong multi-agent consensus orchestrator.
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import {
   EXIT_CODES,
   jcs,
@@ -243,6 +243,15 @@ export function runCli(argv = []) {
 
     case "supervisor": {
       try {
+        // Daemon mode composes queue leasing with the reactive loop; packages
+        // must not cross-import, so the wiring lives in bin/mirql-run.mjs.
+        if (flags.daemon === true) {
+          emitError({
+            error: "USAGE_ERROR",
+            reason: "--daemon is composed by the mirql router (it wires the queue); run: mirql r supervisor --daemon",
+          });
+          return EXIT_CODES.USAGE_ERROR;
+        }
         // H1: `--epoch <int>` threads the leased configuration epoch (Law 5
         // fencing) into the Outcome and the signed attempt.outcome event.
         let epoch;
@@ -660,6 +669,70 @@ export function runCli(argv = []) {
       return EXIT_CODES.USAGE_ERROR;
     }
   }
+}
+
+/**
+ * Law 14 daemon composition: wraps runSupervisorReactive with launcher
+ * lifecycle (pid + heartbeat), optional drain-and-exit (maxSteps, for cron
+ * style drains and tests) and signal shutdown. Cross-package wiring — queue
+ * leasing, warrant documents — is injected by the bin composition root;
+ * packages never cross-import (structure gate).
+ *
+ * @param {object} options
+ * @param {string} [options.dir] ledger dir (default .mirql)
+ * @param {string} [options.workspaceDir] workspace for supervised runs
+ * @param {string} [options.builderCommand] sandboxed builder command
+ * @param {Function} [options.leaseJob] injected queue lease callback
+ * @param {Function} [options.getWarrant] injected warrant document resolver
+ * @param {number} [options.maxSteps] stop after N executed steps (drain mode)
+ * @param {boolean} [options.handleSignals=true] install SIGINT/SIGTERM shutdown
+ * @returns {Promise<{watcher: object, getStepsExecuted: () => number, close: () => void, stop: () => void, done: Promise<void>}>}
+ */
+export async function startFactoryDaemon(options = {}) {
+  const mirqlDir = resolve(options.dir ?? options.mirqlDir ?? join(process.cwd(), ".mirql"));
+  const stateDir = join(mirqlDir, "state");
+  mkdirSync(stateDir, { recursive: true });
+  // The watcher silently no-ops when the ledger directory does not exist,
+  // which would leave an idle daemon that exits 0 the moment nothing else
+  // keeps the event loop alive (P1 from the Codex review).
+  mkdirSync(join(mirqlDir, "ledger"), { recursive: true });
+  const heartbeatPath = join(stateDir, "heartbeat");
+  const pidPath = join(stateDir, "launcher.pid");
+  const touch = (file, body) => { try { writeFileSync(file, body, "utf8"); } catch {} };
+  touch(heartbeatPath, `${Date.now()}\n`);
+  touch(pidPath, `${process.pid}\n`);
+  const ticker = setInterval(() => touch(heartbeatPath, `${Date.now()}\n`), options.heartbeatMs ?? 2000);
+  ticker.unref();
+
+  const daemon = await runSupervisorReactive({
+    ...options,
+    mirqlDir,
+    initialRun: options.initialRun ?? true,
+    // the daemon owns launcher.pid for its whole lifetime; per-step
+    // supervisors must not unlink it between events.
+    skipPidFile: true,
+  });
+
+  let stopped = false;
+  let resolveDone;
+  const done = new Promise((res) => { resolveDone = res; });
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(ticker);
+    try { daemon.close(); } catch {}
+    try { if (existsSync(pidPath)) unlinkSync(pidPath); } catch {}
+    resolveDone();
+  };
+
+  // Drain mode resolves the reactive loop's own done promise; mirror it here
+  // so the launcher lifecycle (pid + heartbeat ticker) shuts down with it.
+  daemon.done.then(stop).catch(() => {});
+  if (options.handleSignals !== false) {
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  }
+  return { watcher: daemon.watcher, getStepsExecuted: daemon.getStepsExecuted, getLastStep: daemon.getLastStep, close: daemon.close, stop, done };
 }
 
 /**
