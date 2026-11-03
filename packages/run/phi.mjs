@@ -259,8 +259,25 @@ function computeTestGaps(root, files, edges) {
   return gaps;
 }
 
+/**
+ * Blanks full-line `//` comments so a commented-out import is not an edge.
+ * Only lines that cannot hide code are removed: a line inside a multi-line
+ * template literal can end it with a backtick or `${`, and a string continued
+ * from the previous line (trailing `\`) can close on it. Ambiguous lines keep
+ * counting, because an extra edge only over-measures Φ, while a dropped real
+ * edge would let production complexity hide behind an exempt test path.
+ */
+function withoutFullLineComments(content) {
+  const lines = content.split("\n");
+  return lines.map((line, i) => {
+    const continued = i > 0 && /\\\r?$/.test(lines[i - 1]);
+    return !continued && /^\s*\/\//.test(line) && !line.includes("`") && !line.includes("${") ? "" : line;
+  }).join("\n");
+}
+
 /** Extracts relative import/export-from, side-effect import, dynamic import(), and require() specifiers. */
-function extractRelativeSpecifiers(content) {
+function extractRelativeSpecifiers(source) {
+  const content = withoutFullLineComments(source);
   const specs = [];
   // import ... from './x' / export ... from './x' (bounded scan window keeps
   // the match on the same statement even across newlines)

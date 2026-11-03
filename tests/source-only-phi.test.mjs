@@ -51,3 +51,30 @@ test("test-path modules only imported by tests stay exempt", () => {
   assert.equal(computePhi(root).total, before);
  } finally { rmSync(root, { recursive: true, force: true }); }
 });
+test("a commented-out import in production does not end a test file's exemption", () => {
+ const root = mkdtempSync(join(tmpdir(), "mirql-comment-edge-")); try {
+  mkdirSync(join(root, "tests"));
+  writeFileSync(join(root, "app.mjs"), '// Example: import "./tests/a.test.mjs";\n  // export * from "./tests/b.mjs";\nexport const app = 1;\n');
+  const before = computePhi(root).total;
+  writeFileSync(join(root, "tests", "a.test.mjs"), complexBody);
+  writeFileSync(join(root, "tests", "b.mjs"), complexBody);
+  assert.equal(computePhi(root).total, before);
+ } finally { rmSync(root, { recursive: true, force: true }); }
+});
+const evasions = {
+ "a template literal closed on a comment-looking line": 'export const doc = `\n//`; export * from "./test/impl.mjs"; const tail = `\n`;\n',
+ "a template expression on a comment-looking line": 'export const doc = `\n// ${await import("./test/impl.mjs")}\n`;\n',
+ "a string continued onto a comment-looking line": 'export const doc = "start\\\n// end"; export * from "./test/impl.mjs";\n',
+};
+for (const [label, entry] of Object.entries(evasions)) {
+ test(`comment stripping cannot hide a real import behind ${label}`, () => {
+  const root = mkdtempSync(join(tmpdir(), "mirql-comment-evasion-")); try {
+   mkdirSync(join(root, "test"));
+   writeFileSync(join(root, "test", "impl.mjs"), complexBody);
+   writeFileSync(join(root, "entry.mjs"), "export const entry = 1;\n");
+   const exempt = computePhi(root).total;
+   writeFileSync(join(root, "entry.mjs"), entry);
+   assert.ok(computePhi(root).total > exempt + 10, "the real import must keep the hidden module measured");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+ });
+}
