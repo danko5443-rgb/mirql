@@ -10,6 +10,7 @@ import {
   checkSwallowedExceptions,
   checkTestWeakenings,
 } from "./anti-cheat.mjs";
+import { parsePathPolicies } from "../core/anti-cheat.mjs";
 import { evaluatePhiGate } from "./phi.mjs";
 import { extractChangedLines } from "./mutant.mjs";
 import { parseTapOutput, checkV8Coverage } from "./causal-evidence.mjs";
@@ -230,18 +231,23 @@ function evaluateCheckResult(check, fixture = {}) {
  * Executes honest causal proof against a real git repository (Phase 3).
  */
 function verifyGitRepository(options) {
-  const repoDir = options.workspaceDir ?? options.repoDir ?? process.cwd();
+  let repoDir = options.workspaceDir ?? options.repoDir ?? process.cwd();
   const baseRef = options.baseCommit ?? options.baseSha ?? "HEAD~1";
   const headRef = options.headCommit ?? options.headSha ?? "HEAD";
 
   function git(args, cwd = repoDir) {
-    return spawnSync("git", args, { cwd, encoding: "utf8", timeout: 30000 });
+    return spawnSync("git", ["--no-replace-objects", "--no-pager", "-c", "core.fsmonitor=false", ...args], { cwd, encoding: "utf8", timeout: 30000, windowsHide: true });
   }
 
   // Resolve the installed npm CLI outside the candidate before executing it.
   // Searching from its working directory would let a candidate-local npm.cmd win.
   const rootInfo = git(["--no-replace-objects", "rev-parse", "--show-toplevel"]);
-  const npmRepository = resolve(rootInfo.status === 0 ? rootInfo.stdout.replace(/\r?\n$/, "") : repoDir);
+  if (rootInfo.error || rootInfo.status !== 0) {
+    return { verified: false, verdict: "reject", rule: "GIT_DIFF_FAILED", violation: "GIT_DIFF_FAILED",
+      detail: "Cannot resolve the authoritative Git repository root." };
+  }
+  repoDir = resolve(rootInfo.stdout.replace(/\r?\n$/, ""));
+  const npmRepository = repoDir;
   const npmRoots = [dirname(process.execPath), ...(process.env.PATH ?? process.env.Path ?? "").split(delimiter).filter(isAbsolute)];
   const npmCandidates = npmRoots.flatMap(root => [
     join(root, "node_modules", "npm", "bin", "npm-cli.js"),
@@ -278,7 +284,7 @@ function verifyGitRepository(options) {
   }
 
   const resolveCommit = (ref) => {
-    const res = git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+    const res = git(["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`]);
     return res.error || res.status !== 0 ? null : res.stdout.trim();
   };
   const baseSha = resolveCommit(baseRef);
@@ -294,7 +300,7 @@ function verifyGitRepository(options) {
     };
   }
 
-  const diffRes = git(["diff", "--name-status", baseSha, headSha]);
+  const diffRes = git(["diff", "--no-relative", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-status", "-z", baseSha, headSha, "--"]);
   if (diffRes.error || diffRes.status !== 0) {
     return {
       verified: false,
@@ -308,18 +314,35 @@ function verifyGitRepository(options) {
   }
 
   const changeEntries = [];
-  for (const line of diffRes.stdout.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
-    const parts = trimmed.split("\t");
-    if (parts.length < 2 || !/^[A-Z]+\d*$/.test(parts[0])) continue;
-    const status = parts[0][0];
-    if (status === "R" || status === "C") {
-      changeEntries.push({ status: "A", path: parts[parts.length - 1] });
-    } else {
-      changeEntries.push({ status, path: parts[1] });
-    }
+  const fields = diffRes.stdout.split("\0");
+  if (fields.at(-1) === "") fields.pop();
+  if (fields.length % 2 !== 0) {
+    return { verified: false, verdict: "reject", rule: "GIT_DIFF_FAILED", violation: "GIT_DIFF_FAILED",
+      detail: "Malformed NUL-delimited Git path measurement." };
   }
+  for (let i = 0; i < fields.length; i += 2) {
+    if (!/^[A-Z]$/.test(fields[i]) || !fields[i+1]) {
+      return { verified: false, verdict: "reject", rule: "GIT_DIFF_FAILED", violation: "GIT_DIFF_FAILED",
+        detail: "Invalid measured Git change entry." };
+    }
+    changeEntries.push({ status: fields[i], path: fields[i+1] });
+  }
+  const policyEntry = git(["ls-tree", "-z", baseSha, "--", "policy/paths.yaml"]);
+  let policyText = "";
+  if (policyEntry.error || policyEntry.status !== 0 ||
+      (policyEntry.stdout && !/^100(?:644|755) blob [a-f0-9]+\tpolicy\/paths\.yaml\0$/.test(policyEntry.stdout))) {
+    return { verified: false, verdict: "reject", rule: "POLICY_UNVERIFIED", violation: "POLICY_UNVERIFIED",
+      detail: "Cannot read a regular path-policy blob from the base commit." };
+  }
+  if (policyEntry.stdout) {
+    const policy = git(["show", baseSha + ":policy/paths.yaml"]);
+    if (policy.error || policy.status !== 0) {
+      return { verified: false, verdict: "reject", rule: "POLICY_UNVERIFIED", violation: "POLICY_UNVERIFIED",
+        detail: "Cannot read the immutable base path policy." };
+    }
+    policyText = policy.stdout;
+  }
+  const policies = parsePathPolicies(policyText);
 
   const allChanged = changeEntries.map((e) => e.path);
   const deletedTests = changeEntries
@@ -334,7 +357,7 @@ function verifyGitRepository(options) {
         ? { detail: `Git diff deletes test file(s): ${deletedTests.join(", ")}` }
         : {}),
     },
-  });
+  }, policies);
 
   if (!antiCheatCheck.ok) {
     return {

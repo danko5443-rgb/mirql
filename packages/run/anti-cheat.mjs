@@ -89,7 +89,7 @@ export function checkHumanApprovePaths(filePaths = [], patterns) {
  * @param {object} input - PR fixture object or attempt verification context
  * @returns {{ ok: boolean, rule: string, violation?: string, verdict: string, detail?: string, flags?: string[] }}
  */
-export function checkAntiCheat(input = {}) {
+export function checkAntiCheat(input = {}, policies) {
   const evidence = input.evidence ?? {};
   const antiCheat = input.anti_cheat ?? {};
   const surface = input.surface ?? {};
@@ -106,7 +106,7 @@ export function checkAntiCheat(input = {}) {
   ];
 
   // 1. MP-001: TOUCH_HUMAN_ONLY
-  const humanCheck = checkHumanOnlyPaths(filesChanged);
+  const humanCheck = checkHumanOnlyPaths(filesChanged, policies?.humanOnly);
   if (!humanCheck.ok) {
     return {
       ok: false,
@@ -202,7 +202,7 @@ export function checkAntiCheat(input = {}) {
     Array.isArray(surface.uncited_commands) &&
     surface.uncited_commands.length > 0;
 
-  const approveCheck = checkHumanApprovePaths(filesChanged);
+  const approveCheck = checkHumanApprovePaths(filesChanged, policies?.humanApprove);
   const touchesHumanApprove = !approveCheck.ok;
 
   // Phase 0.3: neither a proof nor a human_approved / human_approval flag in
