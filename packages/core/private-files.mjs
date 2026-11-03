@@ -61,7 +61,9 @@ foreach ($target in $targets) {
       $acl = New-Object System.Security.AccessControl.FileSecurity
       $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($user, "FullControl", "Allow")
     }
-    $acl.SetOwner($user)
+    # Writing the owner needs WRITE_OWNER, which owners do not implicitly hold;
+    # only rewrite it when the recorded owner is not already this user.
+    if ($owner.Value -ne $user.Value) { $acl.SetOwner($user) }
     $acl.SetAccessRuleProtection($true, $false)
     $acl.AddAccessRule($rule)
     if ($target.directory) {
@@ -78,13 +80,7 @@ foreach ($target in $targets) {
 }
 Write-Output "MIRQL_PRIVATE_ACL_OK"
 `;
-    const executable = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-    const result = spawnSync(executable, [
-      "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64"),
-    ], { encoding: "utf8", timeout: 30000, windowsHide: true });
-    if (result.error || result.status !== 0 || result.stdout.trim() !== "MIRQL_PRIVATE_ACL_OK") {
-      throw permissionError(result.error?.message ?? result.stderr.trim() ?? "ACL enforcement failed");
-    }
+    runGuardedPowerShell(script, { okToken: "MIRQL_PRIVATE_ACL_OK", failureHint: "ACL enforcement failed" });
   } else {
     for (const path of pending) {
       const mode = lstatSync(path).isDirectory() ? 0o700 : 0o600;
@@ -124,12 +120,25 @@ Write-Output "MIRQL_PRIVATE_WRITE_OK"
   const input = Buffer.from(JSON.stringify(files.map(file => ({
     temp: file.temp, contentsBase64: Buffer.from(file.contents, "utf8").toString("base64"),
   }))), "utf8").toString("base64");
+  runGuardedPowerShell(script, { input, okToken: "MIRQL_PRIVATE_WRITE_OK", failureHint: "Private handle publication failed" });
+}
+
+/**
+ * Runs one hidden PowerShell guard script and fails closed unless it reports
+ * okToken. A short first deadline keeps genuinely broken setups fast; a single
+ * extended retry absorbs ETIMEDOUT stalls observed when many tests cold-start
+ * PowerShell under parallel CPU contention (Windows). Verification semantics
+ * are unchanged: any remaining failure still refuses credential publication.
+ */
+function runGuardedPowerShell(script, { input, okToken, failureHint }) {
   const executable = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-  const result = spawnSync(executable, ["-NoProfile", "-NonInteractive", "-EncodedCommand",
-    Buffer.from(script, "utf16le").toString("base64")],
-    { input, encoding: "utf8", timeout: 30000, windowsHide: true });
-  if (result.error || result.status !== 0 || result.stdout.trim() !== "MIRQL_PRIVATE_WRITE_OK") {
-    throw permissionError(result.error?.message ?? result.stderr.trim() ?? "Private handle publication failed");
+  const args = ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")];
+  let result = spawnSync(executable, args, { input, encoding: "utf8", timeout: 30000, windowsHide: true });
+  if (result.error?.code === "ETIMEDOUT") {
+    result = spawnSync(executable, args, { input, encoding: "utf8", timeout: 120000, windowsHide: true });
+  }
+  if (result.error || result.status !== 0 || result.stdout.trim() !== okToken) {
+    throw permissionError(result.error?.message ?? result.stderr.trim() ?? failureHint);
   }
 }
 

@@ -311,8 +311,9 @@ function richFold(events, rawLines = []) {
         ? event.payload
         : {};
 
-    // B6: Validate costs & safe-integer constraints
-    if (payload.cost_micro_usd !== undefined) {
+    // B6: Validate costs & safe-integer constraints; null marks an
+    // unmeasured cost (measured-or-flagged telemetry) and spends nothing.
+    if (payload.cost_micro_usd != null) {
       if (
         !Number.isSafeInteger(payload.cost_micro_usd) ||
         payload.cost_micro_usd < 0
@@ -696,7 +697,8 @@ export function appendEvent(mirqlDir, eventInput, options = {}) {
     !Array.isArray(eventInput.payload)
       ? eventInput.payload
       : {};
-  if (rawPayload.cost_micro_usd !== undefined) {
+  // null marks an unmeasured cost (measured-or-flagged telemetry): valid, spends 0.
+  if (rawPayload.cost_micro_usd != null) {
     if (!Number.isSafeInteger(rawPayload.cost_micro_usd) || rawPayload.cost_micro_usd < 0) {
       throw new LedgerError(
         "USAGE_ERROR",

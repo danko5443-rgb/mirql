@@ -95,6 +95,13 @@ export function runSupervisor(options = {}) {
     throw breakerErr;
   }
 
+  // Issue #47: the pre-execution workspace Φ must be captured before the
+  // builder mutates it — after runAgent, phi_before is no longer observable
+  // and ΔΦ collapses to ~0 in the ledger.
+  const phiBeforeMeasured = Number.isSafeInteger(options.phiBefore)
+    ? options.phiBefore
+    : computePhi(workspaceDir).total;
+
   // 3. Invoke unprivileged agent worker
   const agentStartTime = Date.now();
   const agentResult = runAgent({
@@ -121,7 +128,7 @@ export function runSupervisor(options = {}) {
   if (verifyResult && typeof verifyResult.then === "function") {
     return verifyResult
       .then((vRes) =>
-        finalizeSupervisor(options, mirqlDir, workspaceDir, keypair, warrant, agentResult, vRes, agentDuration),
+        finalizeSupervisor(options, mirqlDir, workspaceDir, keypair, warrant, agentResult, vRes, agentDuration, phiBeforeMeasured),
       )
       .finally(cleanupState);
   }
@@ -135,6 +142,7 @@ export function runSupervisor(options = {}) {
     agentResult,
     verifyResult,
     agentDuration,
+    phiBeforeMeasured,
   );
   cleanupState();
   return res;
@@ -233,6 +241,7 @@ function finalizeSupervisor(
   agentResult,
   verifyResult,
   agentDuration,
+  phiBeforeMeasured,
 ) {
   const nowMs = Number.isSafeInteger(options.nowMs)
     ? options.nowMs
@@ -249,12 +258,13 @@ function finalizeSupervisor(
       ? options.epoch
       : 1;
 
-  // Real metrics computation (no hardcoded fake placeholders)
+  // Real metrics computation (no hardcoded fake placeholders). phi_before is
+  // the pre-execution snapshot captured by runSupervisor (issue #47); the Φ
+  // measured here, after the attempt, is phi_after.
   const phiMetrics = computePhi(workspaceDir);
   const realPhi = phiMetrics.total;
-  const phiBefore = options.phiBefore ?? realPhi;
-  const phiAfter =
-    options.phiAfter ?? (verifyResult.verified ? realPhi : realPhi);
+  const phiBefore = options.phiBefore ?? phiBeforeMeasured ?? realPhi;
+  const phiAfter = options.phiAfter ?? realPhi;
   const deltaPhi = phiAfter - phiBefore;
 
   // Measured-or-flagged digests (issue #16): every SHA below is a REAL
@@ -388,8 +398,11 @@ function finalizeSupervisor(
         status: isOverallPass ? "completed" : "failed",
         verdict: outcomeVerdict,
         head_commit: headSha,
-        tokens_consumed: tokensConsumed,
-        cost_micro_usd: costMicroUsd,
+        // Issue #46: unmeasured telemetry is omitted, never null — the log
+        // fold behind `mirql l view` rejects a null cost as a Law 17
+        // violation, which bricks replay of the supervisor's own ledger.
+        ...(tokensConsumed !== null ? { tokens_consumed: tokensConsumed } : {}),
+        ...(costMicroUsd !== null ? { cost_micro_usd: costMicroUsd } : {}),
         phi_before: phiBefore,
         phi_after: phiAfter,
       },

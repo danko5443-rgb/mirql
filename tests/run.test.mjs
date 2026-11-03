@@ -1,6 +1,7 @@
 import { initEmptyRepo } from "./helpers/git.mjs";
 import { authorizeTestWarrant } from "./helpers/warrant.mjs";
 import { provisionTestTrust, authorizeTestKey } from "./helpers/keyring.mjs";
+import { foldEvents } from "../packages/log/index.mjs";
 import { test, describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -188,9 +189,9 @@ describe("Work Package W5a: `mirql-run` and `bing-bong` Consensus Loop", () => {
       assert.equal(result.rule, "MISSING_RUNNER");
     });
 
-    it("B1: fails closed when exit code is null or non-integer", () => {
+    it("B1: fails closed when exit code is null or non-integer", async () => {
       const runCheck = () => ({ exitCode: null });
-      const result = verifyAttempt({ runCheck });
+      const result = await verifyAttempt({ runCheck });
       assert.equal(result.verified, false);
       assert.equal(result.verdict, "reject");
       assert.equal(result.rule, "NON_INTEGER_EXIT_CODE");
@@ -212,7 +213,7 @@ describe("Work Package W5a: `mirql-run` and `bing-bong` Consensus Loop", () => {
       // Base commit: broken implementation
       writeFileSync(
         join(repoDir, "package.json"),
-        JSON.stringify({ type: "module" }),
+        JSON.stringify({ type: "module", scripts: { test: "node --test" } }),
         "utf8",
       );
       const srcDir = join(repoDir, "src");
@@ -500,12 +501,12 @@ test("tautological test", () => {
       assert.ok(res.strippedEnv.includes("CUSTOM_SECRET"));
     });
 
-    it("B3: supervisor produces a valid schema-checked Outcome with real computed metrics", () => {
+    it("B3: supervisor produces a valid schema-checked Outcome with real computed metrics", async () => {
       const kp = generateEd25519Keypair();
       authorizeTestKey(tempDir, "tool:run_supervisor", kp);
 
       authorizeTestWarrant(tempDir, "01HWWWWWWWWWWWWWWWWWWWWWWW");
-      const res = runSupervisor({
+      const res = await runSupervisor({
         mirqlDir: tempDir,
         signingKey: kp.privateKey,
         keyId: kp.keyId,
@@ -551,12 +552,12 @@ test("tautological test", () => {
       assert.equal(verified.ok, true);
     });
 
-    it("B3: supervisor rejects and signs fail if agent worker command fails", () => {
+    it("B3: supervisor rejects and signs fail if agent worker command fails", async () => {
       const kp = generateEd25519Keypair();
       authorizeTestKey(tempDir, "tool:run_supervisor", kp);
 
       authorizeTestWarrant(tempDir, "01H00000000000000000000002");
-      const res = runSupervisor({
+      const res = await runSupervisor({
         mirqlDir: tempDir,
         keypair: kp,
         jobId: "01H00000000000000000000001",
@@ -574,6 +575,72 @@ test("tautological test", () => {
   // -------------------------------------------------------------------------
   // 4. 0-Token Probes (B4)
   // -------------------------------------------------------------------------
+  describe("3b. Issues #46/#47: supervisor ledger honesty", () => {
+    it("#46: unmeasured cost/tokens are omitted so the ledger replays through `mirql l view`", async () => {
+      const kp = generateEd25519Keypair();
+      authorizeTestKey(tempDir, "tool:run_supervisor", kp);
+      authorizeTestWarrant(tempDir, "01JE0000000000000000000000");
+
+      const res = await runSupervisor({
+        mirqlDir: tempDir,
+        keypair: kp,
+        jobId: "01JE0000000000000000000001",
+        warrantId: "01JE0000000000000000000000",
+        builderCommand: "node -v",
+        runCheck: ({ stage }) => ({ exitCode: stage === "green_on_head" ? 0 : 1 }),
+      });
+      assert.ok(res.event, "supervisor must append an attempt.outcome event");
+
+      // Unmeasured telemetry must be omitted, never null: the log fold behind
+      // `mirql l view` / `l replay` rejects cost_micro_usd: null as a Law 17
+      // violation (issue #46), so a null field bricks the operator's window.
+      assert.ok(!("cost_micro_usd" in res.event.payload), "unmeasured cost must be omitted, not null");
+      assert.ok(!("tokens_consumed" in res.event.payload), "unmeasured tokens must be omitted, not null");
+      assert.doesNotThrow(() => foldEvents([res.event]), "ledger must replay through the log fold");
+    });
+
+    it("#47: phi_before measures the pre-execution workspace, not the post-run one", async () => {
+      const kp = generateEd25519Keypair();
+      authorizeTestKey(tempDir, "tool:run_supervisor", kp);
+      authorizeTestWarrant(tempDir, "01JE0000000000000000000002");
+
+      const ws = mkdtempSync(join(tmpdir(), "mirql-phi-ws-"));
+      try {
+        initEmptyRepo(ws);
+        // The builder grows the workspace after the supervisor starts: the
+        // pre-execution snapshot must not see its output (issue #47).
+        // Escape-free builder source: real newlines between statements and a
+        // runtime nl constant keep this immune to any escaping-layer surprises.
+        writeFileSync(join(ws, "grow.js"), `const fs = require('node:fs');
+const nl = String.fromCharCode(10);
+let s = 'export function added(a, b) {' + nl;
+for (let i = 0; i < 20; i++) s = s + '  if (a && b) { return 1; }' + nl;
+s = s + '}' + nl;
+fs.writeFileSync('added.mjs', s);
+`);
+        const phiBeforeExpected = computePhi(ws).total;
+        assert.ok(Number.isSafeInteger(phiBeforeExpected));
+
+        const res = await runSupervisor({
+          mirqlDir: tempDir,
+          workspaceDir: ws,
+          keypair: kp,
+          jobId: "01JE0000000000000000000003",
+          warrantId: "01JE0000000000000000000002",
+          builderCommand: "node grow.js",
+          runCheck: ({ stage }) => ({ exitCode: stage === "green_on_head" ? 0 : 1 }),
+        });
+
+        assert.equal(res.outcome.phi.phi_before, phiBeforeExpected,
+          "phi_before must snapshot the workspace before the builder runs");
+        assert.ok(res.outcome.phi.delta_phi > 0,
+          `builder grew the workspace, so delta_phi must be positive (got ${res.outcome.phi.delta_phi})`);
+      } finally {
+        rmSync(ws, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe("4. 0-Token Probes", () => {
     it("B4: tests probe with MEASURED counts records a signed pass (issue #16: no fake 189)", () => {
       const kp = generateEd25519Keypair();
@@ -1002,13 +1069,13 @@ test("tautological test", () => {
       assert.equal(checkPhiReduction(100, 105, false).ok, false);
     });
 
-    it("B13: verifyAttempt enforces Law 13 Delta Phi <= 0 (and strictly < 0 for consolidator)", () => {
+    it("B13: verifyAttempt enforces Law 13 Delta Phi <= 0 (and strictly < 0 for consolidator)", async () => {
       const baseOptions = {
         runCheck: () => ({ exitCode: 0 }),
       };
 
       // 1. Delta Phi > 0 is rejected under Law 13
-      const increaseRes = verifyAttempt({
+      const increaseRes = await verifyAttempt({
         ...baseOptions,
         phiBefore: 100,
         phiAfter: 105, // +5 increase
@@ -1018,7 +1085,7 @@ test("tautological test", () => {
       assert.equal(increaseRes.rule, "LAW_13_PHI_INCREASE");
 
       // 2. Consolidator with Delta Phi = 0 is rejected under Law 13
-      const consolidatorZeroRes = verifyAttempt({
+      const consolidatorZeroRes = await verifyAttempt({
         ...baseOptions,
         role: "consolidator",
         phiBefore: 100,
@@ -1029,7 +1096,7 @@ test("tautological test", () => {
       assert.equal(consolidatorZeroRes.rule, "LAW_13_CONSOLIDATOR_PHI");
 
       // 3. Consolidator with Delta Phi < 0 passes Law 13
-      const consolidatorDropRes = verifyAttempt({
+      const consolidatorDropRes = await verifyAttempt({
         role: "consolidator",
         phiBefore: 100,
         phiAfter: 90, // -10 drop
@@ -1067,7 +1134,7 @@ describe("P0 Remediation: C1, H1, H2, H3, H5", () => {
 
     writeFileSync(
       join(repoDir, "package.json"),
-      JSON.stringify({ type: "module" }),
+      JSON.stringify({ type: "module", scripts: { test: "node --test" } }),
       "utf8",
     );
     const srcDir = join(repoDir, "src");
@@ -1347,6 +1414,7 @@ test("add correctly computes sum", () => {
 
       const { baseSha, headSha } = buildMathRepo(repoDir, {
         extraBaseFiles: {
+          "package.json": JSON.stringify({ type: "module", scripts: { test: "node --test && node dump-env.mjs" } }),
           // Committed at base (a non-test file): dumps the child env to an
           // absolute path that survives worktree cleanup.
           "dump-env.mjs":
@@ -1374,7 +1442,6 @@ test("add correctly computes sum", () => {
           baseSha,
           headSha,
           reproducerCommand: "node --test tests/math.test.mjs",
-          testCommand: "node --test tests/math.test.mjs && node dump-env.mjs",
         });
 
         assert.equal(
@@ -1453,7 +1520,7 @@ test("add correctly computes sum", () => {
 
       writeFileSync(
         join(repoDir, "package.json"),
-        JSON.stringify({ type: "module" }),
+        JSON.stringify({ type: "module", scripts: { test: "node --test" } }),
         "utf8",
       );
       mkdirSync(join(repoDir, "src"), { recursive: true });

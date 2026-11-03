@@ -127,4 +127,40 @@ describe("human-signed merge approval records", () => {
     assert.equal(result.status,0,result.stderr);const document=JSON.parse(result.stdout);
     assert.equal(document.status,"approved");assert.deepEqual(document.binding,measureMergeBinding(options));
   });
+
+  function privateCandidate() {
+    mkdirSync(join(workspace,"policy"));mkdirSync(join(workspace,"private"));
+    writeFileSync(join(workspace,"policy","paths.yaml"),'humanOnly:\n  - "private/**"\n');
+    writeFileSync(join(workspace,"private","key"),"base");
+    git(workspace,"add","policy/paths.yaml","private/key");git(workspace,"commit","-qm","private policy base");
+    options.base=git(workspace,"rev-parse","HEAD").trim();
+    writeFileSync(join(workspace,"private","key"),"changed");git(workspace,"add","private/key");git(workspace,"commit","-qm","private candidate");
+    options.head=git(workspace,"rev-parse","HEAD").trim();
+  }
+  test("subdirectory invocation cannot hide changes through diff.relative", () => {
+    mkdirSync(join(workspace,"policy"));writeFileSync(join(workspace,"policy","guard.json"),"{}");
+    git(workspace,"add","policy/guard.json");git(workspace,"commit","-qm","protected extra");options.head=git(workspace,"rev-parse","HEAD").trim();
+    git(workspace,"config","diff.relative","true");
+    const nested={...options,workspaceDir:join(workspace,"packages","core")};
+    assert.deepEqual(measureMergeBinding(nested).paths,["packages/core/feature.mjs","policy/guard.json"]);
+    assert.throws(()=>approveMerge(metadata,nested),error=>error.code==="TOUCH_HUMAN_ONLY");
+  });
+  test("approval honors the target repository's custom humanOnly policy", () => {
+    privateCandidate();
+    assert.throws(()=>approveMerge(metadata,options),error=>error.code==="TOUCH_HUMAN_ONLY");
+  });
+  test("an uncommitted policy edit cannot weaken the pinned base policy", () => {
+    privateCandidate();
+    writeFileSync(join(workspace,"policy","paths.yaml"),"humanOnly: []");
+    assert.throws(()=>approveMerge(metadata,options),error=>error.code==="TOUCH_HUMAN_ONLY");
+  });
+  test("replacement objects cannot alter the measured candidate tree", () => {
+    const expected=git(workspace,"rev-parse",options.head+"^{tree}").trim();
+    writeFileSync(join(workspace,"extra.mjs"),"export const extra=1;\n");git(workspace,"add","extra.mjs");git(workspace,"commit","-qm","replacement tree");
+    git(workspace,"replace",options.head,"HEAD");
+    const measured=measureMergeBinding(options);
+    assert.equal(measured.tree_sha,expected);
+    assert.deepEqual(measured.paths,["packages/core/feature.mjs"]);
+  });
+
 });
