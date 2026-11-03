@@ -559,6 +559,7 @@ export async function runSupervisorReactive(options = {}) {
   };
 
   const runStep = async (triggerEvent) => {
+    if (watcher.closed) return null;
     if (inFlight) {
       queuedRerun = true;
       if (triggerEvent && typeof options.leaseJob !== "function") {
@@ -602,6 +603,13 @@ export async function runSupervisorReactive(options = {}) {
             break;
           }
 
+          if (watcher.closed) {
+            if (leaseRes?.status === "leased") {
+              recordFailureOutcome(mirqlDir, leaseRes.job_id, leaseRes.warrant_id,
+                leaseRes.epoch ?? epoch, "Daemon stopped during lease acquisition");
+            }
+            break;
+          }
           if (leaseRes?.status === "breaker_tripped") {
             // All active trips must expire before leasing is possible. A signed
             // doctor reset or throttle can release the queue earlier and has its own wake.
@@ -761,6 +769,7 @@ export async function runSupervisorReactive(options = {}) {
     watcher,
     getStepsExecuted: () => stepsExecuted,
     getLastStep: () => lastResult,
+    start: () => runStep(null),
     done,
     close: finish,
   };

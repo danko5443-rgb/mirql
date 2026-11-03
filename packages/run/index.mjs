@@ -244,7 +244,7 @@ export function runCli(argv = []) {
     case "supervisor": {
       try {
         // Daemon mode composes queue leasing with the reactive loop; packages
-        // must not cross-import, so the wiring lives in bin/mirql-run.mjs.
+        // must not cross-import, so the wiring lives in bin/mirql.mjs.
         if (flags.daemon === true) {
           emitError({
             error: "USAGE_ERROR",
@@ -707,7 +707,7 @@ export async function startFactoryDaemon(options = {}) {
   const daemon = await runSupervisorReactive({
     ...options,
     mirqlDir,
-    initialRun: options.initialRun ?? true,
+    initialRun: false,
     // the daemon owns launcher.pid for its whole lifetime; per-step
     // supervisors must not unlink it between events.
     skipPidFile: true,
@@ -720,6 +720,8 @@ export async function startFactoryDaemon(options = {}) {
     if (stopped) return;
     stopped = true;
     clearInterval(ticker);
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
     try { daemon.close(); } catch {}
     try { if (existsSync(pidPath)) unlinkSync(pidPath); } catch {}
     resolveDone();
@@ -732,6 +734,7 @@ export async function startFactoryDaemon(options = {}) {
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
   }
+  if (options.initialRun ?? true) await daemon.start();
   return { watcher: daemon.watcher, getStepsExecuted: daemon.getStepsExecuted, getLastStep: daemon.getLastStep, close: daemon.close, stop, done };
 }
 

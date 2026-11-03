@@ -7,8 +7,8 @@
 // Tools: mergeproof (m) · inbox (i) · run (r) · queue (q) · log (l)
 // All output is JSON on stdout; errors are JSON on stderr.
 import { readFileSync, realpathSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { EXIT_CODES } from "../packages/core/index.mjs";
 import { main as mergeproofMain } from "../packages/mergeproof/index.mjs";
 import { main as runMain, startFactoryDaemon } from "../packages/run/index.mjs";
@@ -100,7 +100,7 @@ async function runFactoryDaemonMode(argv) {
     else flags[arg.slice(2)] = true;
   }
 
-  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const repoRoot = resolve(flags.workspace ?? process.cwd());
   const dir = flags.dir ?? join(process.cwd(), ".mirql");
   const maxSteps = flags["max-steps"] !== undefined
     ? Number.parseInt(String(flags["max-steps"]), 10)

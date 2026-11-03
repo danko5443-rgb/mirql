@@ -3,7 +3,7 @@
 // queue like the bin composition root does; the e2e test spawns the real bin.
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,6 +55,48 @@ describe("factory daemon (r supervisor --daemon)", () => {
   afterEach(() => {
     try { rmSync(tmp, { recursive: true, force: true }); } catch {}
     delete process.env.MIRQL_TRUST_ROOT;
+  });
+
+  it("shutdown handlers cover the initial lease and are removed on stop", async () => {
+    const before = process.listenerCount("SIGTERM");
+    let checked = false;
+    const daemon = await startFactoryDaemon({
+      dir: ledger,
+      leaseJob: async () => {
+        assert.equal(process.listenerCount("SIGTERM"), before + 1);
+        checked = true;
+        process.emit("SIGTERM");
+        return { ok: false, status: "empty" };
+      },
+    });
+    try {
+      assert.equal(checked, true);
+      await withTimeout(daemon.done, 1000, "shutdown during startup");
+      assert.equal(existsSync(join(ledger, "state", "launcher.pid")), false);
+      assert.equal(process.listenerCount("SIGTERM"), before);
+    } finally { daemon.stop(); }
+  });
+
+  it("the router honors the target workspace's zero daily budget", async () => {
+    mkdirSync(join(workspace, "policy"));
+    writeFileSync(join(workspace, "policy", "mirql.json"), JSON.stringify({ daily_budget_micro_usd: 0 }));
+    const warrant = authorizeTestWarrant(ledger, makeValidWarrant());
+    submitWarrant(ledger, warrant, { repoRoot: ROOT });
+    const child = spawn(process.execPath, [join(ROOT, "bin", "mirql.mjs"), "r", "supervisor",
+      "--daemon", "--max-steps", "1", "--dir", ledger, "--workspace", workspace],
+      { stdio: ["ignore", "ignore", "pipe"], env: { ...process.env } });
+    let stderr = "";
+    child.stderr.on("data", c => { stderr += c; });
+    try {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      assert.equal(child.exitCode, null, stderr);
+      const events = readFileSync(join(ledger, "ledger", "events.jsonl"), "utf8");
+      assert.equal(events.includes('"job.leased"'), false, events);
+      assert.equal(events.includes('"attempt.outcome"'), false, events);
+    } finally {
+      child.kill();
+      if (child.exitCode === null) await new Promise(resolve => child.once("exit", resolve));
+    }
   });
 
   it("unit: drains one leased job via injected queue wiring and stops at maxSteps", async () => {
