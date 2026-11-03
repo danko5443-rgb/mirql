@@ -65,7 +65,8 @@ export function main(argv = []) {
   // Daemon mode is composed here: the router is the one place that already
   // sees every package, so it hands queue leasing to the reactive supervisor
   // loop (packages never cross-import — structure gate).
-  if (route.name === "run" && rest[0] === "supervisor" && rest.includes("--daemon")) {
+  if (route.name === "run" && rest[0] === "supervisor" &&
+      rest.some((arg) => arg === "--daemon" || arg.startsWith("--daemon="))) {
     return runFactoryDaemonMode(rest);
   }
   if (route.main) return route.main(rest);
@@ -90,29 +91,23 @@ function resolveRoute(token) {
  * @returns {Promise<number>} process exit code
  */
 async function runFactoryDaemonMode(argv) {
-  const flags = {};
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (!arg.startsWith("--")) continue;
-    const eq = arg.indexOf("=");
-    if (eq !== -1) flags[arg.slice(2, eq)] = arg.slice(eq + 1);
-    else if (i + 1 < argv.length && !argv[i + 1].startsWith("-")) flags[arg.slice(2)] = argv[++i];
-    else flags[arg.slice(2)] = true;
+  let options;
+  try {
+    options = parseDaemonFlags(argv);
+  } catch (err) {
+    process.stderr.write(JSON.stringify({ error: "USAGE_ERROR", reason: err.message }) + "\n");
+    return EXIT_CODES.USAGE_ERROR;
   }
-
-  const repoRoot = resolve(flags.workspace ?? process.cwd());
-  const dir = flags.dir ?? join(process.cwd(), ".mirql");
-  const maxSteps = flags["max-steps"] !== undefined
-    ? Number.parseInt(String(flags["max-steps"]), 10)
-    : undefined;
+  const { dir, workspace, command, maxSteps, initialRun } = options;
+  const repoRoot = resolve(workspace);
 
   try {
     const daemon = await startFactoryDaemon({
       dir,
-      workspaceDir: flags.workspace ?? process.cwd(),
-      builderCommand: flags.command,
-      maxSteps: Number.isSafeInteger(maxSteps) && maxSteps > 0 ? maxSteps : undefined,
-      initialRun: flags["initial-run"] !== false,
+      workspaceDir: workspace,
+      builderCommand: command,
+      maxSteps,
+      initialRun,
       leaseJob: (ledgerDir) => leaseNextJob(ledgerDir, { repoRoot }),
       getWarrant: (id) => JSON.parse(readFileSync(join(dir, "warrants", `${id}.json`), "utf8")),
     });
@@ -143,6 +138,58 @@ async function runFactoryDaemonMode(argv) {
     }) + "\n");
     return err?.exitCode ?? EXIT_CODES.USAGE_ERROR;
   }
+}
+
+/**
+ * Strict daemon flag parsing (Law 6: an ambiguous flag is a refusal, never a
+ * silent default that leaves a 24/7 process running with unintended settings).
+ *
+ * @param {string[]} argv - arguments after the `supervisor` token
+ * @returns {{ dir: string, workspace: string, command?: string, maxSteps?: number, initialRun: boolean }}
+ */
+export function parseDaemonFlags(argv) {
+  const flags = {};
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (!arg.startsWith("--")) continue;
+    const eq = arg.indexOf("=");
+    if (eq !== -1) flags[arg.slice(2, eq)] = arg.slice(eq + 1);
+    else if (arg === "--daemon" || arg === "--no-initial-run") flags[arg.slice(2)] = true;
+    else if (i + 1 < argv.length && !argv[i + 1].startsWith("-")) flags[arg.slice(2)] = argv[++i];
+    else flags[arg.slice(2)] = true;
+  }
+  if (flags.daemon !== true && flags.daemon !== "true") {
+    throw new Error("--daemon takes no value");
+  }
+  for (const name of ["dir", "workspace", "command"]) {
+    if (flags[name] !== undefined && (typeof flags[name] !== "string" || !flags[name].trim())) {
+      throw new Error(`--${name} requires a value`);
+    }
+  }
+  let maxSteps;
+  if (flags["max-steps"] !== undefined) {
+    const raw = String(flags["max-steps"]);
+    maxSteps = /^[1-9]\d*$/.test(raw) ? Number(raw) : NaN;
+    if (!Number.isSafeInteger(maxSteps)) throw new Error("--max-steps must be a positive integer");
+  }
+  const initialRunFlag = flags["initial-run"];
+  if (initialRunFlag !== undefined && ![true, "true", "false"].includes(initialRunFlag)) {
+    throw new Error("--initial-run must be true or false");
+  }
+  if (flags["no-initial-run"] !== undefined && flags["no-initial-run"] !== true) {
+    throw new Error("--no-initial-run takes no value");
+  }
+  if (flags["no-initial-run"] === true && initialRunFlag !== undefined && initialRunFlag !== "false") {
+    throw new Error("--initial-run and --no-initial-run conflict");
+  }
+  const initialRun = flags["no-initial-run"] !== true && initialRunFlag !== "false";
+  return {
+    dir: flags.dir ?? join(process.cwd(), ".mirql"),
+    workspace: flags.workspace ?? process.cwd(),
+    command: flags.command,
+    maxSteps,
+    initialRun,
+  };
 }
 
 /** @returns {{ tool: string, version: string, usage: string, tools: Array<object> }} */
