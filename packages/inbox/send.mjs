@@ -73,6 +73,16 @@ export function sendIntent(mirqlDir, intentInput, options = {}) {
     throw err;
   }
 
+  // JSON intent budgets are integers; the CLI's decimal flag is parsed explicitly.
+  const rawPhiBudget = intentInput.phi_budget !== undefined ? intentInput.phi_budget : options["phi-budget"];
+  const phiBudget = intentInput.phi_budget === undefined && typeof rawPhiBudget === "string" && /^(0|[1-9]\d*)$/.test(rawPhiBudget)
+    ? Number(rawPhiBudget) : rawPhiBudget;
+  if (phiBudget !== undefined && (!Number.isSafeInteger(phiBudget) || phiBudget < 0)) {
+    const error = new Error("phi_budget must be a non-negative safe integer");
+    error.exitCode = EXIT_CODES.USAGE_ERROR;
+    throw error;
+  }
+
   // 0. The ledger must be initialized (first event is mirql.genesis).
   requireGenesisLedger(mirqlDir);
 
@@ -137,6 +147,7 @@ export function sendIntent(mirqlDir, intentInput, options = {}) {
       deny: [],
     },
     budget_micro_usd: budget,
+    ...(phiBudget !== undefined ? { phi_budget: phiBudget } : {}),
     created_by: "human:owner",
   };
 
