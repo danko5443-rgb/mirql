@@ -243,7 +243,9 @@ function evaluateCheckResult(check, fixture = {}) {
  * - Out-of-band coverage: the green-on-head run executes through
  *   coverage-driver.mjs, which measures V8 precise coverage over the Node
  *   inspector. No NODE_V8_COVERAGE directory is created and no coverage file
- *   is ever read back, so the candidate cannot forge execution evidence.
+ *   is ever read back. An entry counts only when the source V8 compiled hashes
+ *   to the head commit's blob, so a script claiming a file's URL or a rewritten
+ *   worktree file supplies no execution evidence.
  * - Timeouts: reproducer runs keep the 30s cap; full-suite runs (and the
  *   restored-tests re-run) use options.suiteTimeoutMs /
  *   MIRQL_SUITE_TIMEOUT_MS (default 20 minutes).
@@ -547,6 +549,14 @@ function verifyGitRepository(options) {
     }
   }
 
+  // Coverage is judged against the commit's blobs, read here before any
+  // candidate code runs, never against worktree files the candidate can rewrite.
+  const headSources = new Map();
+  for (const file of nonTestSourceFiles) {
+    const blob = git(["cat-file", "blob", `${headSha}:${file}`]);
+    if (!blob.error && blob.status === 0) headSources.set(file, blob.stdout);
+  }
+
   let worktreeDir = null;
   try {
     disposableHome = mkdtempSync(join(tmpdir(), "mirql-verify-home-"));
@@ -732,7 +742,7 @@ function verifyGitRepository(options) {
           },
         };
       }
-      coverageReport = checkCoverageEntries(greenRes1.coverage, worktreeDir, changedLinesMap);
+      coverageReport = checkCoverageEntries(greenRes1.coverage, worktreeDir, changedLinesMap, headSources);
       let totalChangedLines = 0;
       for (const set of changedLinesMap.values()) totalChangedLines += set.size;
 

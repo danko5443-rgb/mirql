@@ -9,6 +9,7 @@
 // starts the reproducer under `--inspect-brk` and collects coverage over the
 // Node inspector WebSocket instead. NODE_V8_COVERAGE is never set and coverage
 // is never read from disk; if no coverage comes back the caller fails closed.
+// Each entry carries the hash of its script's real source (bindScriptSources).
 //
 // `--test` is deliberately NOT used: it forks one child process per test file,
 // and those children escape this inspector session, so nothing would be
@@ -24,6 +25,7 @@
 // The reproducer timeout is enforced here by killing the child.
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { constants as osConstants } from "node:os";
 
@@ -68,6 +70,20 @@ const send = (method, params = {}) =>
     ws.send(JSON.stringify({ id, method, params }));
   });
 
+// A script chooses its own reported URL (a sourceURL directive, vm's filename
+// option), so the URL proves nothing. Hash what V8 actually compiled; the
+// verifier compares it to the commit's blob. An unavailable source leaves the
+// entry without a hash, which never counts as coverage.
+async function bindScriptSources(result) {
+  for (const entry of Array.isArray(result?.result) ? result.result : []) {
+    if (typeof entry.url !== "string" || !entry.url.startsWith("file:")) continue;
+    const script = await send("Debugger.getScriptSource", { scriptId: entry.scriptId });
+    if (typeof script?.scriptSource === "string") {
+      entry.sourceHash = createHash("sha256").update(script.scriptSource).digest("hex");
+    }
+  }
+}
+
 const timeout = setTimeout(() => {
   timedOut = true;
   child.kill();
@@ -90,13 +106,18 @@ child.stderr.on("data", (chunk) => {
       await send("Profiler.enable");
       await send("Profiler.startPreciseCoverage", { callCount: true, detailed: true });
       await send("Runtime.enable");
+      // Sources are retrievable only for scripts compiled while the debugger was
+      // on. Pauses stay off, so `debugger;` in the candidate cannot stall the run.
+      await send("Debugger.enable");
+      await send("Debugger.setSkipAllPauses", { skip: true });
       send("Runtime.runIfWaitingForDebugger");
     };
   }
   // The child finished its work and is only held alive by this session.
   if (/Waiting for the debugger to disconnect/.test(stderr) && coverage === null) {
     coverage = "pending";
-    send("Profiler.takePreciseCoverage").then((result) => {
+    send("Profiler.takePreciseCoverage").then(async (result) => {
+      await bindScriptSources(result);
       coverage = result;
       ws.close();
     });

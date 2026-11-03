@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -137,16 +138,33 @@ function executedAtEveryOffset(ranges,offsets) {
   return true;
 }
 
-/** Check inspector coverage entries: relevance per executed line, plus full execution of every changed line. */
-export function checkCoverageEntries(coverageEntries, workspaceDir, changedLinesPerFile) {
+// The forms a commit's blob legitimately takes once checked out and loaded:
+// git may convert line endings, and Node strips a leading BOM.
+function loadedSourceForms(blob) {
+  const crlf=blob.replace(/\r?\n/g,"\r\n");
+  const withoutBom=(text)=>text.charCodeAt(0)===0xFEFF?text.slice(1):text;
+  return [...new Set([blob,crlf,withoutBom(blob),withoutBom(crlf)])];
+}
+
+function sha256(text) {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+/**
+ * Check inspector coverage entries: relevance per executed line, plus full
+ * execution of every changed line. headSources maps each file to its blob at
+ * the head commit, read before candidate code ran. An entry counts only when
+ * the source V8 compiled hashes to that blob: its URL is chosen by the script,
+ * and the worktree file is writable by the candidate.
+ */
+export function checkCoverageEntries(coverageEntries, workspaceDir, changedLinesPerFile, headSources) {
   const covered=new Map();
   const uncovered=new Map();
   for (const [file,lines] of changedLinesPerFile) {
     // Pre-classify from the head source: a line that must run stays suspect
     // until an entry proves every one of its code characters executed.
-    let masked=null;
-    try { masked=maskCommentsByLine(readFileSync(join(workspaceDir,file),"utf8")); }
-    catch { /* Unreadable: every changed line stays suspect. */ }
+    const blob=headSources?.get(file);
+    const masked=typeof blob==="string"?maskCommentsByLine(blob):null;
     const suspect=new Set();
     for (const line of lines) {
       if (masked===null || !Number.isSafeInteger(line) || line<1 || line>masked.length ||
@@ -172,9 +190,11 @@ export function checkCoverageEntries(coverageEntries, workspaceDir, changedLines
     catch { continue; }
     const target=targets.get(identity);
     if (!target) continue;
-    let source;
-    try { source=readFileSync(join(workspaceDir,target.file),"utf8"); }
-    catch { continue; } // An unreadable file keeps every changed line suspect.
+    const blob=headSources?.get(target.file);
+    if (typeof blob!=="string" || typeof entry.sourceHash!=="string") continue;
+    // A mismatch is another script or a rewritten file: changed lines stay suspect.
+    const source=loadedSourceForms(blob).find(form=>sha256(form)===entry.sourceHash);
+    if (source===undefined) continue;
     const ranges=entryRanges(entry,source.length);
     if (!ranges) continue;
     const offsets=lineStartOffsets(source);
