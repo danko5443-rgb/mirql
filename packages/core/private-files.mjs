@@ -123,12 +123,20 @@ Write-Output "MIRQL_PRIVATE_WRITE_OK"
   runGuardedPowerShell(script, { input, okToken: "MIRQL_PRIVATE_WRITE_OK", failureHint: "Private handle publication failed" });
 }
 
-/** Runs one hidden PowerShell guard script and fails closed unless it reports okToken. */
+/**
+ * Runs one hidden PowerShell guard script and fails closed unless it reports
+ * okToken. A short first deadline keeps genuinely broken setups fast; a single
+ * extended retry absorbs ETIMEDOUT stalls observed when many tests cold-start
+ * PowerShell under parallel CPU contention (Windows). Verification semantics
+ * are unchanged: any remaining failure still refuses credential publication.
+ */
 function runGuardedPowerShell(script, { input, okToken, failureHint }) {
   const executable = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-  const result = spawnSync(executable, ["-NoProfile", "-NonInteractive", "-EncodedCommand",
-    Buffer.from(script, "utf16le").toString("base64")],
-    { input, encoding: "utf8", timeout: 30000, windowsHide: true });
+  const args = ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")];
+  let result = spawnSync(executable, args, { input, encoding: "utf8", timeout: 30000, windowsHide: true });
+  if (result.error?.code === "ETIMEDOUT") {
+    result = spawnSync(executable, args, { input, encoding: "utf8", timeout: 120000, windowsHide: true });
+  }
   if (result.error || result.status !== 0 || result.stdout.trim() !== okToken) {
     throw permissionError(result.error?.message ?? result.stderr.trim() ?? failureHint);
   }
