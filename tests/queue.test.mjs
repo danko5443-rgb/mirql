@@ -1772,7 +1772,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
   // P0 Remediation: H1 (supervisor epoch threading) and H4 (key permissions)
   // ---------------------------------------------------------------------------
   describe("P0 Remediation: H1 supervisor epoch threading & H4 key permissions", () => {
-    it("H1: supervisor threads the leased epoch (2) so the fold accepts attempt.outcome and completes the job", () => {
+    it("H1: supervisor threads the leased epoch (2) so the fold accepts attempt.outcome and completes the job", async () => {
       const warrant = makeValidWarrant({
         id: ulid(1_700_001_000_000),
         semantic_fingerprint: sha256("warrant-h1-epoch-threading"),
@@ -1790,7 +1790,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       saveTestKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
 
       initEmptyRepo(tempDir);
-      const res = runSupervisor({
+      const res = await runSupervisor({
         workspaceDir: tempDir,
         mirqlDir: tempDir,
         keypair: supervisorKp,
@@ -1819,7 +1819,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       assert.equal(status.active_leases.length, 0);
     });
 
-    it("H1: a supervisor outcome with the default epoch 1 is still fenced off an epoch-2 lease (stale discard preserved)", () => {
+    it("H1: a supervisor outcome with the default epoch 1 is still fenced off an epoch-2 lease (stale discard preserved)", async () => {
       const warrant = makeValidWarrant({
         id: ulid(1_700_001_100_000),
         semantic_fingerprint: sha256("warrant-h1-stale-fence-preserved"),
@@ -1835,7 +1835,7 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       saveTestKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
 
       // NOTE: no `epoch` passed — the supervisor records the legacy default 1.
-      runSupervisor({
+      await runSupervisor({
         mirqlDir: tempDir,
         keypair: supervisorKp,
         jobId: leased.job_id,

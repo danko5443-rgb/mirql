@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -171,4 +171,23 @@ test("replacing a verified temporary pathname cannot redirect credential bytes",
     syncBuiltinESMExports();
     rmSync(root, { recursive: true, force: true });
   }
+});
+test("protecting an owned path never rewrites the owner", { skip: process.platform !== "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "mirql-owner-rewrite-"));
+  try {
+    const dir = join(root, "keys");
+    mkdirSync(dir);
+    const file = join(dir, "key.json");
+    writeFileSync(file, "{}");
+    // Data drives often grant read + WRITE_DAC without WRITE_OWNER; the
+    // recorded owner is already correct there and must not be rewritten.
+    const sid = readWindowsAcl(dir).user;
+    for (const target of [dir, file]) {
+      const grant = spawnSync("icacls.exe", [target, "/inheritance:r", "/grant", `*${sid}:(RD,WDAC)`], { encoding: "utf8", windowsHide: true });
+      assert.equal(grant.status, 0, grant.stderr);
+    }
+    protectPrivatePaths([dir, file]);
+    assertOwnerOnly(dir);
+    assertOwnerOnly(file);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
