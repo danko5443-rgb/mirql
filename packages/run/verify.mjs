@@ -12,7 +12,7 @@ import {
 } from "./anti-cheat.mjs";
 import { findExactMergeApproval } from "../core/merge-approval.mjs";
 import { parsePathPolicies } from "../core/anti-cheat.mjs";
-import { measureAuthorizedPhi } from "./authorized-phi.mjs";
+import { measureAuthorizedPhi, recordPhiConsumption } from "./authorized-phi.mjs";
 import { requireAuthorizedWarrant } from "../core/warrant.mjs";
 import { evaluatePhiGate } from "./phi.mjs";
 import { extractChangedLines } from "./mutant.mjs";
@@ -708,12 +708,22 @@ function verifyGitRepository(options) {
       };
     }
 
+    let phiConsumption = null;
     if (!conformance) {
       try { requireAuthorizedWarrant(options.mirqlDir, { warrantId: options.warrantId }); }
       catch { return { verified: false, verdict: "needs_human", rule: "WARRANT_UNAUTHORIZED", violation: "WARRANT_UNAUTHORIZED" }; }
+      // Law 13: an accepted increase is spent from the cumulative signed allowance.
+      try { phiConsumption = recordPhiConsumption(options.mirqlDir, measuredPhi, { keypair: options.supervisorKeypair }); }
+      catch (error) {
+        if (typeof error.code === "string" && error.code.startsWith("LAW_13_")) {
+          return { verified: false, verdict: "reject", rule: error.code, violation: "PHI_INCREASED", phi: measuredPhi };
+        }
+        return { verified: false, verdict: "needs_human", rule: "PHI_CONSUMPTION_UNRECORDED", violation: "PHI_CONSUMPTION_UNRECORDED",
+          phi: measuredPhi, detail: "The complexity spend could not be durably recorded: " + error.message };
+      }
     }
     return {
-      phi: measuredPhi,
+      phi: phiConsumption ? { ...measuredPhi, consumption_event: phiConsumption.hash } : measuredPhi,
       verified: !conformance,
       verdict: conformance ? "conformance_pass" : "auto_merge",
       rule: conformance ? "CONFORMANCE_ONLY" : "MP-000",
