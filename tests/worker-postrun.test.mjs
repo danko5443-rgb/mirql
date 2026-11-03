@@ -101,3 +101,34 @@ test("newline-containing file names remain intact during measurement", { skip: p
   const result = worker('import {writeFileSync} from "node:fs";writeFileSync(' + JSON.stringify(path) + ',"changed");');
   denied(result, path);
 });
+
+test("replacement refs cannot redefine the captured baseline to hide new protected files", () => {
+  const result=worker('import {writeFileSync} from "node:fs";import {execFileSync} from "node:child_process";const base=execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim();writeFileSync("policy/evil.yaml","changed");execFileSync("git",["add","policy/evil.yaml"]);execFileSync("git",["commit","-qm","hidden protected file"]);execFileSync("git",["replace",base,"HEAD"]);');
+  denied(result,"policy/evil.yaml");
+});
+
+function protectPrivateDirectory() {
+  mkdirSync(join(workspace,"private"));
+  writeFileSync(join(workspace,"private","key"),"base");
+  writeFileSync(join(workspace,"policy","paths.yaml"),'humanOnly:\n  - "private/**"\n');
+  git(workspace,"add","private/key","policy/paths.yaml");git(workspace,"commit","-qm","repository policy");
+}
+
+test("workspace-specific protections apply when the supervisor runs in another directory", () => {
+  protectPrivateDirectory();
+  denied(worker('import {writeFileSync} from "node:fs";writeFileSync("private/key","changed");'),"private/key");
+});
+
+test("the repository policy snapshot survives a worker attempt to remove it", () => {
+  protectPrivateDirectory();
+  const result=worker('import {writeFileSync} from "node:fs";writeFileSync("policy/paths.yaml","humanOnly: []");writeFileSync("private/key","changed");');
+  denied(result,"private/key");
+});
+
+test("the early claimed-path check uses the measured repository policy", () => {
+  protectPrivateDirectory();
+  const result=worker('console.log("must not start");',{modifiedFiles:["private/key"]});
+  assert.equal(result.ok,false);assert.equal(result.exitCode,4);
+  assert.equal(result.violation,"TOUCH_HUMAN_ONLY");assert.ok(result.forbidden.includes("private/key"));
+  assert.equal(result.stdout,undefined);
+});
