@@ -1,3 +1,4 @@
+import {verifyAuthorizedGitFixture} from "./helpers/authorized-verification.mjs";
 import {test} from "node:test";
 import assert from "node:assert/strict";
 import {mkdtempSync,mkdirSync,writeFileSync,rmSync} from "node:fs";
@@ -25,7 +26,7 @@ function check(kind) {
   if(kind==="replace") {const safe=headSha;writeFileSync(join(root,"policy","guard.txt"),"protected edit");git("add",".");git("commit","-qm","protected head");headSha=git("rev-parse","HEAD");git("replace",headSha,safe);}
   if(kind==="weak")writeFileSync(join(root,"policy","paths.yaml"),"humanOnly: []\nhumanApprove: []\n");
   if(kind==="nested")git("config","diff.relative","true");
-  return verifyAttempt({git:true,workspaceDir:kind==="nested"?join(root,"src"):root,baseSha,headSha,reproducerFile:"tests/repro.test.mjs"});
+  return verifyAuthorizedGitFixture({git:true,workspaceDir:kind==="nested"?join(root,"src"):root,baseSha,headSha,reproducerFile:"tests/repro.test.mjs"});
  } finally {rmSync(root,{recursive:true,force:true});}
 }
 for(const kind of ["private","weak"])test(`base humanOnly policy is enforced for ${kind}`,()=>{const r=check(kind);assert.equal(r.rule,"MP-001",JSON.stringify(r));assert.equal(r.verified,false);});

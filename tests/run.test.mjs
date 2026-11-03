@@ -1,3 +1,4 @@
+import {verifyAuthorizedGitFixture} from "./helpers/authorized-verification.mjs";
 import { initEmptyRepo } from "./helpers/git.mjs";
 import { authorizeTestWarrant } from "./helpers/warrant.mjs";
 import { provisionTestTrust, authorizeTestKey } from "./helpers/keyring.mjs";
@@ -258,7 +259,7 @@ test("add correctly computes sum", () => {
       }).stdout.trim();
 
       // Run real git verification on valid repro fix
-      const validGitResult = verifyAttempt({
+      const validGitResult = verifyAuthorizedGitFixture({
         git: true,
         workspaceDir: repoDir,
         baseSha,
@@ -306,7 +307,7 @@ test("tautological test", () => {
       }).stdout.trim();
 
       // On base, tautology still passes -> RED_ON_BASE_FAILED
-      const tautologyGitResult = verifyAttempt({
+      const tautologyGitResult = verifyAuthorizedGitFixture({
         git: true,
         workspaceDir: repoDir,
         baseSha,
@@ -1344,7 +1345,7 @@ test("add correctly computes sum", () => {
         "utf8",
       );
 
-      const result = verifyAttempt({
+      const result = verifyAuthorizedGitFixture({
         git: true,
         workspaceDir: repoDir,
         baseSha,
@@ -1391,7 +1392,7 @@ test("add correctly computes sum", () => {
       const notARepo = join(tempDir, "not-a-repo");
       mkdirSync(notARepo, { recursive: true });
 
-      const result = verifyAttempt({
+      const result = verifyAuthorizedGitFixture({
         git: true,
         workspaceDir: notARepo,
         baseSha: "HEAD~1",
@@ -1440,7 +1441,7 @@ test("add correctly computes sum", () => {
       }
 
       try {
-        const result = verifyAttempt({
+        const result = verifyAuthorizedGitFixture({
           git: true,
           workspaceDir: repoDir,
           baseSha,
@@ -1496,7 +1497,7 @@ test("add correctly computes sum", () => {
         },
       });
 
-      const result = verifyAttempt({
+      const result = verifyAuthorizedGitFixture({
         git: true,
         workspaceDir: repoDir,
         baseSha,
@@ -1578,7 +1579,7 @@ test("add correctly computes sum", () => {
         encoding: "utf8",
       }).stdout.trim();
 
-      const result = verifyAttempt({
+      const result = verifyAuthorizedGitFixture({
         git: true,
         workspaceDir: repoDir,
         baseSha,
@@ -1597,7 +1598,7 @@ test("add correctly computes sum", () => {
       const repoDir = join(tempDir, "clean-repo");
       const { baseSha, headSha } = buildMathRepo(repoDir);
 
-      const result = verifyAttempt({
+      const result = verifyAuthorizedGitFixture({
         git: true,
         workspaceDir: repoDir,
         baseSha,

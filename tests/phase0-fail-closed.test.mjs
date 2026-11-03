@@ -1,3 +1,4 @@
+import {verifyAuthorizedGitFixture} from "./helpers/authorized-verification.mjs";
 import { provisionTestTrust } from "./helpers/keyring.mjs";
 // Phase 0 (docs/TRUST-REMEDIATION-PLAN.md): fail-closed regression tests.
 //
@@ -199,7 +200,7 @@ describe("phase 0.5 / 0.6: git-mode verification", () => {
     const repo = tmp("refs");
     try {
       buildFixRepo(repo);
-      const res = verifyAttempt({ git: true, workspaceDir: repo, reproducerCommand: REPRO });
+      const res = verifyAuthorizedGitFixture({ git: true, workspaceDir: repo, reproducerCommand: REPRO });
       assert.equal(res.verified, true, JSON.stringify(res));
       assert.equal(res.verdict, "auto_merge");
     } finally {
@@ -233,7 +234,7 @@ describe("phase 0.5 / 0.6: git-mode verification", () => {
       git(repo, ["add", "."]);
       git(repo, ["commit", "-q", "-m", "head"]);
       const head = git(repo, ["rev-parse", "HEAD"]);
-      const res = verifyAttempt({
+      const res = verifyAuthorizedGitFixture({
         git: true,
         workspaceDir: repo,
         baseSha: base,
@@ -308,7 +309,7 @@ describe("security review: option injection and fail-open gates", () => {
     const repo = tmp("refopt");
     try {
       buildFixRepo(repo);
-      const res = verifyAttempt({
+      const res = verifyAuthorizedGitFixture({
         git: true,
         workspaceDir: repo,
         baseSha: "--all",
