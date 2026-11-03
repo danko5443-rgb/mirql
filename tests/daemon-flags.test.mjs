@@ -37,6 +37,11 @@ test("ambiguous or conflicting flags are refused", () => {
   for (const name of ["dir", "workspace", "command"]) assert.throws(() => parse(`--${name}`), new RegExp(`--${name}`));
 });
 
+test("unknown flags are refused so a typo cannot silently change daemon behaviour", () => {
+  assert.throws(() => parse("--max-step", "3"), /unknown daemon flag\(s\): --max-step/);
+  assert.throws(() => parse("--epoch", "2"), /--epoch/);
+});
+
 test("an invalid daemon invocation exits with a usage error before claiming the launcher pid", () => {
   const root = mkdtempSync(join(tmpdir(), "mirql-daemon-flags-")); try {
     const dir = join(root, ".mirql");

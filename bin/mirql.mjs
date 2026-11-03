@@ -147,6 +147,8 @@ async function runFactoryDaemonMode(argv) {
  * @param {string[]} argv - arguments after the `supervisor` token
  * @returns {{ dir: string, workspace: string, command?: string, maxSteps?: number, initialRun: boolean }}
  */
+const DAEMON_FLAGS = new Set(["daemon", "dir", "workspace", "command", "max-steps", "initial-run", "no-initial-run"]);
+
 export function parseDaemonFlags(argv) {
   const flags = {};
   for (let i = 0; i < argv.length; i++) {
@@ -157,6 +159,10 @@ export function parseDaemonFlags(argv) {
     else if (arg === "--daemon" || arg === "--no-initial-run") flags[arg.slice(2)] = true;
     else if (i + 1 < argv.length && !argv[i + 1].startsWith("-")) flags[arg.slice(2)] = argv[++i];
     else flags[arg.slice(2)] = true;
+  }
+  const unknown = Object.keys(flags).filter((name) => !DAEMON_FLAGS.has(name));
+  if (unknown.length > 0) {
+    throw new Error(`unknown daemon flag(s): ${unknown.map((name) => "--" + name).join(", ")}`);
   }
   if (flags.daemon !== true && flags.daemon !== "true") {
     throw new Error("--daemon takes no value");
