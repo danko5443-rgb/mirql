@@ -65,10 +65,11 @@ function computeSnapshotPhi(root, contentsByFile, packageJson) {
   let dupBlocks = 0;
   let debtMarkers = 0;
   let maxNestingDepth = 0;
+  const edges = buildImportGraph(files, contentsByFile);
+  const exempt = computeExemptTestFiles(root, files, edges);
   for (const file of files) {
     const content = contentsByFile.get(file);
-    const path = relative(root, file).split(sep).join("/");
-    if (isTestFilePath(path) || path.startsWith("__tests__/") || path.startsWith("conformance/")) continue;
+    if (exempt.has(file)) continue;
     const lines = content.split(/\r?\n/);
 
     for (const rawLine of lines) {
@@ -140,7 +141,7 @@ function computeSnapshotPhi(root, contentsByFile, packageJson) {
     .reduce((sum, key) => sum + Object.keys(packageJson?.[key] || {}).length, 0);
 
   // Report test gaps separately; test changes must not alter source potential.
-  const testGaps = computeTestGaps(root, files, contentsByFile);
+  const testGaps = computeTestGaps(root, files, edges);
 
   const total =
     loc +
@@ -173,10 +174,56 @@ function computeSnapshotPhi(root, contentsByFile, packageJson) {
  *
  * @param {string} root
  * @param {string[]} files
- * @param {Map<string, string>} contentsByFile
+ * @param {Map<string, string[]>} edges
  * @returns {number}
  */
-function computeTestGaps(root, files, contentsByFile) {
+/** True for paths whose only purpose is testing: they never contribute to Φ on their own. */
+function isTestOnlyPath(path) {
+  return isTestFilePath(path) || path.startsWith("__tests__/") || path.startsWith("conformance/");
+}
+
+/**
+ * Test and conformance files are exempt from Φ only while no production file
+ * reaches them through the relative-import graph. Production logic placed in a
+ * `test/` directory or a `*.spec.mjs` file and imported by shipped code is
+ * production complexity and is counted. Residual risk: a computed specifier
+ * (`import(variable)`) cannot be resolved statically.
+ *
+ * @param {string} root
+ * @param {string[]} files
+ * @param {Map<string, string[]>} edges
+ * @returns {Set<string>}
+ */
+function computeExemptTestFiles(root, files, edges) {
+  const candidates = new Set(files.filter(file => isTestOnlyPath(relative(root, file).split(sep).join("/"))));
+  const reached = new Set();
+  const queue = files.filter(file => !candidates.has(file));
+  while (queue.length > 0) {
+    for (const next of edges.get(queue.shift()) ?? []) {
+      if (reached.has(next)) continue;
+      reached.add(next);
+      queue.push(next);
+    }
+  }
+  return new Set([...candidates].filter(file => !reached.has(file)));
+}
+
+/** Builds the relative-import edge list once for every collected file. */
+function buildImportGraph(files, contentsByFile) {
+  const fileSet = new Set(files);
+  const edges = new Map();
+  for (const file of files) {
+    const targets = [];
+    for (const spec of extractRelativeSpecifiers(contentsByFile.get(file) ?? "")) {
+      const resolved = resolveSpecifier(dirname(file), spec, fileSet);
+      if (resolved) targets.push(resolved);
+    }
+    edges.set(file, targets);
+  }
+  return edges;
+}
+
+function computeTestGaps(root, files, edges) {
   const normalizedRoot = resolve(root);
   const underRoot = (p) => {
     const rel = relative(normalizedRoot, p);
@@ -190,20 +237,6 @@ function computeTestGaps(root, files, contentsByFile) {
     const rel = underRoot(p);
     return rel !== null && rel.split(sep)[0] === "packages" && /\.m?js$/.test(rel);
   };
-
-  // Build the relative-import edge list once for every collected file.
-  const fileSet = new Set(files);
-  const edges = new Map();
-  for (const file of files) {
-    const content = contentsByFile.get(file) ?? "";
-    const specs = extractRelativeSpecifiers(content);
-    const targets = [];
-    for (const spec of specs) {
-      const resolved = resolveSpecifier(dirname(file), spec, fileSet);
-      if (resolved) targets.push(resolved);
-    }
-    edges.set(file, targets);
-  }
 
   // BFS from every test file; mark reached files.
   const reached = new Set();

@@ -31,3 +31,9 @@ test("corrupted blob storage cannot falsify a named tree's metrics",()=>repo((ro
  const bytes=Buffer.from("export function forged(x){if(x)return 99;}\n");chmodSync(path,0o600);writeFileSync(path,deflateSync(Buffer.concat([Buffer.from("blob "+bytes.length+"\0"),bytes])));
  assert.throws(()=>phi.computeGitTreePhi(root,base),e=>e.code==="PHI_UNMEASURED");
 }));
+test("moving production logic under a test/ directory cannot lower measured tree potential",()=>repo((root,git,base)=>{
+ writeFileSync(join(root,"source.mjs"),"export function f(a){ if(a>1){ if(a>2){ return 1; } } return 0; }\n");git("add",".");git("commit","-qm","logic");const before=git("rev-parse","HEAD");
+ mkdirSync(join(root,"test"));writeFileSync(join(root,"test","impl.mjs"),"export function f(a){ if(a>1){ if(a>2){ if(a>3){ return 1; } } } return 0; }\n");
+ writeFileSync(join(root,"source.mjs"),'export * from "./test/impl.mjs";\n');git("add",".");git("commit","-qm","hide");
+ assert.ok(phi.computeGitTreePhi(root,"HEAD").metrics.total>phi.computeGitTreePhi(root,before).metrics.total);
+}));
