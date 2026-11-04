@@ -224,7 +224,8 @@ them, so complexity cannot be hidden behind a test-shaped path. Computed
 residual risk.
 
 The CI notary runs without a ledger, so its allowance is always 0. A pull
-request that grows $\Phi$ is rejected in CI, so merging it is a human decision.
+request that grows $\Phi$ is rejected in CI, including one that touches a
+`humanApprove` path, so merging it is a human decision.
 GitHub enforces that only when `main` requires the Mergeproof check and agents
 use an identity without merge rights; otherwise an agent can merge over red.
 
