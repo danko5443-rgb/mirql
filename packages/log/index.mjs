@@ -1,29 +1,7 @@
-import { eventHashOf, verifyLedgerLines } from "../core/ledger-verify.mjs";
+import { eventHashOf, GENESIS_PREV_HASH, verifyLedgerLines, writeLedgerHeadSidecar } from "../core/ledger-verify.mjs";
 import { resolveRegisteredPublicKey, readSignedKeyring } from "../core/keyring.mjs";
 import { trustFile } from "../core/trust-root.mjs";
-/**
- * mirql-log — the factory's cryptographic append-only ledger (Law 4).
- *
- * `.mirql/` layout (every JSON document canonicalized with RFC 8785 `jcs`,
- * Law 17 integer-only):
- *
- *   <mirqlDir>/ledger/events.jsonl   append-only newline-delimited events
- *   <trustRoot>/keyring.json   optional { [key_id]: publicKeyBase64Url }
- *   <mirqlDir>/ledger/snapshots/     snapshot-<seq>.json fold snapshots
- *   <mirqlDir>/cache/state.json      disposable materialized fold cache
- *
- * The ledger is the single source of truth (Law 4: Event-Sourced Truth):
- * every projection is a pure deterministic fold over events.jsonl, and
- * deleting the cache is always safe — replay --rebuild-cache reproduces the
- * exact same bytes. Events are hash-chained (prev_hash -> last event hash,
- * anchored at 64 hex zeros) and Ed25519-signed envelopes; the single-writer
- * ACL of Law 3 gates every (writer.ns, type) pair.
- *
- * Programmatic API: appendEvent, verifyLedger, foldEvents, getView,
- * replayCache, createSnapshot, runCli — plus `main`, the CLI entrypoint the
- * bin/ wrappers import (it keeps the W1 stub contract for bare `--help` /
- * no-args / `status` calls and delegates everything else to runCli).
- */
+/** mirql-log — the factory's cryptographic append-only ledger (Law 4). */
 import { createPrivateKey, createPublicKey, KeyObject } from "node:crypto";
 import {
   closeSync,
@@ -56,8 +34,8 @@ import {
 /** Tool name reported by this package. */
 export const TOOL = "log";
 
-/** prev_hash anchor of the very first event in any ledger. */
-export const GENESIS_PREV_HASH = `sha256:${"0".repeat(64)}`;
+/** prev_hash anchor of the very first event in any ledger (canonical core primitive). */
+export { GENESIS_PREV_HASH };
 
 /** The named projections served by getView / `mirql l view`. */
 export const PROJECTIONS = Object.freeze([
@@ -91,15 +69,9 @@ const RECENT_LIMIT = 10;
 /** Maximum byte size of the orchestrator digest (bounded JSON summary). */
 export const ORCHESTRATOR_DIGEST_MAX_BYTES = 2048;
 
-/**
- * Domain error carrying a canonical EXIT_CODES name, thrown by the library
- * API and mapped to JSON-on-stderr + exit codes by runCli.
- */
+/** Domain error carrying a canonical EXIT_CODES name, thrown by the library API and mapped to JSON-on-stderr + exit codes by runCli. / */
 export class LedgerError extends Error {
-  /**
-   * @param {"USAGE_ERROR" | "INTEGRITY_VIOLATION" | "POLICY_DENIAL"} code
-   * @param {string} message
-   */
+  /** */
   constructor(code, message) {
     super(message);
     this.name = "LedgerError";
@@ -132,13 +104,7 @@ function snapshotsDir(mirqlDir) {
   return join(mirqlDir, "ledger", "snapshots");
 }
 
-/**
- * Resolve the active `.mirql` directory: explicit argument wins, then the
- * MIRQL_DIR environment variable, then `<cwd>/.mirql`.
- *
- * @param {string | undefined | null} mirqlDir
- * @returns {string} absolute path
- */
+/** Resolve the active `.mirql` directory: explicit argument wins, then the MIRQL_DIR environment variable, then `<cwd>/.mirql`. */
 function resolveMirqlDir(mirqlDir) {
   const raw =
     typeof mirqlDir === "string" && mirqlDir.length > 0
@@ -151,15 +117,7 @@ function resolveMirqlDir(mirqlDir) {
 // Ledger reading
 // ---------------------------------------------------------------------------
 
-/**
- * Read the ledger, returning parsed events paired with their raw canonical
- * lines (raw lines matter for conformance fixtures whose linkage is the
- * SHA-256 of the previous raw line rather than an envelope hash field).
- *
- * @param {string} mirqlDir
- * @returns {{ events: object[], rawLines: string[] }}
- * @throws {SyntaxError} when a line is not valid JSON
- */
+/** Read the ledger, returning parsed events paired with their raw canonical lines (raw lines matter for conformance fixtures whose linkage is the SHA-256 of the previous raw line rather than an envelope hash field). */
 function readLedger(mirqlDir) {
   const file = eventsFile(mirqlDir);
   if (!existsSync(file)) return { events: [], rawLines: [] };
@@ -184,56 +142,18 @@ function readLedgerSafe(mirqlDir) {
   }
 }
 
-/**
- * The hash a ledger position contributes to the chain: the envelope `hash`
- * when present, otherwise the SHA-256 of the raw line (conformance fixtures
- * only when allowRawLine is true).
- *
- * @param {object} event
- * @param {string | undefined} rawLine
- * @param {boolean} [allowRawLine=false]
- * @returns {string}
- */
+/** The hash a ledger position contributes to the chain: the envelope `hash` when present, otherwise the SHA-256 of the raw line (conformance fixtures only when allowRawLine is true). */
 
 // ---------------------------------------------------------------------------
 // Key material
 // ---------------------------------------------------------------------------
 
-/**
- * Load `trust-root keyring.json`: a map of key_id (and/or writer namespace) to
- * either a base64url public key string (legacy) or a namespace-bound entry
- * `{ ns, publicKey }` (canonical since W5b). A missing or unparsable keyring
- * is treated as empty — the ledger itself still verifies via embedded writer
- * key ids.
- *
- * @param {string} mirqlDir
- * @returns {Record<string, unknown>}
- */
+/** Load `trust-root keyring.json`: a map of key_id (and/or writer namespace) to either a base64url public key string (legacy) or a namespace-bound entry `{ ns, publicKey }` (canonical since W5b). A missing or unparsable keyring is treated as empty — the ledger itself still verifies via embedded writer key ids. */
 function loadKeyring(mirqlDir) {
   return readSignedKeyring(mirqlDir);
 }
 
-/**
- * Find the Ed25519 public key that should verify `event`'s signature:
- * options.publicKey, then keyring[event.writer.key_id], then the raw key
- * embedded in an `ed25519:<43-char-base64url>` writer key id.
- *
- * Phase 0.4: the embedded key is self-certifying — anyone can mint a key and
- * claim any namespace with it — so it is used only in conformance mode, or
- * by appendEvent for an event it has just signed itself
- * (`allowEmbeddedKey`). Without a keyring, `l verify` trusts no key.
- *
- * Keyring entries may be plain public-key strings (legacy) or namespace-
- * bound objects `{ ns, publicKey }` (canonical since W5b). When the entry is
- * bound to a namespace that differs from `event.writer.ns`, resolution fails
- * closed (returns null): a key registered for `tool:queue` can never verify
- * an event claiming to be written by `human:owner` (Law 3 binding).
- *
- * @param {object} event
- * @param {string} mirqlDir
- * @param {{ publicKey?: string, keyring?: Record<string, unknown>, conformance?: boolean, allowEmbeddedKey?: boolean }} [options]
- * @returns {string | null} base64url raw public key, or null when unresolvable
- */
+/** Find the Ed25519 public key that should verify `event`'s signature: options.publicKey, then keyring[event.writer.key_id], then the raw key embedded in an `ed25519:<43-char-base64url>` writer key id. */
 function resolvePublicKey(event, mirqlDir, options = {}) {
   const present = options.keyring !== undefined || existsSync(keyringFile(mirqlDir));
   const ring = present ? (options.keyring ?? loadKeyring(mirqlDir)) : undefined;
@@ -265,15 +185,7 @@ function deriveKeyIdFromPrivate(privateKey) {
 // Deterministic fold (Law 4)
 // ---------------------------------------------------------------------------
 
-/**
- * Pure deterministic fold over parsed ledger events. Unknown event types are
- * ignored (forward compatibility); every derived value depends only on the
- * events themselves, so the same ledger always folds to the same state.
- *
- * @param {object[]} events
- * @param {string[]} [rawLines] raw lines parallel to events (hash fallback)
- * @returns {object} rich internal fold state
- */
+/** Pure deterministic fold over parsed ledger events. Unknown event types are ignored (forward compatibility); every derived value depends only on the events themselves, so the same ledger always folds to the same state. */
 function richFold(events, rawLines = []) {
   const state = {
     mode: null,
@@ -465,12 +377,7 @@ function pushBounded(list, item) {
   if (list.length > RECENT_LIMIT) list.shift();
 }
 
-/**
- * The pinned full materialized state (the `job_state` projection shape).
- *
- * @param {object} rich - rich fold state
- * @returns {object}
- */
+/** The pinned full materialized state (the `job_state` projection shape). */
 function jobStateFrom(rich) {
   return {
     version: 1,
@@ -501,14 +408,7 @@ function countJobs(jobs, statuses) {
   return n;
 }
 
-/**
- * Project a rich fold state into one of the named views.
- *
- * @param {object} rich
- * @param {string} projection
- * @returns {object}
- * @throws {LedgerError} USAGE_ERROR for an unknown projection
- */
+/** Project a rich fold state into one of the named views. */
 function projectView(rich, projection) {
   const key = PROJECTION_ALIASES[projection];
   if (key === undefined) {
@@ -572,25 +472,14 @@ function projectView(rich, projection) {
 // Filesystem helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Write `data` to `file` atomically: temp file in the same directory, then a
- * rename over the destination.
- *
- * @param {string} file @param {string} data @returns {void}
- */
+/** Write `data` to `file` atomically: temp file in the same directory, then a rename over the destination. */
 function atomicWrite(file, data) {
   const tmp = `${file}.tmp`;
   writeFileSync(tmp, data, "utf8");
   renameSync(tmp, file);
 }
 
-/**
- * Append one canonical line to events.jsonl. The line is a single write to
- * an O_APPEND-style handle followed by fsync, so concurrent readers see the
- * line whole or not at all.
- *
- * @param {string} mirqlDir @param {string} canonicalLine @returns {void}
- */
+/** Append one canonical line to events.jsonl. The line is a single write to an O_APPEND-style handle followed by fsync, so concurrent readers see the line whole or not at all. */
 function appendLedgerLine(mirqlDir, canonicalLine) {
   mkdirSync(join(mirqlDir, "ledger"), { recursive: true });
   const fd = openSync(eventsFile(mirqlDir), "a");
@@ -602,12 +491,7 @@ function appendLedgerLine(mirqlDir, canonicalLine) {
   }
 }
 
-/**
- * Refold the whole ledger and atomically rewrite cache/state.json.
- *
- * @param {string} mirqlDir
- * @returns {object} the materialized state that was written
- */
+/** Refold the whole ledger and atomically rewrite cache/state.json. */
 function updateCache(mirqlDir) {
   const { events, rawLines } = readLedgerSafe(mirqlDir);
   const state = jobStateFrom(richFold(events, rawLines));
@@ -620,34 +504,7 @@ function updateCache(mirqlDir) {
 // appendEvent — `mirql l append`
 // ---------------------------------------------------------------------------
 
-/**
- * Append one event to the ledger (Law 4), enforcing:
- * 1. Idempotency dedup — an already-present idempotency_key dedupes.
- * 2. Law 3 single-writer ACL — canWriteEvent(writer.ns, type) or denial.
- * 3. Hash-chain integrity — seq/prev_hash/hash (+ Ed25519 signature when a
- *    public key is resolvable) or INTEGRITY_VIOLATION.
- *
- * Two input modes:
- * - Signing mode (`options.signingKey`, optionally `options.keyId`): seq,
- *   prev_hash, hlc, id, ts and envelope defaults are auto-filled, then the
- *   event is signed, so callers only supply type/writer/payload.
- * - Envelope mode: the caller supplies a complete signed event; it is
- *   validated with validateDocument("event", ...) and chain-checked.
- *
- * @param {string} mirqlDir the `.mirql` directory
- * @param {object} eventInput event object (full envelope, or partial when
- *   signing options are given)
- * @param {object} [options]
- * @param {string} [options.signingKey] base64url PKCS#8 private key
- * @param {string} [options.privateKey] alias for signingKey
- * @param {string} [options.keyId] writer key id (derived when omitted)
- * @param {string} [options.publicKey] explicit public key for sig verification
- * @param {number} [options.nowMs] wall-clock ms (deterministic tests)
- * @param {string} [options.node] HLC node id (default "local")
- * @returns {{ status: "appended", seq: number, hash: string } |
- *           { status: "deduped", event: object }}
- * @throws {LedgerError} POLICY_DENIAL / INTEGRITY_VIOLATION / USAGE_ERROR
- */
+/** Append one event to the ledger (Law 4), enforcing: 1. Idempotency dedup — an already-present idempotency_key dedupes. 2. Law 3 single-writer ACL — canWriteEvent(writer.ns, type) or denial. 3. Hash-chain integrity — seq/prev_hash/hash (+ Ed25519 signature when a public key is resolvable) or INTEGRITY_VIOLATION. */
 export function appendEvent(mirqlDir, eventInput, options = {}) {
   const dir = resolveMirqlDir(mirqlDir);
   return withLedgerLock(dir, () => {
@@ -820,24 +677,15 @@ export function appendEvent(mirqlDir, eventInput, options = {}) {
     );
   }
 
-  // 4. Atomic append + cache update.
+  // 4. Atomic append + cache update + O(1) head sidecar update (Law 4).
   appendLedgerLine(dir, jcs(event));
+  writeLedgerHeadSidecar(dir, event);
   updateCache(dir);
   return { status: "appended", seq: event.seq, hash: event.hash };
   });
 }
 
-/**
- * Auto-fill the envelope (seq, prev_hash, hlc, id, ts, defaults), then sign.
- *
- * @param {string} dir
- * @param {object} input
- * @param {object[]} events
- * @param {string[]} rawLines
- * @param {string} signingKey
- * @param {{ keyId?: string, nowMs?: number, node?: string }} options
- * @returns {object} signed event envelope
- */
+/** Auto-fill the envelope (seq, prev_hash, hlc, id, ts, defaults), then sign. */
 function buildAndSignEvent(dir, input, events, rawLines, signingKey, options) {
   void dir;
   const last = events.at(-1) ?? null;
@@ -895,29 +743,7 @@ function buildAndSignEvent(dir, input, events, rawLines, signingKey, options) {
 // verifyLedger — `mirql l verify`
 // ---------------------------------------------------------------------------
 
-/**
- * Verify the whole ledger from line 1 to N:
- * 1. every line parses and is integer-only canonical JSON (Law 17);
- * 2. seq runs strictly 1..N;
- * 3. prev_hash anchors at 64 zeros and chains to the previous event's
- *    envelope hash (or the SHA-256 of the previous raw line for conformance
- *    fixtures without hash fields);
- * 4. the Law 3 single-writer ACL holds for envelope-style writers;
- * 5. when a hash/sig is present, the content hash matches and the Ed25519
- *    signature verifies against the resolvable public key.
- *
- * Supports both signed full-envelope ledgers (written by appendEvent) and
- * raw conformance fixture ledgers such as
- * conformance/golden_ledger/events.jsonl (pass --conformance, or rely on
- * the automatic raw-line prev_hash linkage).
- *
- * @param {string} mirqlDir
- * @param {object} [options]
- * @param {boolean} [options.conformance] advisory flag for fixture ledgers
- * @param {string} [options.publicKey] explicit verification public key
- * @returns {{ valid: true, event_count: number, head_hash: string } |
- *           { valid: false, error: string, seq: number }}
- */
+/** Verify the whole ledger from line 1 to N: 1. every line parses and is integer-only canonical JSON (Law 17); 2. seq runs strictly 1..N; 3. prev_hash anchors at 64 zeros and chains to the previous event's envelope hash (or the SHA-256 of the previous raw line for conformance fixtures without hash fields); 4. the Law 3 single-writer ACL holds for envelope-style writers; 5. when a hash/sig is present, the content hash matches and the Ed25519 signature verifies against the resolvable public key. */
 export function verifyLedger(mirqlDir, options = {}) {
   const dir = resolveMirqlDir(mirqlDir);
   const file = eventsFile(dir);
@@ -937,13 +763,7 @@ export function verifyLedger(mirqlDir, options = {}) {
 // foldEvents / getView — pure projections
 // ---------------------------------------------------------------------------
 
-/**
- * Deterministic fold over the ledger (or a plain event array), returning the
- * full materialized state (the job_state projection shape).
- *
- * @param {string | object[]} source mirqlDir, or an array of parsed events
- * @returns {object} materialized state
- */
+/** Deterministic fold over the ledger (or a plain event array), returning the full materialized state (the job_state projection shape). */
 export function foldEvents(source) {
   const { events, rawLines } =
     typeof source === "string"
@@ -952,20 +772,7 @@ export function foldEvents(source) {
   return jobStateFrom(richFold(events, rawLines));
 }
 
-/**
- * Pure deterministic fold over ledger/events.jsonl producing one of the five
- * named projections:
- * - job_state (alias "state")  — full materialized state
- * - orchestrator_digest        — bounded <= 2048-byte summary for the queue
- * - human_digest               — summary for the human inbox
- * - phi                        — complexity potential history + latest value
- * - budget                     — integer micro-USD spend by warrant and role
- *
- * @param {string} mirqlDir
- * @param {string} projection
- * @returns {object}
- * @throws {LedgerError} USAGE_ERROR for an unknown projection
- */
+/** Pure deterministic fold over ledger/events.jsonl producing one of the five named projections: - job_state (alias "state") — full materialized state - orchestrator_digest — bounded <= 2048-byte summary for the queue - human_digest — summary for the human inbox - phi — complexity potential history + latest value - budget — integer micro-USD spend by warrant and role */
 export function getView(mirqlDir, projection) {
   const dir = resolveMirqlDir(mirqlDir);
   const { events, rawLines } = readLedgerSafe(dir);
@@ -976,14 +783,7 @@ export function getView(mirqlDir, projection) {
 // replayCache / createSnapshot
 // ---------------------------------------------------------------------------
 
-/**
- * Delete cache/state.json and rebuild it from scratch by folding
- * ledger/events.jsonl — the Law 4 proof that the cache is disposable.
- *
- * @param {string} mirqlDir
- * @returns {{ rebuilt: true, seq: number, state_hash: string }}
- * @throws {LedgerError} INTEGRITY_VIOLATION when the ledger is unreadable
- */
+/** Delete cache/state.json and rebuild it from scratch by folding ledger/events.jsonl — the Law 4 proof that the cache is disposable. */
 export function replayCache(mirqlDir) {
   const dir = resolveMirqlDir(mirqlDir);
   rmSync(cacheFile(dir), { force: true });
@@ -995,13 +795,7 @@ export function replayCache(mirqlDir) {
   return { rebuilt: true, seq: state.seq, state_hash: stateHash };
 }
 
-/**
- * Fold the current ledger state and persist a snapshot at
- * `<mirqlDir>/ledger/snapshots/snapshot-<seq>.json`.
- *
- * @param {string} mirqlDir
- * @returns {{ snapshot_path: string, seq: number, state_hash: string }}
- */
+/** Fold the current ledger state and persist a snapshot at `<mirqlDir>/ledger/snapshots/snapshot-<seq>.json`. */
 export function createSnapshot(mirqlDir) {
   const dir = resolveMirqlDir(mirqlDir);
   const { events, rawLines } = readLedgerSafe(dir);
@@ -1025,13 +819,7 @@ const BOOL_FLAGS = Object.freeze(
   new Set(["conformance", "rebuild-cache", "help"]),
 );
 
-/**
- * Parse `["view", "job_state", "--dir", "x", "--conformance"]` into
- * positionals and flags (supports both `--flag value` and `--flag=value`).
- *
- * @param {string[]} argv
- * @returns {{ positional: string[], flags: Record<string, string | boolean> }}
- */
+/** Parse `["view", "job_state", "--dir", "x", "--conformance"]` into positionals and flags (supports both `--flag value` and `--flag=value`). */
 function parseArgs(argv) {
   const positional = [];
   const flags = {};
@@ -1058,12 +846,7 @@ function parseArgs(argv) {
   return { positional, flags };
 }
 
-/**
- * Read all of stdin synchronously (pipe or redirect); empty when stdin is a
- * TTY or unreadable, so interactive misuse fails fast instead of hanging.
- *
- * @returns {string}
- */
+/** Read all of stdin synchronously (pipe or redirect); empty when stdin is a TTY or unreadable, so interactive misuse fails fast instead of hanging. */
 function readStdinSync() {
   try {
     if (process.stdin.isTTY) return "";
@@ -1105,14 +888,7 @@ function emitUsage() {
   return EXIT_CODES.OK;
 }
 
-/**
- * Append subcommand: load the event JSON from --event, --file or stdin and
- * hand it to appendEvent with the CLI signing options.
- *
- * @param {string} dir
- * @param {Record<string, string | boolean>} flags
- * @returns {number} exit code
- */
+/** Append subcommand: load the event JSON from --event, --file or stdin and hand it to appendEvent with the CLI signing options. */
 function cliAppend(dir, flags) {
   let input;
   if (typeof flags.event === "string") {
@@ -1160,14 +936,7 @@ function cliAppend(dir, flags) {
   return EXIT_CODES.OK;
 }
 
-/**
- * Full CLI dispatch (mirql l <subcommand> / mirql-log <subcommand>).
- * JSON results on stdout; JSON errors ({ error, reason }) on stderr; exit
- * codes are the canonical EXIT_CODES.
- *
- * @param {string[]} argv arguments after the program/tool name
- * @returns {number} process exit code
- */
+/** Full CLI dispatch (mirql l <subcommand> / mirql-log <subcommand>). JSON results on stdout; JSON errors ({ error, reason }) on stderr; exit codes are the canonical EXIT_CODES. */
 export function runCli(argv = []) {
   try {
     const { positional, flags } = parseArgs(argv);
@@ -1238,14 +1007,7 @@ export function runCli(argv = []) {
   }
 }
 
-/**
- * CLI entrypoint imported by bin/mirql-log.mjs and bin/mirql.mjs. Keeps the
- * W1 stub contract for bare `--help` / `-h` / `status` / no-args calls and
- * delegates every real subcommand to runCli.
- *
- * @param {string[]} argv - arguments after the program name
- * @returns {number} process exit code (see EXIT_CODES)
- */
+/** CLI entrypoint imported by bin/mirql-log.mjs and bin/mirql.mjs. Keeps the W1 stub contract for bare `--help` / `-h` / `status` / no-args calls and delegates every real subcommand to runCli. */
 export function main(argv = []) {
   const first = argv[0];
   if (

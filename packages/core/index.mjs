@@ -65,3 +65,15 @@ export {
 export { assertExternalTrustPath } from "./trust-root.mjs";
 
 export { readSignedKeyring, sealKeyring, enrollKey, assertKeyEnrolled, readOwnerPin } from "./keyring.mjs";
+
+// Canonical ledger primitives (Law 4): genesis anchor, O(1) verified head sidecar, fail-closed pre-append verification (Phase 6.1/6.2).
+export {
+  GENESIS_PREV_HASH,
+  LedgerVerificationError,
+  readLedgerHeadSidecar,
+  writeLedgerHeadSidecar,
+  verifyChainBeforeAppend,
+  readVerifiedLedger,
+  eventHashOf,
+  verifyLedgerLines,
+} from "./ledger-verify.mjs";

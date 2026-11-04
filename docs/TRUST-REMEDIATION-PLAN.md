@@ -1,16 +1,27 @@
 # Trust Remediation Plan
 
-Execution checkpoint on 2 November 2026. Phase 0 code and the original issue fixes have landed.
-The external trust root, signed key enrollment, native credential permissions,
-disposable worker homes (1.1-1.4), and signed warrant authority (2.1) have landed.
-Windows credential ownership has a further correction under review in PR #45.
-The owner-signed merge approval record and CLI have landed; binding hardening is
-under review, and consuming those records in the actual merge gate (2.2) remains open.
-Post-run protected-path checking (2.3) has landed, with Git-object and repository-policy
-bypass fixes under review in PR #48. The later proof, telemetry, isolation and
-consolidation work remain open. The owner chose to keep the repository private
-and leave the unavailable main ruleset requirement open. Human review requirements
-are not satisfied by implementation or automated test results alone.
+Execution checkpoint on 4 November 2026. Phases 0–4 have landed: the external
+trust root, signed key enrollment, native credential permissions, disposable
+worker homes, signed warrant authority, the owner-signed merge approval record,
+post-run protected-path checking, and the honest causal proof (Red-Green-ReRed,
+out-of-band coverage, necessity) are implemented. Phase 5 (Law 8 isolation:
+the Docker/Podman sandbox runner in `packages/run/agent.mjs` with a hardened
+flag set and `SANDBOX_UNAVAILABLE` fail-closed behavior, plus the invariant
+that `sandbox: "none"` never yields `auto_merge` in `packages/run/verify.mjs`
+and `packages/mergeproof/evaluator.mjs`) and Phase 6's ledger consolidation
+canonical primitives, the O(1) verified `head.json` sidecar with fail-closed
+pre-append chain verification, the MP-003 self-check convention, and the
+`docs/STATUS.md` status matrix) are implemented, with `delta_phi < 0`
+(consolidation). Phase 6.1 (all five ledger writers — log, run, queue, notary
+and inbox — now append through the canonical core primitives with the O(1)
+head sidecar authenticating the entire events file by digest), Phase 6.3
+(stale-lock atomic-rename breaking with PID/nonce verification in
+`packages/core/lock.mjs`) and Phase 6.5 (referee path protection in
+`policy/paths.yaml`) are implemented as well. The remaining open item is
+tracked in `docs/STATUS.md` (6.6 lint strengthening). The owner
+chose to keep the repository private and leave the unavailable main ruleset
+requirement open. Human review requirements are not satisfied by
+implementation or automated test results alone.
 The historical status table below records the original audit, rather than current completion.
 
 

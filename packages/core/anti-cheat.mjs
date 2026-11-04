@@ -112,7 +112,12 @@ export function loadPathPolicies(rootDir = process.cwd()) {
   const pathsFile = join(rootDir, "policy", "paths.yaml");
   let content = "";
   if (existsSync(pathsFile)) {
-    try { content = readFileSync(pathsFile, "utf8"); } catch {}
+    try { content = readFileSync(pathsFile, "utf8"); }
+    catch (error) {
+      // An unreadable policy file falls back to the mandatory default guards.
+      content = "";
+      void error;
+    }
   }
   return parsePathPolicies(content);
 }
@@ -352,6 +357,14 @@ export function isEffectivelyEmpty(bodyText) {
 }
 
 /**
+ * MP-003 reviewer-approved exemption marker: a catch body carrying
+ * `// mp-003-allow: <reason>` (or the block-comment form) is exempt from the
+ * swallowed-exception lint — the recorded reason makes the silence a reviewed
+ * decision rather than an oversight.
+ */
+const MP003_ALLOW_RE = /(?:\/\/|\/\*)\s*mp-003-allow\s*:/i;
+
+/**
  * Scans source code for empty catch blocks and swallowed exceptions (MP-003).
  *
  * @param {string} sourceCode
@@ -366,7 +379,7 @@ export function checkSwallowedExceptions(sourceCode, filename) {
   let match;
   while ((match = catchStartRegex.exec(sourceCode)) !== null) {
     const { body, endIdx: catchEnd } = extractBalancedBlock(sourceCode, match.index + match[0].length);
-    if (isEffectivelyEmpty(body)) {
+    if (isEffectivelyEmpty(body) && !MP003_ALLOW_RE.test(body)) {
       const upToMatch = sourceCode.slice(0, match.index);
       const line = upToMatch.split("\n").length;
       violations.push({
@@ -398,7 +411,7 @@ export function checkSwallowedExceptions(sourceCode, filename) {
 
     if (foundBrace !== -1) {
       const { body, endIdx } = extractBalancedBlock(sourceCode, foundBrace + 1);
-      if (isEffectivelyEmpty(body)) {
+      if (isEffectivelyEmpty(body) && !MP003_ALLOW_RE.test(body)) {
         const upToMatch = sourceCode.slice(0, pcMatch.index);
         const line = upToMatch.split("\n").length;
         violations.push({
@@ -424,7 +437,7 @@ export function checkSwallowedExceptions(sourceCode, filename) {
       const arrowMatch = argStr.match(/=>\s*(.*)$/);
       if (arrowMatch) {
         const expr = arrowMatch[1].trim();
-        if (isEffectivelyEmpty(expr)) {
+        if (isEffectivelyEmpty(expr) && !MP003_ALLOW_RE.test(expr)) {
           const upToMatch = sourceCode.slice(0, pcMatch.index);
           const line = upToMatch.split("\n").length;
           violations.push({

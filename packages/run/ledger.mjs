@@ -4,6 +4,7 @@ import { assertKeyEnrolled } from "../core/keyring.mjs";
 import { trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 import { existsSync, mkdirSync, readFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
+import { GENESIS_PREV_HASH, verifyChainBeforeAppend, writeLedgerHeadSidecar } from "../core/ledger-verify.mjs";
 import {
   jcs,
   sha256,
@@ -13,8 +14,6 @@ import {
   generateEd25519Keypair,
   withLedgerLock,
 } from "../core/index.mjs";
-
-const GENESIS_PREV_HASH = `sha256:${"0".repeat(64)}`;
 
 /**
  * Appends a signed ledger event with writer.ns = "tool:run_supervisor".
@@ -38,28 +37,16 @@ export function appendSupervisorEvent(mirqlDir, eventInput, keypair, options = {
   mkdirSync(ledgerDir, { recursive: true });
   const eventsFile = join(ledgerDir, "events.jsonl");
 
-  let events = [];
-  if (existsSync(eventsFile)) {
-    const raw = readFileSync(eventsFile, "utf8").trim();
-    if (raw.length > 0) {
-      const lines = raw.split("\n").filter((l) => l.trim().length > 0);
-      events = lines.map((l, idx) => {
-        try {
-          return JSON.parse(l);
-        } catch (err) {
-          throw new Error(
-            `Corrupt ledger event at line ${idx + 1} in ${eventsFile}: ${err.message}`,
-          );
-        }
-      });
-    }
-  }
+  // Fail closed (Law 4): verify the full hash chain before appending. Uses
+  // the O(1) head.json sidecar when valid, otherwise re-verifies every line
+  // and throws INTEGRITY_VIOLATION on any corruption.
+  const chain = verifyChainBeforeAppend(mirqlDir);
 
-  const last = events.at(-1) ?? null;
+  const last = chain.lastEvent;
   const nowMs = Number.isSafeInteger(eventInput.nowMs)
     ? eventInput.nowMs
     : Date.now();
-  const seq = (typeof last?.seq === "number" ? last.seq : 0) + 1;
+  const seq = chain.seq + 1;
   const prevHash =
     typeof last?.hash === "string"
       ? last.hash
@@ -108,6 +95,7 @@ export function appendSupervisorEvent(mirqlDir, eventInput, keypair, options = {
 
   const signed = signEvent(unsigned, kp.privateKey, keyId);
   appendFileSync(eventsFile, jcs(signed) + "\n", "utf8");
+  writeLedgerHeadSidecar(mirqlDir, signed);
 
 
   return signed;

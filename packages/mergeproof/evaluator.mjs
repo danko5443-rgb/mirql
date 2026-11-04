@@ -68,16 +68,7 @@ export const RULES = Object.freeze({
   LAW_13: { verdict: "reject", violation: "PHI_INCREASE" },
 });
 
-/**
- * Helper to construct a verdict failure payload.
- *
- * @param {string} rule
- * @param {string} violation
- * @param {"reject" | "needs_human"} verdict
- * @param {string} detail
- * @param {object} [extra]
- * @returns {object}
- */
+/** Helper to construct a verdict failure payload. */
 function fail(rule, violation, verdict, detail, extra = {}) {
   return {
     ok: false,
@@ -90,12 +81,16 @@ function fail(rule, violation, verdict, detail, extra = {}) {
   };
 }
 
-/**
- * Extracts a list of touched file paths from a PR or outcome document.
- *
- * @param {object} doc
- * @returns {string[]}
- */
+/** Law 8 gate: `sandbox: "none"` evidence caps a passing verdict at needs_human — never auto_merge (nor doc-only conformance_pass). */
+function capUnsandboxedVerdict(result, prDoc = {}) {
+  if (prDoc?.sandbox !== "none" && prDoc?.evidence?.sandbox !== "none") return result;
+  if (result.verdict !== "auto_merge" && result.verdict !== "conformance_pass") return result;
+  return fail("UNSANDBOXED_EXECUTION", "SANDBOX_NONE", "needs_human",
+    'Execution ran with sandbox: "none" (no OS/container isolation); human review required.',
+    { checks: result.checks ?? {}, flags: [...(result.flags ?? []), "UNSANDBOXED_EXECUTION"], reasons: [...(result.reasons ?? []), "UNSANDBOXED_EXECUTION"] });
+}
+
+/** Extracts a list of touched file paths from a PR or outcome document. */
 export function collectChangedFiles(doc = {}) {
   const seen = new Set();
   const list = [];
@@ -122,13 +117,7 @@ export function collectChangedFiles(doc = {}) {
   return list;
 }
 
-/**
- * Resolve the integer delta_phi metric from the PR document.
- * Returns undefined if no integer metric is present.
- *
- * @param {object} doc
- * @returns {number | undefined}
- */
+/** Resolve the integer delta_phi metric from the PR document. Returns undefined if no integer metric is present. */
 export function resolveDeltaPhi(doc = {}) {
   const phi = doc.phi ?? {};
   if (Number.isSafeInteger(phi.delta_phi)) return phi.delta_phi;
@@ -142,22 +131,10 @@ export function resolveDeltaPhi(doc = {}) {
   return undefined;
 }
 
-/**
- * Canonical test file path recognizer shared across mergeproof checks.
- *
- * @param {string} p
- * @returns {boolean}
- */
+/** Canonical test file path recognizer shared across mergeproof checks. */
 export { isTestFilePath } from '../core/index.mjs';
 
-/**
- * Files that steer an aiReviewers account: CodeRabbit config, AGENTS.md (Codex
- * review guidelines) and the agent instruction files CodeRabbit reads as code
- * guidelines by default. Every pattern matches at any depth (see
- * isReviewerConfigPath). An AI approval never
- * clears a PR that touches one: that PR may be reviewed under its own
- * instructions.
- */
+/** Files that steer an aiReviewers account: CodeRabbit config, AGENTS.md (Codex review guidelines) and the agent instruction files CodeRabbit reads as code guidelines by default. Every pattern matches at any depth (see isReviewerConfigPath). An AI approval never clears a PR that touches one: that PR may be reviewed under its own instructions. / */
 const AI_REVIEWER_CONFIG_PATTERNS = Object.freeze([
   ".coderabbit.yaml",
   ".coderabbit.yml",
@@ -196,16 +173,7 @@ function validReviewerLogin(login) {
 
 const GIT_SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
 
-/**
- * Queries git diff --name-status base...head if git and a repository are available.
- * Returns { ok: true, files: string[], deletedFiles: string[] } on success,
- * or { ok: false, error: string, files: [], deletedFiles: [] } on failure.
- *
- * @param {string} baseSha
- * @param {string} headSha
- * @param {string} [repoDir]
- * @returns {{ ok: boolean, error?: string, files: string[], deletedFiles: string[] }}
- */
+/** Queries git diff --name-status base...head if git and a repository are available. Returns { ok: true, files: string[], deletedFiles: string[] } on success, or { ok: false, error: string, files: [], deletedFiles: [] } on failure. */
 export function getGitDiffInfo(baseSha, headSha, repoDir = process.cwd()) {
   if (!baseSha || !headSha) {
     return { ok: true, files: [], deletedFiles: [] };
@@ -271,41 +239,13 @@ export function getGitDiffInfo(baseSha, headSha, repoDir = process.cwd()) {
   }
 }
 
-/**
- * Backward compatibility alias for getGitDiffInfo.files.
- *
- * @param {string} baseSha
- * @param {string} headSha
- * @param {string} [repoDir]
- * @returns {string[]}
- */
+/** Backward compatibility alias for getGitDiffInfo.files. */
 export function getGitDiffFiles(baseSha, headSha, repoDir = process.cwd()) {
   const info = getGitDiffInfo(baseSha, headSha, repoDir);
   return info.ok ? info.files : [];
 }
 
-/**
- * Evaluates a PR / outcome document against MP-000..MP-005 and Law 13.
- *
- * Deterministic and pure with respect to `prDoc`: it never consults
- * `expected_verdict`, `expected_rule` or `violation_type`.
- *
- * Options:
- * - `rootDir`        — repo root for policy/paths.yaml (default: cwd)
- * - `targetTipSha`   — authoritative target tip SHA for MP-004 (CLI --base)
- * - `expectedHeadSha`— authoritative head SHA for MP-004 (CLI --head)
- * - `humanApproved`  — ignored since Phase 0.3: no boolean unlocks MP-005;
- *                      signed approvals arrive in Phase 2
- * - `repoDir`        — directory of git repository to cross-check diffs against reality (Law 7)
- * - `humanOnlyReviewer` — login of an aiReviewers account that approved the
- *                      head commit (looked up by CI from the GitHub API). It
- *                      lets a humanOnly PR continue through every other rule;
- *                      the best verdict is then needs_human, never auto_merge.
- *
- * @param {object} prDoc PR fixture or outcome document
- * @param {object} [options]
- * @returns {{ ok: boolean, rule: string, violation: string | null, verdict: string, detail: string, flags: string[], checks: object }}
- */
+/** Evaluates a PR / outcome document against MP-000..MP-005 and Law 13. */
 export function evaluatePullRequest(prDoc = {}, options = {}) {
   const evidence = prDoc.evidence ?? {};
   const antiCheat = prDoc.anti_cheat ?? {};
@@ -646,7 +586,8 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
   // Phase 0.2: every proof field in a PR doc is self-reported, so the best a
   // doc can earn is conformance_pass. auto_merge comes only from a measured
   // causal cycle (run/verify.mjs git mode) or, from Phase 2, a notary-signed doc.
-  return {
+  // Phase 5 (Law 8): unsandboxed execution caps even that at needs_human.
+  return capUnsandboxedVerdict({
     ok: true,
     rule: "MP-000",
     violation: null,
@@ -654,18 +595,10 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     detail: "All merge-proof rules satisfied by the self-reported proof; it would auto-merge if the proof were measured.",
     flags: [],
     checks,
-  };
+  }, prDoc);
 }
 
-/**
- * Runs `scanner` over sourceCode (a string or a { file: code } record),
- * returning the first failing file description or null when clean.
- *
- * @param {string | Record<string, string> | undefined} sourceCode
- * @param {(code: string, file?: string) => { ok: boolean, details?: string[] }} scanner
- * @param {(result: object) => boolean} [isOk]
- * @returns {{ file: string, details: string[], line?: number } | null}
- */
+/** Runs `scanner` over sourceCode (a string or a { file: code } record), returning the first failing file description or null when clean. */
 function scanSources(sourceCode, scanner, isOk = (r) => r.ok) {
   if (typeof sourceCode === "string") {
     const result = scanner(sourceCode);
