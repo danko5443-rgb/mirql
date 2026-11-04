@@ -399,14 +399,15 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
 
   if (prDoc.sourceCode || prDoc.source_code) {
     const src = prDoc.sourceCode ?? prDoc.source_code;
-    const swallowScan = scanSources(src, checkSwallowedExceptions, (r) => r.ok);
+    const swallowScan = scanSources(src, (code, file) =>
+      checkSwallowedAgainstBase(code, file, assertedBase, assertedHead, repoDir));
     if (swallowScan !== null) {
       checks.anti_cheat = false;
       return fail(
         "MP-003",
         "ANTI_CHEAT_VIOLATION",
         "reject",
-        `Swallowed exception detected in ${swallowScan.file}${swallowScan.line ? ` at line ${swallowScan.line}` : ""}`,
+        `Swallowed exception detected in ${swallowScan.file}${swallowScan.line ? ` at line ${swallowScan.line}` : ""}${swallowScan.detail ? `: ${swallowScan.detail}` : ""}`,
         { checks, flags: swallowScan.details },
       );
     }
@@ -621,12 +622,57 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
   }, prDoc);
 }
 
+/**
+ * Lines of `code` the candidate changed, or null when that cannot be established.
+ * Only the caller-asserted --base/--head may answer this: SHAs in the PR document
+ * are the candidate's own claim, and claiming base == head would empty the diff.
+ * A deletion has no line of its own, so both lines around it count as changed;
+ * removing a handler can leave a catch resting on a marker nobody added to it.
+ */
+function changedLinesSinceBase(code, file, baseSha, headSha, repoDir) {
+  if (!GIT_SHA_RE.test(baseSha ?? "") || !GIT_SHA_RE.test(headSha ?? "")) return null;
+  const git = (...args) => spawnSync("git", args, { cwd: repoDir, encoding: "utf8", timeout: 10000 });
+
+  // The line numbers below describe the head blob, so they only apply to that exact text.
+  const blob = git("cat-file", "blob", `${headSha}:${file}`);
+  if (blob.status !== 0) return null;
+  const unifyEol = (text) => text.replace(/\r\n/g, "\n");
+  if (unifyEol(blob.stdout) !== unifyEol(code)) return null;
+
+  // --text and friends: a candidate's .gitattributes must not be able to turn its
+  // changes into "Binary files differ", which has no hunks and would look untouched.
+  const diff = git(
+    "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--text", "-U0",
+    "--end-of-options", `${baseSha}...${headSha}`, "--", file,
+  );
+  if (diff.status !== 0) return null;
+  const hunks = [...diff.stdout.matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)];
+  if (diff.stdout.length > 0 && hunks.length === 0) return null;
+
+  const changed = new Set();
+  for (const [, startText, countText] of hunks) {
+    const start = Number(startText);
+    const count = countText === undefined ? 1 : Number(countText);
+    if (count === 0) changed.add(start).add(start + 1);
+    for (let i = 0; i < count; i++) changed.add(start + i);
+  }
+  return changed;
+}
+
+/** MP-003 scan where a marker counts only on a catch unchanged since the asserted base. Git runs only if the strict scan fails. */
+function checkSwallowedAgainstBase(code, file, baseSha, headSha, repoDir) {
+  const strict = checkSwallowedExceptions(code, file);
+  if (strict.ok || !file) return strict;
+  const changedLines = changedLinesSinceBase(code, file, baseSha, headSha, repoDir);
+  return changedLines ? checkSwallowedExceptions(code, file, { changedLines }) : strict;
+}
+
 /** Runs `scanner` over sourceCode (a string or a { file: code } record), returning the first failing file description or null when clean. */
 function scanSources(sourceCode, scanner, isOk = (r) => r.ok) {
   if (typeof sourceCode === "string") {
     const result = scanner(sourceCode);
     if (!isOk(result)) {
-      return { file: "source", details: result.details ?? [] };
+      return { file: "source", details: result.details ?? [], detail: result.violations?.[0]?.detail };
     }
     return null;
   }
@@ -639,6 +685,7 @@ function scanSources(sourceCode, scanner, isOk = (r) => r.ok) {
           file,
           details: result.details ?? [],
           line: Array.isArray(result.violations) && result.violations[0]?.line,
+          detail: result.violations?.[0]?.detail,
         };
       }
     }

@@ -54,7 +54,7 @@ rejects any uncited delta. Schemas pinned: `event/v1`, `warrant/v1`,
 | Phase 6.1 | Canonical ledger primitives (`GENESIS_PREV_HASH`, sidecar, chain verify in core; all five writers — `log`, `run`, `queue`, `notary`, `inbox` — wired to them) | Implemented |
 | Phase 6.2 | Verified head sidecar + fail-closed pre-append verification of the whole chain (appends are O(n); `head.json` cannot vouch for earlier lines) | Implemented |
 | Phase 6.3 | Stale-lock break hardening in `packages/core/lock.mjs` (atomic rename tombstone + PID/nonce verification) | Implemented |
-| Phase 6.4 | MP-003 empty-catch cleanliness (self-check + `// mp-003-allow: <reason>` convention) | Partial — files touched by Phase 5–6 are clean; a repo-wide sweep remains |
+| Phase 6.4 | MP-003 empty-catch cleanliness (self-check + `// mp-003-allow: <reason>` convention; a marker only exempts a catch unchanged from the asserted `--base`, so a candidate cannot approve its own) | Partial — files touched by Phase 5–6 are clean; a repo-wide sweep remains, and `scripts/ci-evidence.mjs` does not yet supply `sourceCode`, so the CI gate does not run this scan |
 | Phase 6.5 | Referee path protection (`policy/paths.yaml` `humanOnly`/`humanApprove` coverage) | Implemented |
 | Phase 6.6 | MP-003/MP-005 documented as lints, optional strengthening | Partial — documented in `packages/core/anti-cheat.mjs`; strengthening open |
 | Phase 6.7 | Honest per-law/per-tool status matrix (this document) | Implemented |
