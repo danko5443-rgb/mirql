@@ -1,6 +1,6 @@
 import {verifyAuthorizedGitFixture} from "./helpers/authorized-verification.mjs";
-import { initEmptyRepo } from "./helpers/git.mjs";
-import { authorizeTestWarrant } from "./helpers/warrant.mjs";
+import { git, initEmptyRepo } from "./helpers/git.mjs";
+import { authorizeTestWarrant, dispatchableWarrant } from "./helpers/warrant.mjs";
 import { provisionTestTrust, authorizeTestKey } from "./helpers/keyring.mjs";
 import { foldEvents } from "../packages/log/index.mjs";
 import { test, describe, it, beforeEach, afterEach } from "node:test";
@@ -509,7 +509,7 @@ test("tautological test", () => {
       const kp = generateEd25519Keypair();
       authorizeTestKey(tempDir, "tool:run_supervisor", kp);
 
-      authorizeTestWarrant(tempDir, "01HWWWWWWWWWWWWWWWWWWWWWWW");
+      authorizeTestWarrant(tempDir, dispatchableWarrant("01HWWWWWWWWWWWWWWWWWWWWWWW"));
       const res = await runSupervisor({
         workspaceDir: tempDir,
         mirqlDir: tempDir,
@@ -519,14 +519,15 @@ test("tautological test", () => {
         jobId: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
         warrantId: "01HWWWWWWWWWWWWWWWWWWWWWWW",
         builderCommand: "node -v",
-        runCheck: ({ stage }) => ({ exitCode: stage === "green_on_head" ? 0 : 1 }),
       });
 
-      // 1. Outcome schema validation
+      // 1. Outcome schema validation. The accepted path is pinned against real
+      // work in tests/daemon-git-mode.test.mjs and the queue suite's H1 test.
       const validation = validateDocument("outcome", res.outcome);
       assert.equal(validation.valid, true, `Outcome document invalid: ${JSON.stringify(validation.errors)}`);
       assert.equal(res.outcome.v, 1);
-      assert.equal(res.outcome.status, "pass");
+      assert.equal(res.outcome.status, "fail");
+      assert.equal(res.rule, "NO_WORKER_CHANGES");
       // Issue #16: unmeasured telemetry is flagged, never invented — this run
       // supplied no gateway cost, so no micro_usd number may appear.
       assert.equal(res.outcome.cost.measured, 0);
@@ -607,7 +608,7 @@ test("tautological test", () => {
     it("#47: phi_before measures the pre-execution workspace, not the post-run one", async () => {
       const kp = generateEd25519Keypair();
       authorizeTestKey(tempDir, "tool:run_supervisor", kp);
-      authorizeTestWarrant(tempDir, "01JE0000000000000000000002");
+      authorizeTestWarrant(tempDir, dispatchableWarrant("01JE0000000000000000000002"));
 
       const ws = mkdtempSync(join(tmpdir(), "mirql-phi-ws-"));
       try {
@@ -623,6 +624,8 @@ for (let i = 0; i < 20; i++) s = s + '  if (a && b) { return 1; }' + nl;
 s = s + '}' + nl;
 fs.writeFileSync('added.mjs', s);
 `);
+        git(ws, "add", "-A");
+        git(ws, "commit", "-qm", "builder script");
         const phiBeforeExpected = computePhi(ws).total;
         assert.ok(Number.isSafeInteger(phiBeforeExpected));
 

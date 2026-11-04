@@ -1,4 +1,5 @@
 import { initEmptyRepo } from "./helpers/git.mjs";
+import { REPRODUCER, WRITE_FIX, initBugRepo, writeWorker } from "./helpers/bug-repo.mjs";
 import { authorizeTestWarrant } from "./helpers/warrant.mjs";
 import { provisionTestTrust, authorizeTestKey, saveTestKeyring } from "./helpers/keyring.mjs";
 import { trustFile } from "../packages/core/trust-root.mjs";
@@ -1776,6 +1777,9 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       const warrant = makeValidWarrant({
         id: ulid(1_700_001_000_000),
         semantic_fingerprint: sha256("warrant-h1-epoch-threading"),
+        evidence: { citations: 1, reproducer_test: REPRODUCER },
+        scope: { allow: ["src/**", "tests/**"] },
+        phi_budget: 10_000,
       });
       authorizeTestWarrant(tempDir, warrant);
       submitWarrant(tempDir, warrant, { repoRoot: ROOT });
@@ -1789,19 +1793,20 @@ describe("Work Package W4: mirql-queue Test Suite", () => {
       const supervisorKp = generateEd25519Keypair();
       saveTestKeyring(tempDir, { "tool:run_supervisor": supervisorKp.publicKey });
 
-      initEmptyRepo(tempDir);
+      // A real fix through the real verifier: only that can complete a job.
+      const workspace = join(tempDir, "workspace");
+      initBugRepo(workspace);
       const res = await runSupervisor({
-        workspaceDir: tempDir,
+        workspaceDir: workspace,
         mirqlDir: tempDir,
         keypair: supervisorKp,
         jobId: leased.job_id,
         warrantId: warrant.id,
         epoch: leased.epoch,
-        builderCommand: "node -v",
-        runCheck: ({ stage }) => ({ exitCode: stage === "green_on_head" ? 0 : 1 }),
+        builderCommand: writeWorker(join(tempDir, "worker.mjs"), WRITE_FIX),
       });
 
-      assert.equal(res.verified, true);
+      assert.equal(res.verified, true, JSON.stringify({ rule: res.rule, verdict: res.verdict }));
       assert.equal(res.outcome.epoch, 2);
       assert.equal(res.event.epoch, 2);
       assert.equal(res.event.payload.epoch, 2);

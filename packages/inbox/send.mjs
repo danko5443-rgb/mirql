@@ -1,4 +1,5 @@
 import { readVerifiedLedger } from "../core/ledger-verify.mjs";
+import { isReproducerPath } from "../core/warrant.mjs";
 // packages/inbox/send.mjs — Human Intent ingestion and Warrant issuance (Law 6 & Law 11).
 //
 // Remediation B1 (Law 6): the human:owner signing key is never loaded
@@ -83,6 +84,14 @@ export function sendIntent(mirqlDir, intentInput, options = {}) {
     throw error;
   }
 
+  // The daemon verifies an attempt against the reproducer the owner signed here.
+  const reproducerRaw = intentInput.reproducer_test ?? options.reproducer;
+  if (reproducerRaw !== undefined && !isReproducerPath(reproducerRaw)) {
+    const error = new Error("The reproducer must be a repository-relative path with forward slashes (--reproducer <path>)");
+    error.exitCode = EXIT_CODES.USAGE_ERROR;
+    throw error;
+  }
+
   // 0. The ledger must be initialized (first event is mirql.genesis).
   requireGenesisLedger(mirqlDir);
 
@@ -123,6 +132,7 @@ export function sendIntent(mirqlDir, intentInput, options = {}) {
     scope: anchors,
     summary,
     title,
+    ...(reproducerRaw !== undefined ? { reproducer_test: reproducerRaw } : {}),
   };
   const semanticFingerprint = sha256(jcs(intentSummary));
 
@@ -137,6 +147,7 @@ export function sendIntent(mirqlDir, intentInput, options = {}) {
       kind,
       summary,
       title,
+      ...(reproducerRaw !== undefined ? { reproducer_test: reproducerRaw } : {}),
     },
     red_check: {
       command: redCheckCmd,

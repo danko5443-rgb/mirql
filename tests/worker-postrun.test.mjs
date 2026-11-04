@@ -36,6 +36,22 @@ function denied(result, path = "policy/guard.json") {
   assert.ok(result.forbidden.includes(path));
 }
 
+const COMMIT_PROTECTED = 'import {writeFileSync} from "node:fs";import {execFileSync} from "node:child_process";writeFileSync("policy/guard.json","changed");execFileSync("git",["add","-A"]);execFileSync("git",["commit","-qm","worker"]);';
+
+test("a worker commit is measured when its refs are packed", () => {
+  denied(worker(`${COMMIT_PROTECTED}execFileSync("git",["pack-refs","--all"]);`));
+});
+
+test("a worker commit is measured in a linked worktree", () => {
+  const linked = join(policyRoot, "linked");
+  git(workspace, "worktree", "add", "-q", "-b", "linked", linked);
+  denied(worker(COMMIT_PROTECTED, { cwd: linked }));
+});
+
+test("staged content is measured through a split index", () => {
+  denied(worker('import {writeFileSync} from "node:fs";import {execFileSync} from "node:child_process";execFileSync("git",["config","core.splitIndex","true"]);writeFileSync("policy/guard.json","changed");execFileSync("git",["add","policy/guard.json"]);writeFileSync("policy/guard.json","base\\n");'));
+});
+
 test("a worker cannot omit a protected edit from its claimed file list", () => {
   const result = worker(`import {writeFileSync} from "node:fs";writeFileSync("policy/guard.json","changed");console.log("worker output");`, { modifiedFiles: [] });
   denied(result);

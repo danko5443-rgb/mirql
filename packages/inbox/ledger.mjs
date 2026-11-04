@@ -170,6 +170,7 @@ export function foldState(events) {
         seq: state.seq,
         job_id: jid || null,
         verdict: payload.verdict || payload.status || "completed",
+        ...(typeof payload.rule === "string" ? { rule: payload.rule } : {}),
         cost_micro_usd: cost,
       });
       if (state.recent_outcomes.length > 10) state.recent_outcomes.shift();
