@@ -229,6 +229,23 @@ first takes effect on the pull requests opened after it lands. A review does
 not re-trigger the check: after an AI reviewer approves, re-run the job or add a
 label to the pull request.
 
+After reviewing a pull request, the repository owner can sign off on it:
+
+```bash
+node scripts/owner-signoff.mjs <pr-number>
+```
+
+This shows the head commit and asks for a typed yes, then adds the label
+`reviewed:<head sha>`, which re-runs the gate. A new push voids the sign-off;
+after removing the label, re-run the job. The other rules still run, the verdict
+stays `needs_human` at best, and the merge stays manual. A pull request that
+changes reviewer config or agent instructions (such as `AGENTS.md`) stays red, so
+merging it is the owner's decision. The label records a review; it is not a
+signature, because GitHub cannot tell the owner from an agent using the owner's
+`gh` login. An open pull request needs `main` merged into it before its first
+sign-off after this feature lands, because the gate uses the base commit recorded
+on the pull request.
+
 
 Worker commands require a readable, committed Git baseline. After execution,
 protected-path checks use measured tree changes, staged content, untracked files

@@ -152,12 +152,23 @@ describe("mergeproof workflow: self-gate-proof structure", () => {
     assert.match(wf, /SUITE_PASS_HEAD:\s*\$\{\{ needs\.candidate-tests\.result == 'success' \}\}/);
   });
 
-  it("needs_human/conformance_pass pass only with an AI approver; everything else fails", () => {
+  it("needs_human/conformance_pass pass only with an owner sign-off or AI approver; everything else fails", () => {
     const step = stepsOf(jobBlock("notary")).find((s) => /Evaluate Mergeproof/.test(s));
     assert.ok(step, "evaluate step must exist");
     assert.match(step, /needs_human\|conformance_pass\)/);
-    assert.match(step, /if \[ -n "\$AI_APPROVER" \]/);
+    assert.match(step, /REVIEWER="\$\{OWNER_SIGNOFF:-\$AI_APPROVER\}"/);
+    assert.match(step, /if \[ -n "\$REVIEWER" \]/);
     assert.match(step, /::error::mergeproof verdict: \$verdict requires review/);
     assert.match(step, /exit 1/);
+  });
+
+  it("owner sign-off comes from the base copy of the script, checked against the repo owner and head", () => {
+    const step = stepsOf(jobBlock("notary")).find((s) => /Find Owner Sign-off/.test(s));
+    assert.ok(step, "owner sign-off step must exist");
+    assert.match(step, /node base-notary\/scripts\/ci-owner-signoff\.mjs/);
+    assert.match(step, /REPO_OWNER: \$\{\{ github\.repository_owner \}\}/);
+    assert.match(step, /HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
+    const evaluate = stepsOf(jobBlock("notary")).find((s) => /Evaluate Mergeproof/.test(s));
+    assert.match(evaluate, /OWNER_SIGNOFF: \$\{\{ steps\.owner_signoff\.outputs\.owner \}\}/);
   });
 });
