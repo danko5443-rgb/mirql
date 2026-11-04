@@ -2,6 +2,7 @@
 // the evaluator cap it relies on (needs_human at best, other rules still run).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -137,6 +138,80 @@ describe("owner sign-off: evaluator cap", () => {
     );
     assert.equal(res.verdict, "reject");
     assert.equal(res.violation, "TOUCH_HUMAN_ONLY");
+  });
+});
+
+describe("owner sign-off: Phi growth (Law 13)", () => {
+  const grow = (overrides = {}) => ({
+    schema: "outcome/v1",
+    pr: { number: 1, author: "ahmed-3m", kind: "bugfix" },
+    diff_stat: { files_changed: ["packages/run/journey.mjs"] },
+    proof: { causal_cycle_completed: true },
+    evidence: { forbidden_paths_touched: [], tests_deleted: [] },
+    anti_cheat: { violations_count: 0, flags: [] },
+    phi: { phi_base: 10, phi_head: 51, delta_phi: 41 },
+    surface: { uncited_commands: [], delta_count: 0 },
+    ...overrides,
+  });
+  const check = (d, opts = {}) => evaluatePullRequest(d, { rootDir: ROOT, ...opts });
+  const signed = { ownerSignoff: "ahmed-3m" };
+
+  it("stays rejected with no sign-off and with only an AI approval", () => {
+    for (const opts of [{}, { humanOnlyReviewer: "coderabbitai[bot]" }]) {
+      const res = check(grow(), opts);
+      assert.equal(res.verdict, "reject");
+      assert.equal(res.violation, "PHI_INCREASE");
+    }
+  });
+
+  it("clears to needs_human with the owner's sign-off, never better", () => {
+    const res = check(grow(), signed);
+    assert.equal(res.verdict, "needs_human");
+    assert.equal(res.rule, "LAW_13");
+    assert.equal(res.violation, "PHI_INCREASE");
+    assert.equal(res.owner_signoff, "ahmed-3m");
+    assert.equal(res.checks.phi, false);
+  });
+
+  it("still reports humanOnly paths when a signed-off PR also touches them", () => {
+    const res = check(grow({ diff_stat: { files_changed: ["scripts/run-tests.mjs"] } }), { ...signed, humanOnlyReviewer: "ahmed-3m" });
+    assert.equal(res.verdict, "needs_human");
+    assert.equal(res.rule, "LAW_13");
+    assert.deepEqual(res.forbidden_paths, ["scripts/run-tests.mjs"]);
+  });
+
+  it("still applies the proof rules", () => {
+    const suite = check(grow({ proof: { suite_pass_base: true, suite_pass_head: true } }), signed);
+    assert.equal(suite.verdict, "needs_human");
+    assert.equal(suite.rule, "LAW_16");
+    assert.match(suite.detail, /\+41/);
+    const none = check(grow({ proof: {} }), signed);
+    assert.equal(none.verdict, "reject");
+    assert.equal(none.violation, "MISSING_PROOF");
+  });
+
+  it("does not excuse a refactor that grows Phi", () => {
+    const res = check(grow({ pr: { number: 1, author: "ahmed-3m", kind: "refactor" } }), signed);
+    assert.equal(res.verdict, "reject");
+    assert.equal(res.violation, "PHI_INCREASE");
+  });
+
+  it("does not excuse a deleted test, reviewer config or a malformed login", () => {
+    const deleted = check(grow({ evidence: { forbidden_paths_touched: [], tests_deleted: ["tests/a.test.mjs"] } }), signed);
+    assert.equal(deleted.violation, "TEST_DELETED");
+    const config = check(grow({ diff_stat: { files_changed: ["AGENTS.md"] } }), { ...signed, humanOnlyReviewer: "ahmed-3m" });
+    assert.equal(config.verdict, "reject");
+    assert.equal(check(grow(), { ownerSignoff: "--output=x" }).verdict, "reject");
+  });
+
+  it("m check --owner-signoff reaches the evaluator and never exits 0", () => {
+    const res = spawnSync(
+      process.execPath,
+      [join(ROOT, "bin", "mirql.mjs"), "m", "check", "--pr", JSON.stringify(grow()), "--owner-signoff", "ahmed-3m"],
+      { cwd: ROOT, encoding: "utf8" },
+    );
+    assert.equal(JSON.parse(res.stdout.trim().split(/\r?\n/).pop()).verdict, "needs_human");
+    assert.notEqual(res.status, 0);
   });
 });
 

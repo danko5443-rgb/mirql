@@ -235,6 +235,10 @@ jobs:
           else
             echo "::notice::To sign off after reviewing, the repo owner runs scripts/owner-signoff.mjs with PR number $PR_NUMBER"
           fi
+          # Only the owner's sign-off can clear Phi growth; an AI approval cannot.
+          if [ -n "$OWNER_SIGNOFF" ]; then
+            reviewer_args+=(--owner-signoff "$OWNER_SIGNOFF")
+          fi
           set +e
           node bin/mirql.mjs m check \
             --pr "$PR_DOC" \

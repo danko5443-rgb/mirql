@@ -4,7 +4,8 @@
 // The owner signs off by adding the label `reviewed:<full head sha>`. CI then
 // runs every other merge-proof rule, capped at needs_human, exactly as it does
 // for an aiReviewers approval: the rules can still reject, and the verdict can
-// never become auto_merge.
+// never become auto_merge. Unlike an aiReviewers approval, it can also clear
+// Phi growth (Law 13); it grants no warrant allowance.
 //
 // A sign-off counts only when all of these hold:
 //   - the label names the exact head commit (a new push voids it)

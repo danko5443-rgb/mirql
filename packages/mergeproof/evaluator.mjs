@@ -310,6 +310,9 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
   // config, so its approval cannot clear MP-001; a human must merge it.
   const touchesReviewerConfig = filesChanged.some(isReviewerConfigPath);
   const humanOnlyReviewer = touchesReviewerConfig ? null : validReviewerLogin(options.humanOnlyReviewer);
+  // Only the repo owner's sign-off can let Phi growth continue (Law 13); an AI
+  // approval arrives as humanOnlyReviewer alone and never has this effect.
+  const ownerSignoff = touchesReviewerConfig ? null : validReviewerLogin(options.ownerSignoff);
   if (forbidden.length > 0) {
     checks.human_only = false;
   }
@@ -512,13 +515,17 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     );
   }
 
+  // Refactors and consolidations must shrink Phi whoever signs off.
+  const phiGrowthSignedOff = deltaPhi > 0 && ownerSignoff !== null && !isConsolidation;
   if (deltaPhi > 0) {
     checks.phi = false;
+  }
+  if (deltaPhi > 0 && !phiGrowthSignedOff) {
     return fail(
       "LAW_13",
       "PHI_INCREASE",
       "reject",
-      `Law 13 invariant violation: complexity potential increased (delta_phi = +${deltaPhi} > 0). The notary sees no signed warrant, so the authorized allowance is 0; a human must decide this merge.`,
+      `Law 13 invariant violation: complexity potential increased (delta_phi = +${deltaPhi} > 0). The notary sees no signed warrant, so the authorized allowance is 0; a human must decide this merge (the repo owner's reviewed:<head sha> label can clear this, capped at needs_human).`,
       { checks, delta_phi: deltaPhi },
     );
   }
@@ -568,8 +575,24 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
       "LAW_16",
       "NO_CAUSAL_PROOF",
       "needs_human",
-      "Suite passes on base and head, but no causal proof (red-green-re-red) was measured; human review required.",
+      "Suite passes on base and head, but no causal proof (red-green-re-red) was measured; human review required." +
+        (phiGrowthSignedOff ? ` Phi also grew by +${deltaPhi} under the owner's sign-off.` : ""),
       { checks },
+    );
+  }
+
+  if (phiGrowthSignedOff) {
+    return fail(
+      "LAW_13",
+      "PHI_INCREASE",
+      "needs_human",
+      `Phi grew by +${deltaPhi} and the repo owner signed off as ${ownerSignoff}; no warrant allowance was granted; merge is manual, never auto_merge.`,
+      {
+        checks,
+        delta_phi: deltaPhi,
+        owner_signoff: ownerSignoff,
+        ...(forbidden.length > 0 ? { forbidden_paths: forbidden, human_only_reviewer: humanOnlyReviewer } : {}),
+      },
     );
   }
 

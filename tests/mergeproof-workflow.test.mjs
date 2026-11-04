@@ -171,5 +171,7 @@ describe("mergeproof workflow: self-gate-proof structure", () => {
     assert.match(step, /HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
     const evaluate = stepsOf(jobBlock("notary")).find((s) => /Evaluate Mergeproof/.test(s));
     assert.match(evaluate, /OWNER_SIGNOFF: \$\{\{ steps\.owner_signoff\.outputs\.owner \}\}/);
+    assert.match(evaluate, /if \[ -n "\$OWNER_SIGNOFF" \]; then\s+reviewer_args\+=\(--owner-signoff "\$OWNER_SIGNOFF"\)/);
+    assert.doesNotMatch(evaluate, /--owner-signoff "\$(REVIEWER|AI_APPROVER)"/);
   });
 });

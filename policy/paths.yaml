@@ -11,7 +11,8 @@
 #   after it fired is no longer visible to CI. Remove a login from this list to require a human again.
 # Owner sign-off: the repository owner's `reviewed:<head sha>` label clears MP-001 and MP-005 in CI on the same terms
 #   and with the same reviewer-config exception (scripts/ci-owner-signoff.mjs). It is not a signature: an agent running
-#   under the owner's `gh` login can add it too.
+#   under the owner's `gh` login can add it too. Unlike an AI approval, it also clears Phi growth (Law 13 PHI_INCREASE),
+#   capped at needs_human; it grants no warrant allowance, and refactors must still shrink Phi.
 
 humanOnly:
   - "CONSTITUTION.md"

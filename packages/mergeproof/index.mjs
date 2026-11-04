@@ -5,6 +5,7 @@
 //   mirql m check [--pr <path|json>] [--base <sha>] [--head <sha>]
 //                 [--dir <mirqlDir>] [--key <notaryKeyPath>] [--sign]
 //                 [--surface] [--workspace <dir>] [--human-only-reviewer <login>]
+//                 [--owner-signoff <login>]
 //
 // - `--pr` accepts a fixture file path or inline JSON; without it the PR
 //   document is read from stdin.
@@ -16,6 +17,8 @@
 // - `--human-only-reviewer` names the aiReviewers account CI found approving
 //   the head commit. It lets a humanOnly PR run the remaining rules, capped at
 //   needs_human; it can never produce auto_merge.
+// - `--owner-signoff` names the repo owner CI found signing off the head commit.
+//   It lets a PR that grows Phi run the remaining rules, capped at needs_human.
 // - `--sign` signs the verdict with the notary key and appends the
 //   verdict.issued / verdict.rejected / verdict.needs_human event to
 //   <mirqlDir>/ledger/events.jsonl (writer ns `notary:mergeproof`).
@@ -291,6 +294,9 @@ function cliCheck(flags) {
   }
   if (typeof flags["human-only-reviewer"] === "string" && flags["human-only-reviewer"].length > 0) {
     options.humanOnlyReviewer = flags["human-only-reviewer"];
+  }
+  if (typeof flags["owner-signoff"] === "string" && flags["owner-signoff"].length > 0) {
+    options.ownerSignoff = flags["owner-signoff"];
   }
   // Law 3 & 6: Affirmative human sign-off cannot be claimed via raw CLI flag.
   // It must come from an external verified signed event or verified programmatic caller.
