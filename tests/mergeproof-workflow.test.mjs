@@ -13,7 +13,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const wf = readFileSync(join(ROOT, ".github", "workflows", "mergeproof.yml"), "utf8");
+// Normalized because Git for Windows checks this file out with CRLF by default.
+const wf = readFileSync(join(ROOT, ".github", "workflows", "mergeproof.yml"), "utf8").replace(/\r\n/g, "\n");
 
 const JOBS = ["candidate-tests", "base-suite", "notary"];
 

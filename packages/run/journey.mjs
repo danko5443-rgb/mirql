@@ -106,6 +106,11 @@ export function executeCli(args, ctx = {}) {
     COMSPEC: process.env.COMSPEC,
     TEMP: process.env.TEMP,
     TMP: process.env.TMP,
+    // Without these, homedir() falls back to the OS account's profile and the
+    // child mints its key under the real ~/.mirql-trust, whatever the caller set.
+    HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
+    MIRQL_TRUST_ROOT: process.env.MIRQL_TRUST_ROOT,
     NODE_ENV: process.env.NODE_ENV || "test",
     // Each journey mints a throwaway owner key in its own sandbox; it guards nothing.
     MIRQL_ALLOW_PLAINTEXT_OWNER_KEY: "1",
