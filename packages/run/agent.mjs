@@ -1,6 +1,6 @@
 import { captureWorkerBase, measureWorkerChanges } from "./worker-diff.mjs";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { EXIT_CODES } from "../core/index.mjs";
@@ -47,6 +47,69 @@ export function buildContainerArgs({ runtime, image, workdir, command, env = {} 
   return ["run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges:true", "--user", "65534:65534", "-v", `${workdir}:/workspace:rw`,
     "-w", "/workspace", ...envFlags, image, "sh", "-c", command];
+}
+
+/** Every character cmd.exe can act on outside quotes. */
+const CMD_METACHARS = /([()\][%!^"`<>&|;, *?])/g;
+
+/**
+ * Build the command line for `cmd.exe /d /s /c "<line>"` that runs batch file
+ * `file` with exactly `args`. Each argument is quoted for CommandLineToArgvW,
+ * then every metacharacter (quotes included, so cmd.exe never enters quote mode)
+ * is caret-escaped twice: cmd.exe parses the line once, and the batch file parses
+ * it again when it expands `%*`. The batch path is only parsed once.
+ */
+export function windowsCmdLine(file, args) {
+  const quoted = args.map((arg) => `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, "$1$1")}"`);
+  return [file.replace(CMD_METACHARS, "^$1"), ...quoted.map((arg) => arg.replace(CMD_METACHARS, "^^^$1"))].join(" ");
+}
+
+/**
+ * Find `runtime` on the worker PATH (same key Node's spawn would use on Windows).
+ * Only absolute entries count: neither cmd.exe's nor libuv's search of the
+ * current directory may ever pick up a file from the staged workspace.
+ */
+function findWindowsRuntime(runtime, env) {
+  const pathKey = Object.keys(env).sort().find((key) => key.toUpperCase() === "PATH");
+  const searchPath = pathKey ? env[pathKey] : process.env.PATH ?? "";
+  for (const entry of searchPath.split(";")) {
+    const dir = entry.trim().replace(/^"(.*)"$/, "$1");
+    if (!isAbsolute(dir)) continue;
+    for (const ext of [".exe", ".cmd", ".bat"]) {
+      const candidate = join(dir, runtime + ext);
+      if (statSync(candidate, { throwIfNoEntry: false })?.isFile()) return candidate;
+    }
+  }
+  return null;
+}
+
+/**
+ * Launch the container runtime without a host shell ever interpreting `args`
+ * (Law 8). Windows `.exe` runtimes and all POSIX runtimes get a plain argv spawn.
+ * Windows batch runtimes can only run through cmd.exe, so they get a fully escaped
+ * line, and arguments no escape can protect (line breaks end a cmd.exe line) are
+ * refused. Failures take the shape of a spawn error so callers fail closed.
+ */
+function spawnRuntime(runtime, args, options) {
+  if (process.platform !== "win32") return spawnSync(runtime, args, options);
+  const refused = (message) => ({ error: new Error(message), status: null, signal: null, stdout: "", stderr: "" });
+
+  let file;
+  try {
+    file = findWindowsRuntime(runtime, options.env);
+  } catch (error) {
+    return refused(`sandbox runtime ${JSON.stringify(runtime)} lookup failed: ${error.message}`);
+  }
+  if (!file) return refused(`sandbox runtime ${JSON.stringify(runtime)} not found on PATH`);
+  if (/\.exe$/i.test(file)) return spawnSync(file, args, options);
+
+  if (args.some((arg) => /[\x00-\x08\x0A-\x1F]/.test(arg))) {
+    return refused(`sandbox runtime ${file} is a batch file, which cannot safely receive control characters or line breaks`);
+  }
+  const comspec = isAbsolute(process.env.ComSpec ?? "") ? process.env.ComSpec
+    : join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe");
+  return spawnSync(comspec, ["/d", "/s", "/v:off", "/c", `"${windowsCmdLine(file, args)}"`],
+    { ...options, windowsVerbatimArguments: true });
 }
 
 /** Normalize a spawn status to an integer exit code; a signal never reports 0. */
@@ -125,14 +188,16 @@ export function runAgent(options = {}) {
           return denial(workerResult(false, EXIT_CODES.POLICY_DENIAL, {}, stripped, sandboxMode), error);
         }
         // UID 65534 is not the host user, so its output must stay readable and
-        // removable by the host. Windows shell:true joins argv unquoted, so this
-        // string would split there; Docker Desktop does not enforce mount UIDs anyway.
+        // removable by the host. Docker Desktop does not enforce mount UIDs, so Windows
+        // hosts do not need the prefix.
         const command = process.platform === "win32" ? options.command : `umask 000; ${options.command}`;
         const args = buildContainerArgs({ runtime: sandboxMode,
           image: typeof options.image === "string" && options.image.length > 0 ? options.image : DEFAULT_SANDBOX_IMAGE,
           workdir: stagingDir, command, env: { PATH: workerEnv.PATH ?? process.env.PATH ?? "" } });
-        const res = spawnSync(sandboxMode, args, { cwd: stagingDir, env: workerEnv,
-          timeout: options.timeout_ms ?? 30000, encoding: "utf8", windowsHide: true, shell: process.platform === "win32" });
+        // cwd stays outside the staged workspace: the runtime only needs the absolute
+        // mount path, and on Windows the current directory is searched for executables.
+        const res = spawnRuntime(sandboxMode, args, { cwd: workerHome, env: workerEnv,
+          timeout: options.timeout_ms ?? 30000, encoding: "utf8", windowsHide: true });
 
         if (res.error || runtimeLaunchFailed(res)) {
           return { ...workerResult(false, EXIT_CODES.POLICY_DENIAL, res, stripped, sandboxMode),
