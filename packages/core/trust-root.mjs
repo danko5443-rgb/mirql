@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { createHash } from "node:crypto";
 
 function canonicalPath(value) {
@@ -47,6 +47,27 @@ export function assertExternalTrustPath(path, workspaceDir) {
   return target;
 }
 
+/**
+ * `node --test` sets NODE_TEST_CONTEXT in every test process, so a test run
+ * started without the suite runner cannot reach the operator's trust root. The
+ * account home comes from the OS, because a faked HOME or USERPROFILE is exactly
+ * how a test legitimately points homedir() somewhere disposable.
+ */
+export function refuseOperatorTrustInTests(path, options = {}) {
+  if ((options.env ?? process.env).NODE_TEST_CONTEXT === undefined) return;
+  let accountHome = options.accountHome;
+  if (accountHome === undefined) {
+    try {
+      accountHome = userInfo().homedir;
+    } catch {
+      return; // An account with no home entry has no operator trust root to protect.
+    }
+  }
+  if (isWithin(canonicalPath(join(accountHome, ".mirql-trust")), canonicalPath(path))) {
+    throw new Error("UNSAFE_TRUST_ROOT: a test run reached the operator's trust root; use npm test, or set MIRQL_TRUST_ROOT to a temporary directory");
+  }
+}
+
 /** Credentials are per ledger, with a root supplied by the operator. */
 export function resolveTrustRoot(mirqlDir, options = {}) {
   const ledger = canonicalPath(mirqlDir);
@@ -54,6 +75,7 @@ export function resolveTrustRoot(mirqlDir, options = {}) {
   const id = createHash("sha256").update(ledger).digest("hex");
   const base = options.trustRoot ?? process.env.MIRQL_TRUST_ROOT
     ?? join(homedir(), ".mirql-trust");
+  refuseOperatorTrustInTests(base);
   const parent = assertExternalTrustPath(base, workspace);
   const candidate = join(parent, id);
   let linked = false;

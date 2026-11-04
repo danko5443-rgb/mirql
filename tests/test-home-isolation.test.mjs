@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { refuseOperatorTrustInTests } from "../packages/core/trust-root.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const RUNNER = join(ROOT, "scripts", "run-tests.mjs");
@@ -132,6 +133,100 @@ describe("test runner isolation", () => {
     assert.notEqual(failed.status, 0);
     assert.match(failed.stdout + failed.stderr, /ISOLATION_FAIL_MARKER/);
     assert.equal(existsSync(JSON.parse(readFileSync(report, "utf8")).home), false);
+  });
+
+  // Run through a real `node --test` so a change to what that flag sets fails
+  // here. resolveTrustRoot only computes a path, so this creates nothing even if
+  // the refusal regresses.
+  it("a direct node --test run is refused the account's own trust root", () => {
+    const refused = join(fixture, "tests", "refused.test.mjs");
+    writeFileSync(refused, `
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir, userInfo } from "node:os";
+import { join } from "node:path";
+import { resolveTrustRoot } from ${JSON.stringify(TRUST_ROOT_MODULE)};
+
+test("refused", () => {
+  process.env.HOME = process.env.USERPROFILE = userInfo().homedir;
+  delete process.env.MIRQL_TRUST_ROOT;
+  const ledger = join(mkdtempSync(join(tmpdir(), "mirql-isolation-ledger-")), ".mirql");
+  assert.throws(() => resolveTrustRoot(ledger), /operator's trust root/);
+});
+`);
+    const res = spawnSync(process.execPath, ["--test", refused], {
+      cwd: fixture,
+      encoding: "utf8",
+      timeout: 120000,
+      env: ambientEnv(),
+    });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+  });
+
+  it("the refusal covers only the account's trust root, and only in a test process", () => {
+    const options = { env: { NODE_TEST_CONTEXT: "child-v8" }, accountHome: fakeHome };
+    assert.throws(() => refuseOperatorTrustInTests(fakeHomeTrust, options), /operator's trust root/);
+    assert.throws(() => refuseOperatorTrustInTests(join(fakeHomeTrust, "nested"), options), /operator's trust root/);
+    // Elsewhere under the home stays open: the OS temp directory often lives there.
+    refuseOperatorTrustInTests(join(fakeHome, "AppData", "Temp", "trust"), options);
+    refuseOperatorTrustInTests(fakeAmbientTrust, options);
+    refuseOperatorTrustInTests(fakeHomeTrust, { env: {}, accountHome: fakeHome });
+  });
+
+  it("journey CLI children use the journey's home over the caller's", () => {
+    mkdirSync(join(fixture, "bin"));
+    writeFileSync(
+      join(fixture, "bin", "mirql.mjs"),
+      'import { homedir } from "node:os";\nconsole.log(JSON.stringify({ home: homedir(), trustRoot: process.env.MIRQL_TRUST_ROOT }));\n',
+    );
+    const homeDir = join(sandbox, "journey-home");
+    const script = `
+      import { executeCli } from ${JSON.stringify(pathToFileURL(join(ROOT, "packages", "run", "journey.mjs")).href)};
+      console.log(JSON.stringify(executeCli([], { repoRoot: ${JSON.stringify(fixture)}, homeDir: ${JSON.stringify(homeDir)} }).parsed));
+    `;
+    const res = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      encoding: "utf8",
+      timeout: 120000,
+      env: ambientEnv({ MIRQL_TRUST_ROOT: fakeAmbientTrust }),
+    });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.deepEqual(JSON.parse(res.stdout), { home: homeDir, trustRoot: join(homeDir, ".mirql-trust") });
+  });
+
+  // The real CLI, so genesis really mints keys. TEMP points into the sandbox to
+  // show where they went and that nothing outlives the journey.
+  function runJourneyCli(...flags) {
+    const temp = join(sandbox, "temp");
+    mkdirSync(temp, { recursive: true });
+    const res = spawnSync(process.execPath, [
+      join(ROOT, "bin", "mirql.mjs"), "r", "journey", "--scenario", "init-to-merge", "--json", ...flags,
+    ], {
+      cwd: ROOT,
+      encoding: "utf8",
+      timeout: 120000,
+      env: ambientEnv({ MIRQL_TRUST_ROOT: fakeAmbientTrust, TEMP: temp, TMP: temp, TMPDIR: temp }),
+    });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.equal(JSON.parse(res.stdout).ok, true, res.stdout);
+    return temp;
+  }
+
+  it("mirql r journey leaves the caller's home and trust root untouched and cleans up", () => {
+    const homeBefore = countDirs(fakeHomeTrust);
+    const ambientBefore = countDirs(fakeAmbientTrust);
+    const temp = runJourneyCli();
+    assert.equal(countDirs(fakeHomeTrust), homeBefore);
+    assert.equal(countDirs(fakeAmbientTrust), ambientBefore);
+    assert.deepEqual(readdirSync(temp).filter((name) => name.startsWith("mirql-journey-")), []);
+  });
+
+  it("a journey's keys are minted under its throwaway home, outside its sandbox", () => {
+    const temp = runJourneyCli("--keep-sandbox");
+    const kept = readdirSync(temp).filter((name) => name.startsWith("mirql-journey-"));
+    assert.equal(kept.length, 1);
+    assert.equal(countDirs(join(temp, kept[0], "home", ".mirql-trust")), 1);
+    assert.equal(existsSync(join(temp, kept[0], "sandbox", ".mirql-trust")), false);
   });
 
   // executeCli builds its child's env from scratch, so a dropped variable sends

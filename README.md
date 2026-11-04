@@ -135,6 +135,10 @@ Set MIRQL_TRUST_ROOT to an operator-controlled directory, or use the default
 of its canonical absolute metadata path. Workspaces and Git worktrees are rejected
 as credential locations, including paths redirected through symlinks.
 
+Test processes started by `node --test` are refused the account's own
+~/.mirql-trust. `npm test` gives each run a throwaway home and trust root. To run
+one file directly, set MIRQL_TRUST_ROOT to a temporary directory first.
+
 The workspace keeps its event log and runtime state. Workspace keyrings are ignored.
 Existing ledgers with a workspace keyring are refused with TRUST_MIGRATION_REQUIRED
 and the destination path until credentials have been moved.
