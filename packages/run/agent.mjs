@@ -6,57 +6,24 @@ import { spawnSync } from "node:child_process";
 import { EXIT_CODES } from "../core/index.mjs";
 import { checkHumanOnlyPaths, loadHumanOnlyPatterns } from "./anti-cheat.mjs";
 
-/**
- * Strict safe allowlist for environment variables passed to unprivileged agents.
- * Matching is performed case-insensitively.
- */
+/** Strict safe allowlist for environment variables passed to unprivileged agents (case-insensitive). */
 export const SAFE_ENV_ALLOWLIST = Object.freeze([
-  "PATH",
-  "PATHEXT",
-  "SYSTEMROOT",
-  "SYSTEMDRIVE",
-  "TEMP",
-  "TMP",
-  "USERPROFILE",
-  "HOME",
-  "NODE_ENV",
+  "PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "TEMP", "TMP", "USERPROFILE", "HOME", "NODE_ENV",
 ]);
 
-/**
- * Sanitizes the environment by retaining ONLY explicitly allowlisted variables.
- * Matching is case-insensitive.
- *
- * @param {Record<string, string | undefined>} [env=process.env]
- * @param {string[]} [extraAllowed=[]]
- * @returns {{ env: Record<string, string>, stripped: string[] }}
- */
+/** Sanitizes the environment by retaining ONLY explicitly allowlisted variables (case-insensitive). */
 export function sanitizeAgentEnv(env = process.env, extraAllowed = []) {
-  const clean = {};
-  const stripped = [];
-  const allowedSet = new Set([
-    ...SAFE_ENV_ALLOWLIST,
-    ...extraAllowed.map((k) => k.toUpperCase()),
-  ]);
-
+  const clean = {}, stripped = [];
+  const allowedSet = new Set([...SAFE_ENV_ALLOWLIST, ...extraAllowed.map((k) => k.toUpperCase())]);
   for (const [key, val] of Object.entries(env)) {
     if (val === undefined) continue;
-    if (allowedSet.has(key.toUpperCase())) {
-      clean[key] = String(val);
-    } else {
-      stripped.push(key);
-    }
+    if (allowedSet.has(key.toUpperCase())) clean[key] = String(val);
+    else stripped.push(key);
   }
-
-  // Ensure critical OS variables on Windows so child processes can spawn
   if (process.platform === "win32") {
-    if (!clean.SystemRoot && process.env.SystemRoot) {
-      clean.SystemRoot = process.env.SystemRoot;
-    }
-    if (!clean.SYSTEMDRIVE && process.env.SYSTEMDRIVE) {
-      clean.SYSTEMDRIVE = process.env.SYSTEMDRIVE;
-    }
+    if (!clean.SystemRoot && process.env.SystemRoot) clean.SystemRoot = process.env.SystemRoot;
+    if (!clean.SYSTEMDRIVE && process.env.SYSTEMDRIVE) clean.SYSTEMDRIVE = process.env.SYSTEMDRIVE;
   }
-
   return { env: clean, stripped };
 }
 
@@ -74,12 +41,7 @@ function runtimeLaunchFailed(res) {
     (typeof res.stderr === "string" && /is not recognized as an internal or external command|command not found|not found/i.test(res.stderr));
 }
 
-/**
- * Build the hardened container CLI argument vector for a sandboxed agent run
- * (Law 8: Speechless Sandboxes — no network, read-only root, tmpfs /tmp,
- * dropped capabilities, no privilege escalation, unprivileged UID 65534, the
- * staged workspace mounted read-write as the only writable surface).
- */
+/** Build the hardened container CLI argument vector for a sandboxed agent run (Law 8: Speechless Sandboxes). */
 export function buildContainerArgs({ runtime, image, workdir, command, env = {} } = {}) {
   void runtime; // the runtime selects the binary; the flags are runtime-neutral
   const envFlags = Object.entries(env).flatMap(([key, value]) => ["--env", `${key}=${value}`]);
@@ -112,31 +74,24 @@ function stagedFileMode(mode) {
   return (mode & 0o111) !== 0 ? 0o777 : 0o666;
 }
 
-/**
- * Stage tracked/working files of `cwd` into `stagingDir` (never `.git`/`.mirql`/`node_modules`),
- * with modes the unprivileged container user can read and write. Returns the
- * staged relative file paths (normalized with `/`) so sync-back can
- * distinguish worker deletions from untouched files.
- */
+/** Stage tracked/working files of `cwd` into `stagingDir` (never `.git`/`.mirql`/`node_modules`), returning Map<rel, origMode>. */
 function stageWorkspace(cwd, stagingDir) {
   chmodSync(stagingDir, 0o777);
-  const staged = new Set();
+  const staged = new Map();
   const stageFile = (rel) => {
-    const to = join(stagingDir, rel);
+    const to = join(stagingDir, rel), origMode = statSync(join(cwd, rel)).mode & 0o777;
     mkdirsWritable(dirname(to), stagingDir);
     cpSync(join(cwd, rel), to, { force: true });
-    chmodSync(to, stagedFileMode(statSync(join(cwd, rel)).mode));
-    staged.add(rel.split(/[\\/]/).join("/"));
+    chmodSync(to, stagedFileMode(origMode));
+    staged.set(rel.split(/[\\/]/).join("/"), origMode);
   };
   const listed = spawnSync("git", ["--no-replace-objects", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
     { cwd, encoding: "utf8", timeout: 10000, windowsHide: true });
   if (listed.error || listed.status !== 0) {
-    // Not a git repository: stage every working file except the excluded dirs.
     const walk = (dir, prefix) => {
       for (const entry of readdirSync(dir)) {
         if (STAGING_SKIP.has(entry)) continue;
-        const full = join(dir, entry);
-        const rel = prefix ? `${prefix}/${entry}` : entry;
+        const full = join(dir, entry), rel = prefix ? `${prefix}/${entry}` : entry;
         if (statSync(full).isDirectory()) { mkdirsWritable(join(stagingDir, rel), stagingDir); walk(full, rel); }
         else stageFile(rel);
       }
@@ -155,8 +110,7 @@ function stageWorkspace(cwd, stagingDir) {
 /** Any symlink anywhere under `dir` is a sandbox escape attempt; throw before a single byte is copied back. */
 function assertNoSymlinks(dir) {
   for (const entry of readdirSync(dir)) {
-    const path = join(dir, entry);
-    const info = lstatSync(path);
+    const path = join(dir, entry), info = lstatSync(path);
     if (info.isSymbolicLink()) {
       const error = new Error(`sandbox created a symlink escaping the staged workspace: ${path}`);
       error.code = "SYMLINK_ESCAPE";
@@ -166,16 +120,14 @@ function assertNoSymlinks(dir) {
   }
 }
 
-/**
- * Copy container edits from `stagingDir` back into `cwd` (never `.git`/`.mirql`).
- * Refuses symlinks up front (SYMLINK_ESCAPE, nothing copied), then propagates
- * worker deletions: a staged file the container removed disappears from `cwd`.
- */
+/** Copy container edits back into `cwd` (never `.git`/`.mirql`), refusing symlinks, propagating deletions, and restoring untouched host file modes. */
 function syncBackWorkspace(stagingDir, cwd, stagedFiles) {
   assertNoSymlinks(stagingDir);
   copyTree(stagingDir, cwd, new Set([".git", ".mirql"]));
-  for (const rel of stagedFiles) {
-    if (!existsSync(join(stagingDir, rel))) rmSync(join(cwd, rel), { force: true });
+  for (const [rel, origMode] of stagedFiles) {
+    const stagedPath = join(stagingDir, rel);
+    if (!existsSync(stagedPath)) rmSync(join(cwd, rel), { force: true });
+    else if ((statSync(stagedPath).mode & 0o777) === stagedFileMode(origMode)) chmodSync(join(cwd, rel), origMode);
   }
 }
 
@@ -203,27 +155,12 @@ function postRunGate(baseline, patterns, base, exitCode) {
   }
 }
 
-/**
- * Runs an unprivileged agent worker task.
- *
- * @param {object} options
- * @param {string} [options.command] - shell command to execute
- * @param {string[]} [options.modifiedFiles] - paths touched by the agent (checked against humanOnly)
- * @param {Record<string, string>} [options.env] - environment
- * @param {string[]} [options.allowedEnv] - extra permitted environment variables
- * @param {string} [options.cwd] - working directory
- * @param {number} [options.timeout_ms=30000] - timeout limit
- * @param {"none" | "docker" | "podman"} [options.sandbox="none"] - Law 8 isolation mode
- * @param {string} [options.image] - container image used by sandboxed runs
- * @returns {{ exitCode: number, ok: boolean, sandbox: string, stdout?: string, stderr?: string, strippedEnv: string[], violation?: string, signal?: string | null }}
- */
+/** Runs an unprivileged agent worker task (host or Law 8 container sandbox). */
 export function runAgent(options = {}) {
   const sandboxMode = options.sandbox === "docker" || options.sandbox === "podman" ? options.sandbox : "none";
   const { env: cleanEnv, stripped } = sanitizeAgentEnv(options.env ?? process.env, options.allowedEnv ?? []);
-
   const hasCommand = typeof options.command === "string" && options.command.length > 0;
-  let baseline;
-  let patterns;
+  let baseline, patterns;
   if (hasCommand) {
     try {
       baseline = captureWorkerBase(options.cwd ?? process.cwd());
@@ -234,7 +171,6 @@ export function runAgent(options = {}) {
     }
   }
 
-  // Policy check: agents are strictly forbidden from touching humanOnly paths (MP-001)
   if (Array.isArray(options.modifiedFiles) && options.modifiedFiles.length > 0) {
     const check = checkHumanOnlyPaths(options.modifiedFiles, patterns);
     if (!check.ok) {
@@ -243,7 +179,6 @@ export function runAgent(options = {}) {
     }
   }
 
-  // If a command is specified, spawn it in the sanitized worker environment
   if (hasCommand) {
     const workerHome = mkdtempSync(join(tmpdir(), "mirql-agent-home-"));
     for (const key of Object.keys(cleanEnv)) {
@@ -256,9 +191,6 @@ export function runAgent(options = {}) {
       if (match) { workerEnv.HOMEDRIVE = match[1]; workerEnv.HOMEPATH = match[2]; }
     }
 
-    // Law 8: container-isolated execution. The workspace is staged outside
-    // .mirql/.git, the container runs hardened (see buildContainerArgs), and
-    // only successful container edits are synced back before the post-run gate.
     if (sandboxMode !== "none") {
       const workspace = resolve(options.cwd ?? process.cwd());
       const stagingDir = mkdtempSync(join(tmpdir(), "mirql-sandbox-stage-"));
@@ -281,12 +213,9 @@ export function runAgent(options = {}) {
         const base = workerResult(exitCode === 0 && !res.signal, exitCode, res, stripped, sandboxMode);
         if (exitCode !== 0) return base;
         try {
-          // Container succeeded: sync edits/deletions back (never .git/.mirql)
-          // before post-run change measurement (MP-001 post-run gate).
           syncBackWorkspace(stagingDir, workspace, stagedFiles);
         } catch (error) {
           if (error.code === "SYMLINK_ESCAPE") {
-            // Fail closed without copying anything into the workspace.
             return { ...base, ok: false, exitCode: EXIT_CODES.POLICY_DENIAL,
               violation: "TOUCH_HUMAN_ONLY", rule: "MP-001", detail: error.message };
           }
@@ -303,25 +232,17 @@ export function runAgent(options = {}) {
       }
     }
 
-    let res;
-    let cleanupError;
+    let res, cleanupError;
     try {
-      res = spawnSync(options.command, {
-        shell: true,
-        env: workerEnv,
-        cwd: options.cwd ?? process.cwd(),
-        timeout: options.timeout_ms ?? 30000,
-        encoding: "utf8",
-      });
+      res = spawnSync(options.command, { shell: true, env: workerEnv, cwd: options.cwd ?? process.cwd(),
+        timeout: options.timeout_ms ?? 30000, encoding: "utf8" });
     } finally {
       try {
         rmSync(workerHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
       } catch (error) {
         cleanupError = error.code ? `${error.code}: ${error.message}` : error.message;
       }
-      if (!cleanupError && existsSync(workerHome)) {
-        cleanupError = "EEXIST: workerHome path retained after cleanup";
-      }
+      if (!cleanupError && existsSync(workerHome)) cleanupError = "EEXIST: workerHome path retained after cleanup";
     }
 
     const exitCode = normalizeExitCode(res);

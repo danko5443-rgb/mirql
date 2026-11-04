@@ -1,0 +1,96 @@
+name: Mergeproof Notary Re-Trigger & Fallback Reviewer
+
+# Runs strictly from the default branch (main) when a pinned AI reviewer bot
+# submits a review, edits its review-state issue comment (e.g., Codex moving
+# from status:"in_progress" to status:"completed"), or hits a rate limit
+# ("Review limit reached"). Never checks out or executes candidate code.
+on:
+  issue_comment:
+    types: [created, edited]
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to review / re-trigger"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: mergeproof-retrigger-${{ github.event.inputs.pr_number || github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  retrigger:
+    name: Re-Trigger Mergeproof Notary or Run Fallback Review
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.sender.type == 'Bot' &&
+       (github.event.sender.login == 'chatgpt-codex-connector[bot]' ||
+        github.event.sender.login == 'coderabbitai[bot]') &&
+       (github.event_name == 'pull_request_review' || github.event.issue.pull_request != null))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out base branch (authoritative scripts only)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run Fallback Reviewer when Rate-Limited and Re-Trigger Notary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.inputs.pr_number || github.event.issue.number || github.event.pull_request.number }}
+          COMMENT_BODY: ${{ github.event.comment.body || '' }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          pr_json=$(gh api "repos/$REPO/pulls/$PR_NUMBER")
+          head_sha=$(printf '%s' "$pr_json" | jq -r '.head.sha // empty')
+          author_assoc=$(printf '%s' "$pr_json" | jq -r '.author_association // empty')
+          if [ -z "$head_sha" ]; then
+            exit 0
+          fi
+
+          if echo "$COMMENT_BODY" | grep -qiE "Review limit reached|Rate limit exceeded" || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            gh api "repos/$REPO/pulls/$PR_NUMBER" -H "Accept: application/vnd.github.v3.diff" > "$RUNNER_TEMP/pr.diff"
+            files_json=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '[.[].filename]')
+            node -e '
+              import("./scripts/ci-review-gate.mjs").then(async (m) => {
+                const fs = await import("node:fs");
+                const { loadPathPolicies } = await import("./packages/core/anti-cheat.mjs");
+                const res = await m.runFallbackReview({
+                  diffText: fs.readFileSync(process.env.RUNNER_TEMP + "/pr.diff", "utf8"),
+                  filesChanged: JSON.parse(process.argv[1] || "[]"),
+                  humanOnlyPatterns: loadPathPolicies(".").humanOnly,
+                  authorAssociation: process.env.AUTHOR_ASSOC,
+                });
+                fs.writeFileSync(process.env.RUNNER_TEMP + "/fb.json", JSON.stringify(res));
+              });
+            ' "$files_json"
+            if [ -f "$RUNNER_TEMP/fb.json" ]; then
+              summary=$(jq -r '.summary // .reason // "completed"' "$RUNNER_TEMP/fb.json")
+              approved=$(jq -r '.approved' "$RUNNER_TEMP/fb.json")
+              gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="### 🤖 Mirql Fallback Review (\`$head_sha\`)\n- **Approved (non-humanOnly):** \`$approved\`\n- **Summary:** $summary" >/dev/null || true
+            fi
+          fi
+
+          run_id=$(gh api "repos/$REPO/actions/workflows/mergeproof.yml/runs?head_sha=$head_sha&status=completed&per_page=5" \
+            --jq '.workflow_runs | map(select(.conclusion == "failure" and (.run_attempt // 1) < 5)) | .[0].id // empty')
+          if [ -n "$run_id" ]; then
+            echo "Re-running Mergeproof External Notary run $run_id for PR #$PR_NUMBER at $head_sha"
+            gh run rerun "$run_id" --repo "$REPO" --failed
+          fi
