@@ -33,12 +33,17 @@ export const JOURNEY_SCENARIOS = Object.freeze([
  *
  * @param {object} [options]
  * @param {string} [options.repoRoot] - source repository to copy policy/schemas from
- * @returns {{ sandboxDir: string, mirqlDir: string, cleanup: () => void }}
+ * @returns {{ sandboxDir: string, homeDir: string, mirqlDir: string, cleanup: () => void }}
  */
 export function createJourneySandbox(options = {}) {
   const repoRoot = options.repoRoot || resolve(process.cwd());
-  const prefix = join(tmpdir(), "mirql-journey-");
-  const sandboxDir = mkdtempSync(prefix);
+  const workDir = mkdtempSync(join(tmpdir(), "mirql-journey-"));
+  const sandboxDir = join(workDir, "sandbox");
+  // A trust root may not sit inside the workspace, so the throwaway home that
+  // holds this journey's keys is the sandbox's sibling.
+  const homeDir = join(workDir, "home");
+  mkdirSync(sandboxDir);
+  mkdirSync(homeDir);
   const mirqlDir = join(sandboxDir, ".mirql");
 
   // Copy or create minimal essential files for autonomous factory operation
@@ -78,11 +83,12 @@ export function createJourneySandbox(options = {}) {
 
   return {
     sandboxDir,
+    homeDir,
     mirqlDir,
     cleanup: () => {
       if (!options.keepSandbox) {
         try {
-          rmSync(sandboxDir, { recursive: true, force: true });
+          rmSync(workDir, { recursive: true, force: true });
         } catch {}
       }
     },
@@ -107,12 +113,13 @@ export function executeCli(args, ctx = {}) {
     TEMP: process.env.TEMP,
     TMP: process.env.TMP,
     // Without these, homedir() falls back to the OS account's profile and the
-    // child mints its key under the real ~/.mirql-trust, whatever the caller set.
-    HOME: process.env.HOME,
-    USERPROFILE: process.env.USERPROFILE,
-    MIRQL_TRUST_ROOT: process.env.MIRQL_TRUST_ROOT,
+    // child mints its key under the real ~/.mirql-trust. A journey brings its own
+    // throwaway home; only a direct caller's environment is passed through.
+    HOME: ctx.homeDir ?? process.env.HOME,
+    USERPROFILE: ctx.homeDir ?? process.env.USERPROFILE,
+    MIRQL_TRUST_ROOT: ctx.homeDir ? join(ctx.homeDir, ".mirql-trust") : process.env.MIRQL_TRUST_ROOT,
     NODE_ENV: process.env.NODE_ENV || "test",
-    // Each journey mints a throwaway owner key in its own sandbox; it guards nothing.
+    // Each journey mints a throwaway owner key; it guards nothing.
     MIRQL_ALLOW_PLAINTEXT_OWNER_KEY: "1",
     ...(ctx.mirqlDir ? { MIRQL_DIR: ctx.mirqlDir } : {}),
   };
@@ -430,6 +437,7 @@ export function runJourney(scenarioName, options = {}) {
   const startMs = Date.now();
   const ctx = {
     sandboxDir: sandbox.sandboxDir,
+    homeDir: sandbox.homeDir,
     mirqlDir: sandbox.mirqlDir,
     repoRoot: options.repoRoot || resolve(process.cwd()),
     options,
