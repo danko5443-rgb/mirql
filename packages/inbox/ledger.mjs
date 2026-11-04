@@ -8,9 +8,16 @@ import {
   renameSync,
 } from "node:fs";
 import { join } from "node:path";
-import { jcs, sha256, EXIT_CODES } from "../core/index.mjs";
+import {
+  jcs,
+  sha256,
+  EXIT_CODES,
+  writeLedgerHeadSidecar,
+  GENESIS_PREV_HASH,
+} from "../core/index.mjs";
 
-export const GENESIS_PREV_HASH = `sha256:${"0".repeat(64)}`;
+/** Genesis prev_hash anchor, re-exported from the canonical core ledger primitive (Law 4). */
+export { GENESIS_PREV_HASH };
 
 /**
  * Read all events from <mirqlDir>/ledger/events.jsonl.
@@ -32,7 +39,10 @@ export function readEvents(mirqlDir) {
   for (const line of rawLines) {
     try {
       events.push(JSON.parse(line));
-    } catch {}
+    } catch (error) {
+      // mp-003-allow: a corrupt line is skipped here on purpose — the signed/verified readers refuse the whole ledger; this tolerant reader only feeds advisory summaries.
+      void error;
+    }
   }
 
   return { events, rawLines };
@@ -86,6 +96,8 @@ export function appendEvent(mirqlDir, signedEvent) {
 
   const line = jcs(signedEvent) + "\n";
   appendFileSync(eventsPath, line, "utf8");
+  // O(1) verified head sidecar (Law 4, Phase 6.1/6.2): every inbox append refreshes it.
+  writeLedgerHeadSidecar(mirqlDir, signedEvent);
 
   // Update materialized state cache
   updateStateCache(mirqlDir);

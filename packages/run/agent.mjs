@@ -1,5 +1,5 @@
 import { captureWorkerBase, measureWorkerChanges } from "./worker-diff.mjs";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -98,21 +98,85 @@ function copyTree(src, dest, skip) {
   }
 }
 
-/** Stage tracked/working files of `cwd` into `stagingDir` (never `.git`/`.mirql`/`node_modules`). */
-function stageWorkspace(cwd, stagingDir) {
-  const listed = spawnSync("git", ["--no-replace-objects", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-    { cwd, encoding: "utf8", timeout: 10000, windowsHide: true });
-  if (listed.error || listed.status !== 0) { copyTree(cwd, stagingDir, STAGING_SKIP); return; }
-  for (const rel of listed.stdout.split("\0").filter(Boolean)) {
-    if (rel.split(/[\\/]/).some((segment) => STAGING_SKIP.has(segment))) continue;
-    mkdirSync(dirname(join(stagingDir, rel)), { recursive: true });
-    cpSync(join(cwd, rel), join(stagingDir, rel), { recursive: true, force: true });
+/** mkdtempSync creates 0700 staging roots; every staged directory must be 0o777 so container UID 65534 can traverse /workspace. */
+function mkdirsWritable(dir, root) {
+  mkdirSync(dir, { recursive: true });
+  for (let p = dir; ; p = dirname(p)) {
+    chmodSync(p, 0o777);
+    if (p === root || dirname(p) === p) break;
   }
 }
 
-/** Copy container edits from `stagingDir` back into `cwd` (never `.git`/`.mirql`). */
-function syncBackWorkspace(stagingDir, cwd) {
+/** Staged files get container-writable modes: 0o666, or 0o777 when the source was executable. */
+function stagedFileMode(mode) {
+  return (mode & 0o111) !== 0 ? 0o777 : 0o666;
+}
+
+/**
+ * Stage tracked/working files of `cwd` into `stagingDir` (never `.git`/`.mirql`/`node_modules`),
+ * with modes the unprivileged container user can read and write. Returns the
+ * staged relative file paths (normalized with `/`) so sync-back can
+ * distinguish worker deletions from untouched files.
+ */
+function stageWorkspace(cwd, stagingDir) {
+  chmodSync(stagingDir, 0o777);
+  const staged = new Set();
+  const stageFile = (rel) => {
+    const to = join(stagingDir, rel);
+    mkdirsWritable(dirname(to), stagingDir);
+    cpSync(join(cwd, rel), to, { force: true });
+    chmodSync(to, stagedFileMode(statSync(join(cwd, rel)).mode));
+    staged.add(rel.split(/[\\/]/).join("/"));
+  };
+  const listed = spawnSync("git", ["--no-replace-objects", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+    { cwd, encoding: "utf8", timeout: 10000, windowsHide: true });
+  if (listed.error || listed.status !== 0) {
+    // Not a git repository: stage every working file except the excluded dirs.
+    const walk = (dir, prefix) => {
+      for (const entry of readdirSync(dir)) {
+        if (STAGING_SKIP.has(entry)) continue;
+        const full = join(dir, entry);
+        const rel = prefix ? `${prefix}/${entry}` : entry;
+        if (statSync(full).isDirectory()) { mkdirsWritable(join(stagingDir, rel), stagingDir); walk(full, rel); }
+        else stageFile(rel);
+      }
+    };
+    walk(cwd, "");
+    return staged;
+  }
+  for (const rel of listed.stdout.split("\0").filter(Boolean)) {
+    if (rel.split(/[\\/]/).some((segment) => STAGING_SKIP.has(segment))) continue;
+    if (statSync(join(cwd, rel)).isFile()) stageFile(rel);
+    else mkdirsWritable(join(stagingDir, rel), stagingDir);
+  }
+  return staged;
+}
+
+/** Any symlink anywhere under `dir` is a sandbox escape attempt; throw before a single byte is copied back. */
+function assertNoSymlinks(dir) {
+  for (const entry of readdirSync(dir)) {
+    const path = join(dir, entry);
+    const info = lstatSync(path);
+    if (info.isSymbolicLink()) {
+      const error = new Error(`sandbox created a symlink escaping the staged workspace: ${path}`);
+      error.code = "SYMLINK_ESCAPE";
+      throw error;
+    }
+    if (info.isDirectory()) assertNoSymlinks(path);
+  }
+}
+
+/**
+ * Copy container edits from `stagingDir` back into `cwd` (never `.git`/`.mirql`).
+ * Refuses symlinks up front (SYMLINK_ESCAPE, nothing copied), then propagates
+ * worker deletions: a staged file the container removed disappears from `cwd`.
+ */
+function syncBackWorkspace(stagingDir, cwd, stagedFiles) {
+  assertNoSymlinks(stagingDir);
   copyTree(stagingDir, cwd, new Set([".git", ".mirql"]));
+  for (const rel of stagedFiles) {
+    if (!existsSync(join(stagingDir, rel))) rmSync(join(cwd, rel), { force: true });
+  }
 }
 
 /** Normalize a spawn status to an integer exit code; a signal never reports 0. */
@@ -199,7 +263,7 @@ export function runAgent(options = {}) {
       const workspace = resolve(options.cwd ?? process.cwd());
       const stagingDir = mkdtempSync(join(tmpdir(), "mirql-sandbox-stage-"));
       try {
-        stageWorkspace(workspace, stagingDir);
+        const stagedFiles = stageWorkspace(workspace, stagingDir);
         const args = buildContainerArgs({ runtime: sandboxMode,
           image: typeof options.image === "string" && options.image.length > 0 ? options.image : DEFAULT_SANDBOX_IMAGE,
           workdir: stagingDir, command: options.command, env: { PATH: workerEnv.PATH ?? process.env.PATH ?? "" } });
@@ -216,7 +280,18 @@ export function runAgent(options = {}) {
         const exitCode = normalizeExitCode(res);
         const base = workerResult(exitCode === 0 && !res.signal, exitCode, res, stripped, sandboxMode);
         if (exitCode !== 0) return base;
-        syncBackWorkspace(stagingDir, workspace);
+        try {
+          // Container succeeded: sync edits/deletions back (never .git/.mirql)
+          // before post-run change measurement (MP-001 post-run gate).
+          syncBackWorkspace(stagingDir, workspace, stagedFiles);
+        } catch (error) {
+          if (error.code === "SYMLINK_ESCAPE") {
+            // Fail closed without copying anything into the workspace.
+            return { ...base, ok: false, exitCode: EXIT_CODES.POLICY_DENIAL,
+              violation: "TOUCH_HUMAN_ONLY", rule: "MP-001", detail: error.message };
+          }
+          throw error;
+        }
         return postRunGate(baseline, patterns, base, exitCode);
       } finally {
         try {

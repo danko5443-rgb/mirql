@@ -12,11 +12,13 @@ and `packages/mergeproof/evaluator.mjs`) and Phase 6's ledger consolidation
 canonical primitives, the O(1) verified `head.json` sidecar with fail-closed
 pre-append chain verification, the MP-003 self-check convention, and the
 `docs/STATUS.md` status matrix) are implemented, with `delta_phi < 0`
-(consolidation). Phase 6.3 (stale-lock atomic-rename breaking with PID/nonce
-verification in `packages/core/lock.mjs`) and Phase 6.5 (referee path
-protection in `policy/paths.yaml`) are implemented as well. Remaining open
-items are tracked in `docs/STATUS.md` (6.1 inbox ledger consolidation, 6.6
-lint strengthening). The owner
+(consolidation). Phase 6.1 (all five ledger writers — log, run, queue, notary
+and inbox — now append through the canonical core primitives with the O(1)
+head sidecar authenticating the entire events file by digest), Phase 6.3
+(stale-lock atomic-rename breaking with PID/nonce verification in
+`packages/core/lock.mjs`) and Phase 6.5 (referee path protection in
+`policy/paths.yaml`) are implemented as well. The remaining open item is
+tracked in `docs/STATUS.md` (6.6 lint strengthening). The owner
 chose to keep the repository private and leave the unavailable main ruleset
 requirement open. Human review requirements are not satisfied by
 implementation or automated test results alone.

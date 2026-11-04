@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import { git } from "./helpers/git.mjs";
 import { provisionTestTrust, saveTestKeyring } from "./helpers/keyring.mjs";
 
-import { EXIT_CODES, checkSwallowedExceptions, generateEd25519Keypair } from "../packages/core/index.mjs";
+import { EXIT_CODES, checkSwallowedExceptions, generateEd25519Keypair, signEvent } from "../packages/core/index.mjs";
 import {
   GENESIS_PREV_HASH,
   readLedgerHeadSidecar,
@@ -36,6 +36,7 @@ import { appendLedgerEventRaw } from "../packages/queue/ledger.mjs";
 import { foldQueueState } from "../packages/core/index.mjs";
 import { signAndAppendVerdict } from "../packages/mergeproof/notary.mjs";
 import { evaluatePullRequest } from "../packages/mergeproof/evaluator.mjs";
+import { appendEvent as appendInboxEvent } from "../packages/inbox/ledger.mjs";
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
 
@@ -123,43 +124,57 @@ test("buildContainerArgs produces the hardened Law 8 argument vector", () => {
   assert.equal(args.at(-1), "true");
 });
 
+/** A mock container runtime. Records its argv; per MIRQL_MOCK_MODE it edits a staged file ("edit"), deletes code.mjs ("delete"), or plants a symlink escaping the staging dir ("symlink"). Returns { binDir, argsFile }. */
+function makeMockRuntime(parent) {
+  const binDir = join(parent, "mock-bin");
+  mkdirSync(binDir, { recursive: true });
+  const argsFile = join(parent, "mock-args.json");
+  const mockSrc = join(binDir, "docker-mock.mjs");
+  writeFileSync(mockSrc, [
+    'import { writeFileSync, readdirSync, statSync, unlinkSync, symlinkSync } from "node:fs";',
+    'import { join, relative } from "node:path";',
+    'const args = process.argv.slice(2);',
+    'const vIndex = args.indexOf("-v");',
+    'const mount = vIndex !== -1 ? args[vIndex + 1] : null;',
+    'const staged = mount ? mount.slice(0, mount.lastIndexOf(":/workspace")) : null;',
+    'const walk = (dir, base = dir, acc = []) => {',
+    '  for (const entry of readdirSync(dir)) {',
+    '    const full = join(dir, entry);',
+    '    if (statSync(full).isDirectory()) walk(full, base, acc);',
+    '    else acc.push(relative(base, full).replace(/\\\\/g, "/"));',
+    '  }',
+    '  return acc;',
+    '};',
+    'const stagedFiles = staged ? walk(staged).sort() : [];',
+    'const mode = process.env.MIRQL_MOCK_MODE ?? "edit";',
+    'const note = { args, stagedFiles, mode };',
+    'if (staged && mode === "edit") writeFileSync(join(staged, "container-edit.txt"), "edited inside the sandbox\\n");',
+    'if (staged && mode === "delete") unlinkSync(join(staged, "code.mjs"));',
+    'if (staged && mode === "symlink") {',
+    '  const target = process.env.MIRQL_ESCAPE_TARGET ?? join(staged, "..");',
+    '  try { symlinkSync(target, join(staged, "evil-link")); note.symlink = "file"; }',
+    '  catch (error) {',
+    '    try { symlinkSync(target, join(staged, "evil-link"), "junction"); note.symlink = "junction"; }',
+    '    catch (error2) { note.symlink = "unavailable: " + (error2.code ?? error2.message); }',
+    '  }',
+    '}',
+    'writeFileSync(process.env.MIRQL_MOCK_OUT, JSON.stringify(note) + "\\n");',
+    'process.exit(0);',
+  ].join("\n"));
+  if (process.platform === "win32") {
+    writeFileSync(join(binDir, "docker.cmd"), `@node "${mockSrc}" %*\r\n`);
+  } else {
+    writeFileSync(join(binDir, "docker"), `#!/bin/sh\nexec node "${mockSrc}" "$@"\n`);
+    chmodSync(join(binDir, "docker"), 0o755);
+  }
+  return { binDir, argsFile };
+}
+
 test("runAgent({ sandbox: \"docker\" }) stages the workspace isolated and syncs container edits back", () => {
   const parent = mkdtempSync(join(tmpdir(), "mirql-sb-docker-"));
   try {
     const workspace = makeWorkspace(parent);
-    const binDir = join(parent, "mock-bin");
-    mkdirSync(binDir, { recursive: true });
-    const argsFile = join(parent, "mock-args.json");
-
-    // A mock `docker` executable: records its argv, proves the staging
-    // directory excludes .mirql, and edits a file "inside the container".
-    const mockSrc = join(binDir, "docker-mock.mjs");
-    writeFileSync(mockSrc, [
-      'import { writeFileSync, readdirSync, statSync } from "node:fs";',
-      'import { join, relative } from "node:path";',
-      'const args = process.argv.slice(2);',
-      'const vIndex = args.indexOf("-v");',
-      'const mount = vIndex !== -1 ? args[vIndex + 1] : null;',
-      'const staged = mount ? mount.slice(0, mount.lastIndexOf(":/workspace")) : null;',
-      'const walk = (dir, base = dir, acc = []) => {',
-      '  for (const entry of readdirSync(dir)) {',
-      '    const full = join(dir, entry);',
-      '    if (statSync(full).isDirectory()) walk(full, base, acc);',
-      '    else acc.push(relative(base, full).replace(/\\\\/g, "/"));',
-      '  }',
-      '  return acc;',
-      '};',
-      'const stagedFiles = staged ? walk(staged).sort() : [];',
-      'if (staged) writeFileSync(join(staged, "container-edit.txt"), "edited inside the sandbox\\n");',
-      'writeFileSync(process.env.MIRQL_MOCK_OUT, JSON.stringify({ args, stagedFiles }, null, 2) + "\\n");',
-      'process.exit(0);',
-    ].join("\n"));
-    if (process.platform === "win32") {
-      writeFileSync(join(binDir, "docker.cmd"), `@node "${mockSrc}" %*\r\n`);
-    } else {
-      writeFileSync(join(binDir, "docker"), `#!/bin/sh\nexec node "${mockSrc}" "$@"\n`);
-      chmodSync(join(binDir, "docker"), 0o755);
-    }
+    const { binDir, argsFile } = makeMockRuntime(parent);
 
     const res = runAgent({
       sandbox: "docker",
@@ -222,6 +237,65 @@ test("runAgent fails closed with SANDBOX_UNAVAILABLE when the runtime binary is 
   }
 });
 
+test("runAgent({ sandbox: \"docker\" }) propagates worker deletions from the staged workspace", () => {
+  const parent = mkdtempSync(join(tmpdir(), "mirql-sb-delete-"));
+  try {
+    const workspace = makeWorkspace(parent);
+    const { binDir, argsFile } = makeMockRuntime(parent);
+    const res = runAgent({
+      sandbox: "docker",
+      cwd: workspace,
+      command: "true",
+      env: { PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`, MIRQL_MOCK_OUT: argsFile, MIRQL_MOCK_MODE: "delete" },
+      allowedEnv: ["MIRQL_MOCK_OUT", "MIRQL_MOCK_MODE"],
+    });
+    assert.equal(res.ok, true, JSON.stringify(res));
+    // The container deleted code.mjs inside the sandbox; the host copy is gone.
+    assert.equal(existsSync(join(workspace, "code.mjs")), false, "worker deletion must reach the host workspace");
+    assert.ok(res.changedFiles.includes("code.mjs"));
+    // Untouched files survive.
+    assert.equal(existsSync(join(workspace, "policy", "guard.json")), true);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("runAgent({ sandbox: \"docker\" }) fails closed on a symlink planted inside the staged workspace", (t) => {
+  const parent = mkdtempSync(join(tmpdir(), "mirql-sb-symlink-"));
+  try {
+    const workspace = makeWorkspace(parent);
+    const { binDir, argsFile } = makeMockRuntime(parent);
+    const res = runAgent({
+      sandbox: "docker",
+      cwd: workspace,
+      command: "true",
+      env: {
+        PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
+        MIRQL_MOCK_OUT: argsFile,
+        MIRQL_MOCK_MODE: "symlink",
+        MIRQL_ESCAPE_TARGET: parent,
+      },
+      allowedEnv: ["MIRQL_MOCK_OUT", "MIRQL_MOCK_MODE", "MIRQL_ESCAPE_TARGET"],
+    });
+
+    const note = JSON.parse(readFileSync(argsFile, "utf8"));
+    if (typeof note.symlink === "string" && note.symlink.startsWith("unavailable:")) {
+      t.skip(`symlink creation unavailable on this platform (${note.symlink})`);
+      return;
+    }
+    assert.equal(res.ok, false, JSON.stringify(res));
+    assert.equal(res.violation, "TOUCH_HUMAN_ONLY");
+    assert.equal(res.rule, "MP-001");
+    assert.match(res.detail, /symlink/);
+    // Nothing was copied back: no escape link and no staged content reached the workspace.
+    assert.equal(existsSync(join(workspace, "evil-link")), false);
+    assert.equal(existsSync(join(workspace, "container-edit.txt")), false);
+    assert.equal(readFileSync(join(workspace, "code.mjs"), "utf8"), "export const value=1;\n");
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 const RUN_CHECK_STEPS = {
   red_on_base: { exitCode: 1 },
   green_on_head: { exitCode: 0 },
@@ -249,6 +323,28 @@ test("verifyAttempt: sandbox \"none\" and requireSandbox never yield auto_merge 
   // A container runtime satisfies the requirement.
   const sandboxed = verifyAttempt({ runCheck, sandbox: "docker" });
   assert.equal(sandboxed.verdict, "auto_merge");
+});
+
+test("verifyAttempt: git mode refuses to run candidates on the host when a sandbox is required", () => {
+  const notARepo = mkdtempSync(join(tmpdir(), "mirql-git-sb-"));
+  try {
+    // The gate must return before any candidate command, git call, or worktree
+    // setup runs — the deliberately invalid workspace proves nothing executed.
+    const res = verifyAttempt({
+      git: true,
+      workspaceDir: notARepo,
+      baseSha: "a".repeat(40),
+      headSha: "b".repeat(40),
+      requireSandbox: true,
+      sandbox: "docker",
+    });
+    assert.equal(res.verdict, "needs_human");
+    assert.equal(res.rule, "UNSANDBOXED_EXECUTION");
+    assert.equal(res.violation, "SANDBOX_NONE");
+    assert.equal(res.verified, false);
+  } finally {
+    rmSync(notARepo, { recursive: true, force: true });
+  }
 });
 
 test("evaluatePullRequest caps passing verdicts at needs_human under sandbox \"none\"", () => {
@@ -450,6 +546,62 @@ test("verifyChainBeforeAppend returns the genesis anchor for an empty ledger", (
   }
 });
 
+test("historical corruption with an intact head.json invalidates the sidecar via events_sha256", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mirql-head-history-"));
+  try {
+    provisionTestTrust(dir);
+    const kp = getOrGenerateSupervisorKey(dir);
+    appendSupervisorEvent(
+      dir,
+      { type: "probe.completed", payload: { probe: "unit", status: "pass", duration_ms: 10 }, nowMs: 1000 },
+      kp,
+    );
+    appendSupervisorEvent(
+      dir,
+      {
+        type: "probe.completed",
+        idempotency_key: "probe-2",
+        payload: { probe: "unit", status: "pass", duration_ms: 11 },
+        nowMs: 2000,
+      },
+      kp,
+    );
+    // Sidecar is valid and authenticates the whole events file.
+    assert.equal(readLedgerHeadSidecar(dir).valid, true);
+
+    // Corrupt line 1 in place: line 2, the line count and head.json are all intact.
+    const eventsPath = join(dir, "ledger", "events.jsonl");
+    const lines = readFileSync(eventsPath, "utf8").split(/\r?\n/).filter(Boolean);
+    const first = JSON.parse(lines[0]);
+    first.payload.duration_ms = 99; // tampered while keeping valid JSON
+    writeFileSync(eventsPath, [JSON.stringify(first), lines[1]].join("\n") + "\n");
+
+    const stale = readLedgerHeadSidecar(dir);
+    assert.equal(stale.valid, false);
+    assert.match(stale.error, /events_sha256/);
+
+    assert.throws(() => verifyChainBeforeAppend(dir), (error) => error.code === "INTEGRITY_VIOLATION");
+    assert.throws(
+      () =>
+        appendSupervisorEvent(
+          dir,
+          {
+            type: "probe.completed",
+            idempotency_key: "probe-3",
+            payload: { probe: "unit", status: "pass", duration_ms: 12 },
+            nowMs: 3000,
+          },
+          kp,
+        ),
+      (error) => error.code === "INTEGRITY_VIOLATION",
+    );
+    const after = readFileSync(eventsPath, "utf8").split(/\r?\n/).filter(Boolean);
+    assert.equal(after.length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a corrupted hash chain fails closed before appending even when head.json is deleted", () => {
   const dir = mkdtempSync(join(tmpdir(), "mirql-chain-corrupt-"));
   try {
@@ -552,6 +704,36 @@ test("a sequence gap fails closed before appending even when head.json is delete
   }
 });
 
+test("appendEvent (inbox) writes a valid head.json sidecar", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mirql-head-inbox-"));
+  try {
+    const kp = generateEd25519Keypair();
+    const unsigned = {
+      v: 1,
+      id: "01ARZ3NDEKTSV4RRFFQ69G5W01",
+      tenant_id: "mirql-core",
+      seq: 1,
+      epoch: 1,
+      hlc: "1.000000000000000000,0,local",
+      ts: new Date(1000).toISOString(),
+      type: "human.decision",
+      writer: { ns: "human:owner", key_id: kp.keyId },
+      idempotency_key: "inbox-test-1",
+      prev_hash: GENESIS_PREV_HASH,
+      payload: { decision: "ack" },
+    };
+    const signed = signEvent(unsigned, kp.privateKey, kp.keyId);
+    appendInboxEvent(dir, signed);
+    const head = readLedgerHeadSidecar(dir);
+    assert.equal(head.valid, true, JSON.stringify(head));
+    assert.equal(head.seq, 1);
+    assert.equal(head.hash, signed.hash);
+    assert.equal(head.lastEvent.sig, signed.sig);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Phase 6.4 & 6.7 — MP-003 self-check & docs/STATUS.md
 // ---------------------------------------------------------------------------
@@ -566,6 +748,7 @@ const MP003_FILES = [
   "packages/run/ledger.mjs",
   "packages/queue/ledger.mjs",
   "packages/mergeproof/notary.mjs",
+  "packages/inbox/ledger.mjs",
 ];
 
 test("MP-003: every file touched by Phase 5-6 has zero swallowed exceptions", () => {

@@ -28,13 +28,16 @@ function readTrimmedLines(file) {
   return existsSync(file) ? readFileSync(file, "utf8").split(/\r?\n/).map((line) => line.trim()).filter(Boolean) : [];
 }
 
-/** Atomically write the O(1) head sidecar head.json (temp file + rename, JCS, Law 17). */
+/** Atomically write the O(1) head sidecar head.json (temp file + rename, JCS, Law 17). The events_sha256 digest authenticates the ENTIRE raw events.jsonl, so any byte edited anywhere in the ledger history invalidates the sidecar and forces full re-verification. */
 export function writeLedgerHeadSidecar(mirqlDir, lastEvent) {
   if (lastEvent === null || typeof lastEvent !== "object") return;
-  const file = join(mirqlDir, "ledger", "head.json");
-  mkdirSync(join(mirqlDir, "ledger"), { recursive: true });
+  const ledgerDir = join(mirqlDir, "ledger");
+  const rawEvents = existsSync(eventsFileOf(mirqlDir)) ? readFileSync(eventsFileOf(mirqlDir), "utf8") : "";
+  const file = join(ledgerDir, "head.json");
+  mkdirSync(ledgerDir, { recursive: true });
   const tmp = `${file}.tmp`;
-  writeFileSync(tmp, jcs({ v: 1, seq: lastEvent.seq, hash: lastEvent.hash, prev_hash: lastEvent.prev_hash, ts: lastEvent.ts, writer: lastEvent.writer, sig: lastEvent.sig }) + "\n", "utf8");
+  writeFileSync(tmp, jcs({ v: 1, seq: lastEvent.seq, hash: lastEvent.hash, prev_hash: lastEvent.prev_hash,
+    ts: lastEvent.ts, writer: lastEvent.writer, sig: lastEvent.sig, events_sha256: sha256(rawEvents) }) + "\n", "utf8");
   renameSync(tmp, file);
 }
 
@@ -63,10 +66,16 @@ export function readLedgerHeadSidecar(mirqlDir) {
   if (head.v !== 1) return invalid("head.json has an unknown version");
   if (!Number.isSafeInteger(head.seq) || head.seq < 1) return invalid("head.json seq is not a safe integer >= 1");
   if (!isHashString(head.hash)) return invalid("head.json hash is malformed");
+  if (!isHashString(head.events_sha256)) return invalid("head.json events_sha256 is missing or malformed");
   if (typeof head.sig !== "string" || head.sig.length === 0) return invalid("head.json sig is missing");
   if (!isWriterObject(head.writer)) return invalid("head.json writer is malformed");
 
-  const lines = readTrimmedLines(eventsFileOf(mirqlDir));
+  // The whole raw ledger is authenticated by digest: any byte edited anywhere
+  // in events.jsonl (not just the tail) invalidates the sidecar.
+  if (!existsSync(eventsFileOf(mirqlDir))) return invalid("events.jsonl is missing");
+  const rawEvents = readFileSync(eventsFileOf(mirqlDir), "utf8");
+  if (sha256(rawEvents) !== head.events_sha256) return invalid("head.json events_sha256 mismatch");
+  const lines = rawEvents.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (lines.length === 0) return invalid("events.jsonl is missing or empty");
   if (lines.length !== head.seq) return invalid(`events.jsonl line count ${lines.length} does not match head.seq ${head.seq}`);
   let lastEvent;

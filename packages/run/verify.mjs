@@ -218,6 +218,14 @@ function evaluateCheckResult(check, fixture = {}) {
 
 /** Executes honest causal proof against a real git repository (Phase 3). */
 function verifyGitRepository(options) {
+  // Law 8: this verifier runs candidate commands on the HOST through
+  // runCommand/spawnSync — never inside a container. When the caller requires
+  // a sandbox (or selected one), refuse before ANY candidate code executes:
+  // silently running it unsandboxed would defeat the requested isolation.
+  if (options.requireSandbox === true || options.sandbox === "docker" || options.sandbox === "podman") {
+    return { verified: false, verdict: "needs_human", rule: "UNSANDBOXED_EXECUTION", violation: "SANDBOX_NONE", detail: SANDBOX_NONE_DETAIL };
+  }
+
   // Candidate code runs as this OS user, so a readable owner key could be stolen
   // and used to sign its own approval. Refuse before anything candidate runs.
   const unprotectedKey = findUnprotectedOwnerKey(options.mirqlDir);
