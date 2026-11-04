@@ -104,6 +104,17 @@ function digestRules(p) {
   return json(mirql(["i", "digest", "--dir", p.mirqlDir], ROOT)).recent_outcomes.map((outcome) => outcome.rule);
 }
 
+/** A filter script that leaves a marker, so a test can tell whether Git ran it. */
+function plantedFilter(p) {
+  const marker = join(p.root, "filter-ran").replaceAll("\\", "/");
+  const script = join(p.root, "filter.mjs").replaceAll("\\", "/");
+  writeFileSync(script, `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(marker)}, "1");
+process.stdin.pipe(process.stdout);
+`);
+  return { marker, command: `node '${script}'` };
+}
+
 function assertWorkspaceUntouched(p) {
   assert.equal(git(p.workspace, "rev-parse", "HEAD"), p.base);
   assert.equal(git(p.workspace, "status", "--porcelain", "--ignored"), "");
@@ -194,17 +205,103 @@ ${WRITE_FIX}
     }
   });
 
-  it("does not stage output after the worker changed the Git configuration", () => {
+  it("the planted filter does run under plain Git, so the tests below are not vacuous", () => {
+    const p = project();
+    const { marker, command } = plantedFilter(p);
+    const repo = join(p.root, "control");
+    git(p.root, "init", "-q", repo);
+    git(repo, "config", "filter.pwn.clean", command);
+    writeFileSync(join(repo, ".gitattributes"), "*.mjs filter=pwn\n");
+    writeFileSync(join(repo, "a.mjs"), "export {};\n");
+    git(repo, "add", "-A");
+    assert.equal(existsSync(marker), true);
+  });
+
+  it("a filter in the worker's own Git store never runs in the host", () => {
     const p = project();
     issue(p);
-    const marker = join(p.root, "filter-ran").replaceAll("\\", "/");
-    daemon(p, worker(p, "tamper", `
-execSync(${JSON.stringify(`git config filter.pwn.clean "node -e \\"require('fs').writeFileSync('${marker}','1')\\""`)});
-writeFileSync(".gitattributes", "*.mjs filter=pwn\\n");
+    const before = readFileSync(join(p.workspace, ".git", "config"));
+    const { marker, command } = plantedFilter(p);
+    daemon(p, worker(p, "own-store", `
+execSync(${JSON.stringify(`git config filter.pwn.clean "${command}"`)});
+mkdirSync(".git/info", { recursive: true });
+writeFileSync(".git/info/attributes", "*.mjs filter=pwn\\n");
+writeFileSync("src/.gitattributes", "*.mjs filter=pwn\\n");
+${WRITE_FIX}
+`));
+
+    const [outcome] = outcomes(p);
+    // Staged and verified without the filter; the stray attributes file is what the verifier refuses.
+    assert.equal(outcome.rule, "UNNECESSARY_CHANGE", JSON.stringify(outcome));
+    assert.equal(git(p.workspace, "show", `${outcome.candidate_commit}:src/app.mjs`), FIX.trim());
+    assert.equal(existsSync(marker), false, "the host must not run a filter the worker planted");
+    assert.deepEqual(readFileSync(join(p.workspace, ".git", "config")), before);
+    assertWorkspaceUntouched(p);
+  });
+
+  it("a smudge filter planted by one attempt does not reach the retry", () => {
+    const p = project();
+    issue(p);
+    const { marker, command } = plantedFilter(p);
+    daemon(p, worker(p, "smudge", `
+execSync(${JSON.stringify(`git config filter.pwn.smudge "${command}"`)});
+mkdirSync(".git/info", { recursive: true });
+writeFileSync(".git/info/attributes", "* filter=pwn\\n");
+process.exit(7);
+`));
+    daemon(p, worker(p, "after-smudge", WRITE_FIX));
+
+    const [first, second] = outcomes(p);
+    assert.equal(first.rule, "WORKER_FAILED");
+    assert.equal(second.rule, "MP-000", JSON.stringify(second));
+    assert.equal(existsSync(marker), false, "the host must not run a filter the worker planted");
+  });
+
+  it("refuses and undoes a write to the workspace's Git files by absolute path", () => {
+    const p = project();
+    issue(p);
+    const gitDir = join(p.workspace, ".git");
+    const before = readFileSync(join(gitDir, "config"));
+    const { marker, command } = plantedFilter(p);
+    const hook = join(gitDir, "hooks", "post-checkout");
+    const attributes = join(gitDir, "info", "attributes");
+    const hadAttributes = existsSync(attributes);
+    daemon(p, worker(p, "cross-path", `
+import { appendFileSync } from "node:fs";
+appendFileSync(${JSON.stringify(join(gitDir, "config"))}, ${JSON.stringify(`[filter "pwn"]\n\tsmudge = ${command}\n\tclean = ${command}\n`)});
+mkdirSync(${JSON.stringify(dirname(attributes))}, { recursive: true });
+writeFileSync(${JSON.stringify(attributes)}, "* filter=pwn\\n");
+mkdirSync(${JSON.stringify(dirname(hook))}, { recursive: true });
+writeFileSync(${JSON.stringify(hook)}, "#!/bin/sh\\nexit 0\\n");
 ${WRITE_FIX}
 `));
 
     assert.equal(outcomes(p)[0].rule, "WORKER_TAMPERED_GIT");
+    assert.deepEqual(readFileSync(join(gitDir, "config")), before);
+    assert.equal(existsSync(hook), false);
+    assert.equal(existsSync(attributes), hadAttributes);
+    assert.equal(existsSync(marker), false, "the host must not run a filter the worker planted");
+    assert.equal(git(p.workspace, "for-each-ref", "refs/mirql/attempts"), "");
+    assertWorkspaceUntouched(p);
+  });
+
+  it("refuses and undoes a write to a configuration file the workspace includes", () => {
+    const p = project();
+    issue(p);
+    const included = join(p.root, "included.gitconfig").replaceAll("\\", "/");
+    const original = "[user]\n\tname = operator\n";
+    writeFileSync(included, original);
+    git(p.workspace, "config", "include.path", included);
+    const { marker, command } = plantedFilter(p);
+    daemon(p, worker(p, "included", `
+import { appendFileSync } from "node:fs";
+appendFileSync(${JSON.stringify(included)}, ${JSON.stringify(`[filter "pwn"]\n\tclean = ${command}\n`)});
+writeFileSync("src/.gitattributes", "*.mjs filter=pwn\\n");
+${WRITE_FIX}
+`));
+
+    assert.equal(outcomes(p)[0].rule, "WORKER_TAMPERED_GIT");
+    assert.equal(readFileSync(included, "utf8"), original);
     assert.equal(existsSync(marker), false, "the host must not run a filter the worker planted");
   });
 

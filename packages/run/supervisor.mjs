@@ -22,11 +22,13 @@ import {
 import { runAgent } from "./agent.mjs";
 import {
   authorCandidate,
+  captureGitAuthority,
   disposeAttempt,
-  gitAuthorityDigest,
+  gitAuthorityChanged,
   measureTreeSurface,
   prepareAttempt,
   releaseCandidate,
+  restoreGitAuthority,
   snapshotWorkerTree,
   treeMatchesBase,
 } from "./supervisor-attempt.mjs";
@@ -135,7 +137,7 @@ function refused(rule, detail) {
 }
 
 /**
- * One attempt: the worker runs in a disposable checkout of the base commit, a
+ * One attempt: the worker runs in a private clone of the base commit, a
  * host tool authors its output (Law 3), and only the Git-mode verifier decides.
  * The verifier takes nothing from the caller beyond the warrant selection, so
  * a library caller cannot swap in its own checks and skip the warrant's scope
@@ -149,7 +151,7 @@ function superviseAttempt(options, mirqlDir, keypair, warrant, attempt, reproduc
   // the tree. The verifier's measurement replaces it when one exists.
   measured.phiBefore = Number.isSafeInteger(options.phiBefore) ? options.phiBefore : computePhi(attemptDir).total;
 
-  const authority = gitAuthorityDigest(attempt);
+  const authority = captureGitAuthority(attempt);
   const agentStartTime = Date.now();
   const agentResult = runAgent({
     ...options.agentOptions,
@@ -162,8 +164,13 @@ function superviseAttempt(options, mirqlDir, keypair, warrant, attempt, reproduc
     ...measured, agentResult, verifyResult, agentDuration: Date.now() - agentStartTime, ...extra,
   });
 
-  if (gitAuthorityDigest(attempt) !== authority) {
-    return done(refused("WORKER_TAMPERED_GIT", "The worker changed the repository's Git configuration"));
+  if (gitAuthorityChanged(attempt, authority)) {
+    try {
+      restoreGitAuthority(attempt, authority);
+    } catch (error) {
+      return done(refused("WORKER_TAMPERED_GIT", `The worker changed the workspace's Git configuration and restoring it failed: ${error.message}`));
+    }
+    return done(refused("WORKER_TAMPERED_GIT", "The worker changed the workspace's Git configuration; it was restored"));
   }
   let tree;
   try {
