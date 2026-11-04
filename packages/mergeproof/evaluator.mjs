@@ -57,17 +57,6 @@ export {
   checkTestWeakenings,
 };
 
-/** The canonical rule identifiers and their verdicts. */
-export const RULES = Object.freeze({
-  "MP-000": { verdict: "auto_merge", violation: null },
-  "MP-001": { verdict: "reject", violation: "TOUCH_HUMAN_ONLY" },
-  "MP-002": { verdict: "reject", violation: "TEST_DELETED" },
-  "MP-003": { verdict: "reject", violation: "ANTI_CHEAT_VIOLATION" },
-  "MP-004": { verdict: "reject", violation: "STALE_BASE" },
-  "MP-005": { verdict: "needs_human", violation: "UNCITED_SURFACE" },
-  LAW_13: { verdict: "reject", violation: "PHI_INCREASE" },
-});
-
 /** Helper to construct a verdict failure payload. */
 function fail(rule, violation, verdict, detail, extra = {}) {
   return {
@@ -271,7 +260,7 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     anti_cheat: true,
     stale_base: true,
     surface: true,
-    phi: true,
+    phi: null,
     proof: true,
   };
 
@@ -470,7 +459,7 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     });
   }
 
-  // --- MP-005: UNCITED_SURFACE ----------------------------------------------
+  // --- MP-005: UNCITED_SURFACE (facts here, verdict after Law 13) --------------
   const uncitedCommands = Array.isArray(surface.uncited_commands)
     ? surface.uncited_commands
     : [];
@@ -487,18 +476,7 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
   // Phase 0.3: a self-reported proof or a caller boolean never unlocks a
   // humanApprove path — touching one always escalates to a human.
   const touchesHumanApprove = approvePaths.length > 0;
-
-  if (isUncitedSurface || touchesHumanApprove) {
-    checks.surface = false;
-    const detail = isUncitedSurface
-      ? `PR modified public surface without cited roadmap reference: ${uncitedCommands.join(", ")}`
-      : `PR touched humanApprove path(s) [${approvePaths.join(", ")}] ; human review required.`;
-    return fail("MP-005", "UNCITED_SURFACE", "needs_human", detail, {
-      checks,
-      uncited_commands: uncitedCommands,
-      human_approve_paths: approvePaths,
-    });
-  }
+  checks.surface = !(isUncitedSurface || touchesHumanApprove);
 
   // --- Law 13: Monotone Potential Phi ----------------------------------------
   const deltaPhi = resolveDeltaPhi(prDoc);
@@ -551,6 +529,21 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
         { checks, delta_phi: deltaPhi },
       );
     }
+  }
+  if (!phiGrowthSignedOff) {
+    checks.phi = true;
+  }
+
+  if (!checks.surface) {
+    const detail = isUncitedSurface
+      ? `PR modified public surface without cited roadmap reference: ${uncitedCommands.join(", ")}`
+      : `PR touched humanApprove path(s) [${approvePaths.join(", ")}] ; human review required.`;
+    return fail("MP-005", "UNCITED_SURFACE", "needs_human", detail, {
+      checks,
+      uncited_commands: uncitedCommands,
+      human_approve_paths: approvePaths,
+      delta_phi: deltaPhi,
+    });
   }
 
   // --- MP-000 ------------------------------------------------------------------

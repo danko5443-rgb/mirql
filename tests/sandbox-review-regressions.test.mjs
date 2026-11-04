@@ -494,6 +494,6 @@ test("appends still chain normally over intact history", () => withParent((paren
 
 test("sandbox workspace code has no swallowed exceptions (MP-003)", () => {
   for (const file of ["packages/run/agent.mjs", "packages/run/agent-workspace.mjs"]) {
-    assert.deepEqual(checkSwallowedExceptions(readFileSync(join(ROOT, file), "utf8"), file).violations, [], file);
+    assert.deepEqual(checkSwallowedExceptions(readFileSync(join(ROOT, file), "utf8"), file, { changedLines: new Set() }).violations, [], file);
   }
 });

@@ -60,7 +60,7 @@ jobs:
         run: |
           pr_json=$(gh api "repos/$REPO/pulls/$PR_NUMBER")
           head_sha=$(printf '%s' "$pr_json" | jq -r '.head.sha // empty')
-          author_assoc=$(printf '%s' "$pr_json" | jq -r '.author_association // empty')
+          export AUTHOR_ASSOC=$(printf '%s' "$pr_json" | jq -r '.author_association // empty')
           if [ -z "$head_sha" ]; then
             exit 0
           fi
