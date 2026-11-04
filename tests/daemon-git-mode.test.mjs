@@ -115,6 +115,12 @@ process.stdin.pipe(process.stdout);
   return { marker, command: `node '${script}'` };
 }
 
+/** A hook body that leaves a marker, so a test can tell whether Git ran it. */
+function plantedHook(p) {
+  const marker = join(p.root, "hook-ran").replaceAll("\\", "/");
+  return { marker, body: `#!/bin/sh\necho 1 > "${marker}"\n` };
+}
+
 function assertWorkspaceUntouched(p) {
   assert.equal(git(p.workspace, "rev-parse", "HEAD"), p.base);
   assert.equal(git(p.workspace, "status", "--porcelain", "--ignored"), "");
@@ -255,6 +261,77 @@ process.exit(7);
     assert.equal(first.rule, "WORKER_FAILED");
     assert.equal(second.rule, "MP-000", JSON.stringify(second));
     assert.equal(existsSync(marker), false, "the host must not run a filter the worker planted");
+  });
+
+  it("the planted hook does run under plain Git, so the tests below are not vacuous", () => {
+    const p = project();
+    const { marker, body } = plantedHook(p);
+    const hook = join(p.workspace, ".git", "hooks", "post-index-change");
+    mkdirSync(dirname(hook), { recursive: true });
+    writeFileSync(hook, body, { mode: 0o755 });
+    git(p.workspace, "read-tree", "HEAD");
+    assert.equal(existsSync(marker), true);
+  });
+
+  it("a hook in the worker's own Git store never runs in the host", () => {
+    const p = project();
+    issue(p);
+    const { marker, body } = plantedHook(p);
+    daemon(p, worker(p, "own-hook", `
+mkdirSync(".git/hooks", { recursive: true });
+writeFileSync(".git/hooks/post-index-change", ${JSON.stringify(body)}, { mode: 0o755 });
+${WRITE_FIX}
+`));
+
+    assert.equal(outcomes(p)[0].rule, "MP-000", JSON.stringify(outcomes(p)[0]));
+    assert.equal(existsSync(marker), false, "the host must not run a hook the worker planted");
+    assertWorkspaceUntouched(p);
+  });
+
+  it("a hooks directory the worker configures never runs in the host", () => {
+    const p = project();
+    issue(p);
+    const { marker, body } = plantedHook(p);
+    const hooks = join(p.root, "planted-hooks").replaceAll("\\", "/");
+    mkdirSync(hooks);
+    writeFileSync(join(hooks, "post-index-change"), body, { mode: 0o755 });
+    daemon(p, worker(p, "hooks-path", `
+execSync(${JSON.stringify(`git config core.hooksPath "${hooks}"`)});
+${WRITE_FIX}
+`));
+
+    assert.equal(outcomes(p)[0].rule, "MP-000", JSON.stringify(outcomes(p)[0]));
+    assert.equal(existsSync(marker), false, "the host must not run a hook the worker configured");
+    assertWorkspaceUntouched(p);
+  });
+
+  it("a promisor remote the worker configures never runs in the host", () => {
+    const p = project();
+    issue(p);
+    const marker = join(p.root, "uploadpack-ran").replaceAll("\\", "/");
+    const script = join(p.root, "uploadpack.mjs").replaceAll("\\", "/");
+    writeFileSync(script, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "1");\nprocess.exit(1);\n`);
+    // A commit whose tree is missing makes Git fetch it from the promisor remote.
+    daemon(p, worker(p, "promisor", `
+import { chmodSync, rmSync } from "node:fs";
+${WRITE_FIX}
+const run = (command) => execSync(command, { encoding: "utf8" }).trim();
+run("git add -A");
+run('git -c user.name=w -c user.email=w@mirql.local commit -qm worker');
+const tree = run('git rev-parse "HEAD^{tree}"');
+const object = ".git/objects/" + tree.slice(0, 2) + "/" + tree.slice(2);
+chmodSync(object, 0o644);
+rmSync(object);
+run("git config core.repositoryformatversion 1");
+run("git config extensions.partialClone evil");
+run("git config remote.evil.promisor true");
+run("git config remote.evil.url .");
+run(${JSON.stringify(`git config remote.evil.uploadpack "node '${script}'"`)});
+`));
+
+    assert.notEqual(outcomes(p)[0].verdict, "auto_merge", JSON.stringify(outcomes(p)[0]));
+    assert.equal(existsSync(marker), false, "the host must not run a command the worker configured");
+    assertWorkspaceUntouched(p);
   });
 
   it("refuses and undoes a write to the workspace's Git files by absolute path", () => {

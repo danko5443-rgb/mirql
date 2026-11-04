@@ -16,6 +16,8 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { devNull, tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 
+import { configFreeEnv, hostEnv } from "./worker-diff.mjs";
+
 const HOST_GIT = [
   "--no-replace-objects", "--no-pager",
   "-c", "core.fsmonitor=false",
@@ -26,21 +28,6 @@ const HOST_IDENTITY = {
   GIT_AUTHOR_NAME: "mirql-supervisor", GIT_AUTHOR_EMAIL: "supervisor@mirql.local",
   GIT_COMMITTER_NAME: "mirql-supervisor", GIT_COMMITTER_EMAIL: "supervisor@mirql.local",
 };
-
-function hostEnv(extra = {}) {
-  const env = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && !/^GIT_/i.test(key)) env[key] = value;
-  }
-  return { ...env, ...extra };
-}
-
-/** No global or system configuration: filters defined there do not apply to these steps. */
-function configFreeEnv(extra = {}) {
-  // Git for Windows cannot read os.devNull (\\.\nul) as a configuration file.
-  const none = process.platform === "win32" ? "NUL" : devNull;
-  return hostEnv({ GIT_CONFIG_GLOBAL: none, GIT_CONFIG_NOSYSTEM: "1", ...extra });
-}
 
 function git(args, { cwd, env = hostEnv(), timeout = 120_000 }) {
   const result = spawnSync("git", [...HOST_GIT, ...args], {
