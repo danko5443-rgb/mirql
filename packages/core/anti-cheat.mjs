@@ -357,35 +357,51 @@ export function isEffectivelyEmpty(bodyText) {
 }
 
 /**
- * MP-003 reviewer-approved exemption marker: a catch body carrying
- * `// mp-003-allow: <reason>` (or the block-comment form) is exempt from the
- * swallowed-exception lint — the recorded reason makes the silence a reviewed
- * decision rather than an oversight.
+ * MP-003 exemption marker: `// mp-003-allow: <reason>` (or the block-comment
+ * form) in a catch body records why the silence is intended. The comment comes
+ * from the source being scanned, so it proves nothing by itself: it only exempts
+ * a catch the candidate left untouched, which means it was already accepted into
+ * the base. Nothing here checks that a reviewer read it; that is the base's job.
  */
 const MP003_ALLOW_RE = /(?:\/\/|\/\*)\s*mp-003-allow\s*:/i;
+const MP003_MARKER_REFUSED =
+  "mp-003-allow marker refused: it only exempts a catch unchanged from the authoritative base, and this one was changed or its base could not be verified";
 
 /**
  * Scans source code for empty catch blocks and swallowed exceptions (MP-003).
  *
  * @param {string} sourceCode
  * @param {string} [filename]
+ * @param {{ changedLines?: Set<number> }} [scope] - 1-based lines of sourceCode the
+ *   candidate changed, from a trusted source. A marker exempts a catch only when
+ *   this is given and no line of the catch is in it. Omitted, no marker counts.
  * @returns {{ ok: boolean, violations: Array<{ file?: string, pattern: string, line: number, detail?: string }> }}
  */
-export function checkSwallowedExceptions(sourceCode, filename) {
+export function checkSwallowedExceptions(sourceCode, filename, { changedLines } = {}) {
   const violations = [];
+  const lineAt = (idx) => sourceCode.slice(0, idx).split("\n").length;
+  const markerExempts = (text, startIdx, endIdx) => {
+    if (!MP003_ALLOW_RE.test(text) || !(changedLines instanceof Set)) return false;
+    for (let line = lineAt(startIdx), last = lineAt(endIdx); line <= last; line++) {
+      if (changedLines.has(line)) return false;
+    }
+    return true;
+  };
+  const describe = (text, detail) => (MP003_ALLOW_RE.test(text) ? MP003_MARKER_REFUSED : detail);
 
   // 1. Standard catch blocks: parse with balanced braces (ignoring strings, comments, regexes)
   const catchStartRegex = /catch\s*(?:\([^)]*\))?\s*\{/g;
   let match;
   while ((match = catchStartRegex.exec(sourceCode)) !== null) {
     const { body, endIdx: catchEnd } = extractBalancedBlock(sourceCode, match.index + match[0].length);
-    if (isEffectivelyEmpty(body) && !MP003_ALLOW_RE.test(body)) {
+    if (isEffectivelyEmpty(body) && !markerExempts(body, match.index, catchEnd)) {
       const upToMatch = sourceCode.slice(0, match.index);
       const line = upToMatch.split("\n").length;
       violations.push({
         file: filename,
         pattern: sourceCode.slice(match.index, catchEnd),
         line,
+        detail: describe(body),
       });
     }
   }
@@ -411,14 +427,14 @@ export function checkSwallowedExceptions(sourceCode, filename) {
 
     if (foundBrace !== -1) {
       const { body, endIdx } = extractBalancedBlock(sourceCode, foundBrace + 1);
-      if (isEffectivelyEmpty(body) && !MP003_ALLOW_RE.test(body)) {
+      if (isEffectivelyEmpty(body) && !markerExempts(body, pcMatch.index, endIdx)) {
         const upToMatch = sourceCode.slice(0, pcMatch.index);
         const line = upToMatch.split("\n").length;
         violations.push({
           file: filename,
           pattern: sourceCode.slice(pcMatch.index, endIdx + 1),
           line,
-          detail: "Swallowed Promise .catch() block",
+          detail: describe(body, "Swallowed Promise .catch() block"),
         });
       }
     } else {
@@ -437,14 +453,14 @@ export function checkSwallowedExceptions(sourceCode, filename) {
       const arrowMatch = argStr.match(/=>\s*(.*)$/);
       if (arrowMatch) {
         const expr = arrowMatch[1].trim();
-        if (isEffectivelyEmpty(expr) && !MP003_ALLOW_RE.test(expr)) {
+        if (isEffectivelyEmpty(expr) && !markerExempts(expr, pcMatch.index, j)) {
           const upToMatch = sourceCode.slice(0, pcMatch.index);
           const line = upToMatch.split("\n").length;
           violations.push({
             file: filename,
             pattern: sourceCode.slice(pcMatch.index, j + 1),
             line,
-            detail: "Swallowed Promise .catch() expression",
+            detail: describe(expr, "Swallowed Promise .catch() expression"),
           });
         }
       }
