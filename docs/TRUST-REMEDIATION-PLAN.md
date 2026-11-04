@@ -13,8 +13,8 @@ canonical primitives, a verified `head.json` tail cache with fail-closed
 pre-append verification of the whole chain, the MP-003 self-check convention, and the
 `docs/STATUS.md` status matrix) are implemented, with `delta_phi < 0`
 (consolidation). Phase 6.1 (all five ledger writers — log, run, queue, notary
-and inbox — now append through the canonical core primitives with the O(1)
-head sidecar authenticating the entire events file by digest), Phase 6.3
+and inbox — now append through the canonical core primitives with the
+`head.json` tail cache and whole-chain pre-append verification), Phase 6.3
 (stale-lock atomic-rename breaking with PID/nonce verification in
 `packages/core/lock.mjs`) and Phase 6.5 (referee path protection in
 `policy/paths.yaml`) are implemented as well. The remaining open item is

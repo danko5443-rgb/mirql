@@ -1,5 +1,5 @@
 // tests/phase5-6-completion.test.mjs — Phase 5 (sandbox isolation & gating,
-// Law 8) and Phase 6 (canonical ledger primitives, O(1) head sidecar, MP-003
+// Law 8) and Phase 6 (canonical ledger primitives, head sidecar, MP-003
 // self-check, docs/STATUS.md).
 //
 // Every test runs against an isolated temporary HOME/USERPROFILE and
@@ -372,7 +372,7 @@ test("evaluatePullRequest caps passing verdicts at needs_human under sandbox \"n
 });
 
 // ---------------------------------------------------------------------------
-// Phase 6.1 & 6.2 — O(1) verified head sidecar & pre-append verification
+// Phase 6.1 & 6.2 — verified head sidecar & pre-append verification
 // ---------------------------------------------------------------------------
 
 test("appendEvent (log) writes and updates the head.json sidecar", () => {
