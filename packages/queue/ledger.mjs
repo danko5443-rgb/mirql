@@ -198,7 +198,7 @@ export function appendLedgerEventRaw(mirqlDir, eventData, keypair, currentState)
   const ledgerPath = join(mirqlDir, "ledger", "events.jsonl");
   mkdirSync(dirname(ledgerPath), { recursive: true });
   appendFileSync(ledgerPath, jcs(signed) + "\n", "utf8");
-  // O(1) verified head sidecar (Law 4, Phase 6.2).
+  // Refresh the head sidecar (Law 4, Phase 6.2).
   writeLedgerHeadSidecar(mirqlDir, signed);
 
   if (currentState) {

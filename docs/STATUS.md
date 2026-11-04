@@ -12,11 +12,11 @@ test. "Partial" means the law's mechanism exists but a documented gap remains.
 | Law 1 | Offline Litmus | Implemented | `package.json` (zero dependencies), `tests/structure.test.mjs` |
 | Law 2 | Lifeguard Law | Implemented | `packages/run/supervisor.mjs`, `tests/lifeguard-rollback.test.mjs` |
 | Law 3 | Roles Propose / Tools Author | Implemented | `packages/core/acl.mjs` (`WRITER_ACL`), `packages/core/schema.mjs` (event `writer`) |
-| Law 4 | One Durable Ledger | Implemented | `packages/log/index.mjs`, `packages/core/ledger-verify.mjs` (canonical `GENESIS_PREV_HASH`, O(1) `head.json` sidecar authenticating the full `events.jsonl` via `events_sha256`, `verifyChainBeforeAppend`), all five writers: `packages/run/ledger.mjs`, `packages/queue/ledger.mjs`, `packages/mergeproof/notary.mjs`, `packages/inbox/ledger.mjs` |
+| Law 4 | One Durable Ledger | Implemented | `packages/log/index.mjs`, `packages/core/ledger-verify.mjs` (canonical `GENESIS_PREV_HASH`, `head.json` tail cache with an unkeyed `events_sha256` digest, `verifyChainBeforeAppend` walks the whole chain on every append), all five writers: `packages/run/ledger.mjs`, `packages/queue/ledger.mjs`, `packages/mergeproof/notary.mjs`, `packages/inbox/ledger.mjs` |
 | Law 5 | Base-Pinned Mortal Verdicts | Implemented | `packages/mergeproof/evaluator.mjs` (MP-004 `STALE_BASE`) |
 | Law 6 | Silence Is Never Consent | Implemented | `packages/mergeproof/evaluator.mjs` (MP-005 `UNCITED_SURFACE`, `MISSING_PHI` fail-closed) |
 | Law 7 | Notary Outside Blast Radius | Implemented | `packages/mergeproof/notary.mjs`, `packages/mergeproof/evaluator.mjs` (`getGitDiffInfo` git cross-check, `LAW_7` fail-closed) |
-| Law 8 | Speechless Sandboxes | Implemented | `packages/run/agent.mjs` (`buildContainerArgs`: `--network none`, `--read-only`, `--cap-drop ALL`, `no-new-privileges`, uid 65534; `SANDBOX_UNAVAILABLE` fail-closed), `packages/run/verify.mjs` + `packages/mergeproof/evaluator.mjs` (`UNSANDBOXED_EXECUTION`: `sandbox: "none"` never yields `auto_merge`) |
+| Law 8 | Speechless Sandboxes | Implemented | `packages/run/agent.mjs` (`buildContainerArgs`: `--network none`, `--read-only`, `--cap-drop ALL`, `no-new-privileges`, uid 65534; `SANDBOX_UNAVAILABLE` fail-closed), `packages/run/agent-workspace.mjs` (link-safe staging and sync-back; `WORKSPACE_ESCAPE`), `packages/run/verify.mjs` + `packages/mergeproof/evaluator.mjs` (`UNSANDBOXED_EXECUTION`: `sandbox: "none"` never yields `auto_merge`; git-mode verification has no container runner and refuses sandbox requests) |
 | Law 9 | N-1 Processes N | Partial | `packages/queue/index.mjs` (tick/lease pipeline, `withLedgerLock`); multi-node N-1 throughput is not yet exercised by tests |
 | Law 10 | Ship Invariants Not Features | Implemented | `surface.lock`, `bin/mirql.mjs` (`m check --surface`), `schemas/*.schema.json` |
 | Law 11 | No Warrant No Work | Implemented | `packages/core/warrant.mjs` (`requireAuthorizedWarrant`), `packages/queue` (submit/lease gates) |
@@ -52,7 +52,7 @@ rejects any uncited delta. Schemas pinned: `event/v1`, `warrant/v1`,
 | Phase 4 | Truthful records and a usable Φ (measured SHAs/costs, git-tree Φ, warrant budgets) | Implemented |
 | Phase 5 | Real isolation for the agent (container sandbox runner, `sandbox: "none"` gating) | Implemented |
 | Phase 6.1 | Canonical ledger primitives (`GENESIS_PREV_HASH`, sidecar, chain verify in core; all five writers — `log`, `run`, `queue`, `notary`, `inbox` — wired to them) | Implemented |
-| Phase 6.2 | O(1) verified head sidecar + fail-closed pre-append chain verification | Implemented |
+| Phase 6.2 | Verified head sidecar + fail-closed pre-append verification of the whole chain (appends are O(n); `head.json` cannot vouch for earlier lines) | Implemented |
 | Phase 6.3 | Stale-lock break hardening in `packages/core/lock.mjs` (atomic rename tombstone + PID/nonce verification) | Implemented |
 | Phase 6.4 | MP-003 empty-catch cleanliness (self-check + `// mp-003-allow: <reason>` convention) | Partial — files touched by Phase 5–6 are clean; a repo-wide sweep remains |
 | Phase 6.5 | Referee path protection (`policy/paths.yaml` `humanOnly`/`humanApprove` coverage) | Implemented |

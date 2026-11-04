@@ -28,7 +28,7 @@ function readTrimmedLines(file) {
   return existsSync(file) ? readFileSync(file, "utf8").split(/\r?\n/).map((line) => line.trim()).filter(Boolean) : [];
 }
 
-/** Atomically write the O(1) head sidecar head.json (temp file + rename, JCS, Law 17). The events_sha256 digest authenticates the ENTIRE raw events.jsonl, so any byte edited anywhere in the ledger history invalidates the sidecar and forces full re-verification. */
+/** Atomically write the head sidecar head.json (temp file + rename, JCS, Law 17). The events_sha256 digest lets readLedgerHeadSidecar notice an edited events.jsonl, but it is unkeyed: whoever can edit the ledger can recompute it, so it never replaces the chain walk. */
 export function writeLedgerHeadSidecar(mirqlDir, lastEvent) {
   if (lastEvent === null || typeof lastEvent !== "object") return;
   const ledgerDir = join(mirqlDir, "ledger");
@@ -45,12 +45,13 @@ const isHashString = (hash) => typeof hash === "string" && /^sha256:[a-f0-9]{64}
 const isWriterObject = (writer) => writer !== null && typeof writer === "object" && !Array.isArray(writer) && typeof writer.ns === "string" && writer.ns.length > 0 && typeof writer.key_id === "string" && writer.key_id.length > 0;
 
 /**
- * Read and verify the O(1) head sidecar against ledger/events.jsonl (Law 4,
- * Phase 6.2): head.json must parse with v=1, a safe integer seq >= 1, a
- * canonical hash, sig and writer; the ledger tail must match its seq/hash/sig
- * with an equal non-empty line count; and, with a signed keyring present, the
- * head signature must verify against the registered key. Anything else is
- * { valid: false } so callers fail closed.
+ * Read and verify the head sidecar against ledger/events.jsonl (Law 4, Phase
+ * 6.2). This verifies the tail and an unkeyed file digest, not earlier lines,
+ * so it must not be used to skip chain verification. head.json must parse with
+ * v=1, a safe integer seq >= 1, a canonical hash, events_sha256, sig and writer;
+ * the ledger tail must match its seq/hash/sig with an equal non-empty line count;
+ * and, with a signed keyring present, the head signature must verify against the
+ * registered key. Anything else is { valid: false } so callers fail closed.
  */
 export function readLedgerHeadSidecar(mirqlDir) {
   const headPath = join(mirqlDir, "ledger", "head.json");
@@ -101,24 +102,17 @@ export function readLedgerHeadSidecar(mirqlDir) {
 
 /**
  * Verify ledger chain integrity before an append (Law 4, fail closed). An
- * empty or missing ledger returns the genesis anchor; a valid head.json
- * sidecar gives the O(1) fast path (no per-event Ed25519 re-verification);
- * otherwise every line is re-verified (seq order, prev_hash continuity,
- * envelope hash) and any corruption throws
- * LedgerVerificationError("INTEGRITY_VIOLATION") before a fresh sidecar is
- * written for the verified tail.
+ * empty or missing ledger returns the genesis anchor; otherwise every line is
+ * re-verified (seq order, prev_hash continuity, envelope hash) and any
+ * corruption throws LedgerVerificationError("INTEGRITY_VIOLATION") before a
+ * fresh sidecar is written for the verified tail. head.json never replaces this
+ * walk: its digest can be recomputed by whoever edits the ledger, and a matching
+ * tail says nothing about earlier lines. Signatures are not checked here;
+ * readVerifiedLedger does that.
  */
-export function verifyChainBeforeAppend(mirqlDir, options = {}) {
+export function verifyChainBeforeAppend(mirqlDir) {
   const rawLines = readTrimmedLines(eventsFileOf(mirqlDir));
-  const genesis = { seq: 0, prevHash: GENESIS_PREV_HASH, lastEvent: null, events: [] };
-  if (rawLines.length === 0) return genesis;
-
-  const sidecar = readLedgerHeadSidecar(mirqlDir);
-  if (sidecar.valid) {
-    const fast = { seq: sidecar.seq, prevHash: sidecar.hash, lastEvent: sidecar.lastEvent };
-    if (options.includeEvents) fast.events = rawLines.map((raw) => JSON.parse(raw));
-    return fast;
-  }
+  if (rawLines.length === 0) return { seq: 0, prevHash: GENESIS_PREV_HASH, lastEvent: null, events: [] };
 
   const events = [];
   for (let i = 0; i < rawLines.length; i++) {

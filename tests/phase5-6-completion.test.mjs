@@ -284,9 +284,9 @@ test("runAgent({ sandbox: \"docker\" }) fails closed on a symlink planted inside
       return;
     }
     assert.equal(res.ok, false, JSON.stringify(res));
-    assert.equal(res.violation, "TOUCH_HUMAN_ONLY");
+    assert.equal(res.violation, "WORKSPACE_ESCAPE");
     assert.equal(res.rule, "MP-001");
-    assert.match(res.detail, /symlink/);
+    assert.match(res.detail, /evil-link/);
     // Nothing was copied back: no escape link and no staged content reached the workspace.
     assert.equal(existsSync(join(workspace, "evil-link")), false);
     assert.equal(existsSync(join(workspace, "container-edit.txt")), false);

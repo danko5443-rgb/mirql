@@ -28,7 +28,7 @@ const COVERAGE_DRIVER_PATH = fileURLToPath(new URL("./coverage-driver.mjs", impo
 /** Law 8 detail used whenever unsandboxed execution caps an auto_merge verdict. */
 const SANDBOX_NONE_DETAIL = 'Execution ran with sandbox: "none" (no OS/container isolation); human review required.';
 
-/** Law 8 gate: true when the evidence shows the candidate ran with no OS/container isolation (`sandbox: "none"`), or isolation was required (`requireSandbox`) yet no container runtime was selected. / */
+/** Law 8 gate for caller-supplied execution, where `sandbox` is the caller's claim: true when it reports no OS/container isolation (`sandbox: "none"`), or isolation was required (`requireSandbox`) yet no container runtime was selected. Git mode runs candidates itself, so verifyGitRepository refuses sandbox requests instead. */
 function isUnsandboxedExecution(options = {}) {
   return options.sandbox === "none" || options.evidence?.sandbox === "none" ||
     (options.requireSandbox === true && options.sandbox !== "docker" && options.sandbox !== "podman");
@@ -223,7 +223,8 @@ function verifyGitRepository(options) {
   // a sandbox (or selected one), refuse before ANY candidate code executes:
   // silently running it unsandboxed would defeat the requested isolation.
   if (options.requireSandbox === true || options.sandbox === "docker" || options.sandbox === "podman") {
-    return { verified: false, verdict: "needs_human", rule: "UNSANDBOXED_EXECUTION", violation: "SANDBOX_NONE", detail: SANDBOX_NONE_DETAIL };
+    return { verified: false, verdict: "needs_human", rule: "UNSANDBOXED_EXECUTION", violation: "SANDBOX_NONE",
+      detail: "Git-mode verification cannot run candidate code in a container, so the requested sandbox cannot be provided. No candidate code was executed; human review required." };
   }
 
   // Candidate code runs as this OS user, so a readable owner key could be stolen

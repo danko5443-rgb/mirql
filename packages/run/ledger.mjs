@@ -37,9 +37,8 @@ export function appendSupervisorEvent(mirqlDir, eventInput, keypair, options = {
   mkdirSync(ledgerDir, { recursive: true });
   const eventsFile = join(ledgerDir, "events.jsonl");
 
-  // Fail closed (Law 4): verify the full hash chain before appending. Uses
-  // the O(1) head.json sidecar when valid, otherwise re-verifies every line
-  // and throws INTEGRITY_VIOLATION on any corruption.
+  // Fail closed (Law 4): re-verify every line of the hash chain before
+  // appending; any corruption throws INTEGRITY_VIOLATION.
   const chain = verifyChainBeforeAppend(mirqlDir);
 
   const last = chain.lastEvent;

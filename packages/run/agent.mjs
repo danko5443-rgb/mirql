@@ -1,10 +1,11 @@
 import { captureWorkerBase, measureWorkerChanges } from "./worker-diff.mjs";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { EXIT_CODES } from "../core/index.mjs";
 import { checkHumanOnlyPaths, loadHumanOnlyPatterns } from "./anti-cheat.mjs";
+import { stageWorkspace, syncBackWorkspace } from "./agent-workspace.mjs";
 
 /** Strict safe allowlist for environment variables passed to unprivileged agents (case-insensitive). */
 export const SAFE_ENV_ALLOWLIST = Object.freeze([
@@ -30,8 +31,6 @@ export function sanitizeAgentEnv(env = process.env, extraAllowed = []) {
 /** Default container image for sandboxed agent execution (Law 8); operators override via `options.image`. */
 export const DEFAULT_SANDBOX_IMAGE = "mirql-agent:latest";
 
-/** Directories a sandboxed staging copy never sees: ledger state, VCS data, installed modules. */
-const STAGING_SKIP = new Set([".git", ".mirql", "node_modules"]);
 /** Exit codes a container runtime uses when it cannot launch a container. */
 const RUNTIME_LAUNCH_FAILURE_CODES = new Set([125, 126, 127, 9009]);
 
@@ -48,87 +47,6 @@ export function buildContainerArgs({ runtime, image, workdir, command, env = {} 
   return ["run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges:true", "--user", "65534:65534", "-v", `${workdir}:/workspace:rw`,
     "-w", "/workspace", ...envFlags, image, "sh", "-c", command];
-}
-
-/** Recursively copy `src` into `dest`, pruning directories named in `skip`. */
-function copyTree(src, dest, skip) {
-  for (const entry of readdirSync(src)) {
-    if (skip.has(entry)) continue;
-    const from = join(src, entry), to = join(dest, entry);
-    if (statSync(from).isDirectory()) copyTree(from, to, skip);
-    else { mkdirSync(dirname(to), { recursive: true }); cpSync(from, to, { force: true }); }
-  }
-}
-
-/** mkdtempSync creates 0700 staging roots; every staged directory must be 0o777 so container UID 65534 can traverse /workspace. */
-function mkdirsWritable(dir, root) {
-  mkdirSync(dir, { recursive: true });
-  for (let p = dir; ; p = dirname(p)) {
-    chmodSync(p, 0o777);
-    if (p === root || dirname(p) === p) break;
-  }
-}
-
-/** Staged files get container-writable modes: 0o666, or 0o777 when the source was executable. */
-function stagedFileMode(mode) {
-  return (mode & 0o111) !== 0 ? 0o777 : 0o666;
-}
-
-/** Stage tracked/working files of `cwd` into `stagingDir` (never `.git`/`.mirql`/`node_modules`), returning Map<rel, origMode>. */
-function stageWorkspace(cwd, stagingDir) {
-  chmodSync(stagingDir, 0o777);
-  const staged = new Map();
-  const stageFile = (rel) => {
-    const to = join(stagingDir, rel), origMode = statSync(join(cwd, rel)).mode & 0o777;
-    mkdirsWritable(dirname(to), stagingDir);
-    cpSync(join(cwd, rel), to, { force: true });
-    chmodSync(to, stagedFileMode(origMode));
-    staged.set(rel.split(/[\\/]/).join("/"), origMode);
-  };
-  const listed = spawnSync("git", ["--no-replace-objects", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-    { cwd, encoding: "utf8", timeout: 10000, windowsHide: true });
-  if (listed.error || listed.status !== 0) {
-    const walk = (dir, prefix) => {
-      for (const entry of readdirSync(dir)) {
-        if (STAGING_SKIP.has(entry)) continue;
-        const full = join(dir, entry), rel = prefix ? `${prefix}/${entry}` : entry;
-        if (statSync(full).isDirectory()) { mkdirsWritable(join(stagingDir, rel), stagingDir); walk(full, rel); }
-        else stageFile(rel);
-      }
-    };
-    walk(cwd, "");
-    return staged;
-  }
-  for (const rel of listed.stdout.split("\0").filter(Boolean)) {
-    if (rel.split(/[\\/]/).some((segment) => STAGING_SKIP.has(segment))) continue;
-    if (statSync(join(cwd, rel)).isFile()) stageFile(rel);
-    else mkdirsWritable(join(stagingDir, rel), stagingDir);
-  }
-  return staged;
-}
-
-/** Any symlink anywhere under `dir` is a sandbox escape attempt; throw before a single byte is copied back. */
-function assertNoSymlinks(dir) {
-  for (const entry of readdirSync(dir)) {
-    const path = join(dir, entry), info = lstatSync(path);
-    if (info.isSymbolicLink()) {
-      const error = new Error(`sandbox created a symlink escaping the staged workspace: ${path}`);
-      error.code = "SYMLINK_ESCAPE";
-      throw error;
-    }
-    if (info.isDirectory()) assertNoSymlinks(path);
-  }
-}
-
-/** Copy container edits back into `cwd` (never `.git`/`.mirql`), refusing symlinks, propagating deletions, and restoring untouched host file modes. */
-function syncBackWorkspace(stagingDir, cwd, stagedFiles) {
-  assertNoSymlinks(stagingDir);
-  copyTree(stagingDir, cwd, new Set([".git", ".mirql"]));
-  for (const [rel, origMode] of stagedFiles) {
-    const stagedPath = join(stagingDir, rel);
-    if (!existsSync(stagedPath)) rmSync(join(cwd, rel), { force: true });
-    else if ((statSync(stagedPath).mode & 0o777) === stagedFileMode(origMode)) chmodSync(join(cwd, rel), origMode);
-  }
 }
 
 /** Normalize a spawn status to an integer exit code; a signal never reports 0. */
@@ -193,12 +111,26 @@ export function runAgent(options = {}) {
 
     if (sandboxMode !== "none") {
       const workspace = resolve(options.cwd ?? process.cwd());
-      const stagingDir = mkdtempSync(join(tmpdir(), "mirql-sandbox-stage-"));
+      // mkdtemp's 0700 keeps other host users away from the world-open tree inside.
+      const stagingRoot = mkdtempSync(join(tmpdir(), "mirql-sandbox-stage-"));
+      const stagingDir = join(stagingRoot, "workspace");
+      const denial = (result, error) => ({ ...result, ok: false, exitCode: EXIT_CODES.POLICY_DENIAL, rule: "MP-001",
+        violation: error.code === "WORKSPACE_ESCAPE" ? "WORKSPACE_ESCAPE" : "WORKSPACE_UNVERIFIED", detail: error.message });
       try {
-        const stagedFiles = stageWorkspace(workspace, stagingDir);
+        let snapshot;
+        try {
+          mkdirSync(stagingDir);
+          snapshot = stageWorkspace(workspace, stagingDir);
+        } catch (error) {
+          return denial(workerResult(false, EXIT_CODES.POLICY_DENIAL, {}, stripped, sandboxMode), error);
+        }
+        // UID 65534 is not the host user, so its output must stay readable and
+        // removable by the host. Windows shell:true joins argv unquoted, so this
+        // string would split there; Docker Desktop does not enforce mount UIDs anyway.
+        const command = process.platform === "win32" ? options.command : `umask 000; ${options.command}`;
         const args = buildContainerArgs({ runtime: sandboxMode,
           image: typeof options.image === "string" && options.image.length > 0 ? options.image : DEFAULT_SANDBOX_IMAGE,
-          workdir: stagingDir, command: options.command, env: { PATH: workerEnv.PATH ?? process.env.PATH ?? "" } });
+          workdir: stagingDir, command, env: { PATH: workerEnv.PATH ?? process.env.PATH ?? "" } });
         const res = spawnSync(sandboxMode, args, { cwd: stagingDir, env: workerEnv,
           timeout: options.timeout_ms ?? 30000, encoding: "utf8", windowsHide: true, shell: process.platform === "win32" });
 
@@ -213,18 +145,14 @@ export function runAgent(options = {}) {
         const base = workerResult(exitCode === 0 && !res.signal, exitCode, res, stripped, sandboxMode);
         if (exitCode !== 0) return base;
         try {
-          syncBackWorkspace(stagingDir, workspace, stagedFiles);
+          syncBackWorkspace(stagingDir, workspace, snapshot);
         } catch (error) {
-          if (error.code === "SYMLINK_ESCAPE") {
-            return { ...base, ok: false, exitCode: EXIT_CODES.POLICY_DENIAL,
-              violation: "TOUCH_HUMAN_ONLY", rule: "MP-001", detail: error.message };
-          }
-          throw error;
+          return { ...denial(base, error), workerExitCode: exitCode };
         }
         return postRunGate(baseline, patterns, base, exitCode);
       } finally {
         try {
-          rmSync(stagingDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+          rmSync(stagingRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
         } catch (error) {
           // mp-003-allow: staging cleanup is best-effort; the OS temp cleaner reclaims it and no correctness guarantee depends on it.
           void error;

@@ -9,8 +9,8 @@ the Docker/Podman sandbox runner in `packages/run/agent.mjs` with a hardened
 flag set and `SANDBOX_UNAVAILABLE` fail-closed behavior, plus the invariant
 that `sandbox: "none"` never yields `auto_merge` in `packages/run/verify.mjs`
 and `packages/mergeproof/evaluator.mjs`) and Phase 6's ledger consolidation
-canonical primitives, the O(1) verified `head.json` sidecar with fail-closed
-pre-append chain verification, the MP-003 self-check convention, and the
+canonical primitives, a verified `head.json` tail cache with fail-closed
+pre-append verification of the whole chain, the MP-003 self-check convention, and the
 `docs/STATUS.md` status matrix) are implemented, with `delta_phi < 0`
 (consolidation). Phase 6.1 (all five ledger writers — log, run, queue, notary
 and inbox — now append through the canonical core primitives with the O(1)
