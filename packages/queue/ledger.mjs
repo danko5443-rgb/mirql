@@ -21,6 +21,8 @@ import {
   foldQueueState,
   PRIVILEGED_EVENTS,
   getTrustedPublicKey,
+  GENESIS_PREV_HASH,
+  writeLedgerHeadSidecar,
 } from "../core/index.mjs";
 
 export { withLedgerLock };
@@ -176,7 +178,7 @@ export function appendLedgerEventRaw(mirqlDir, eventData, keypair, currentState)
     prev_hash:
       currentState?.disk_last_hash ||
       currentState?.last_hash ||
-      "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      GENESIS_PREV_HASH,
     payload: eventData.payload,
   };
 
@@ -196,6 +198,8 @@ export function appendLedgerEventRaw(mirqlDir, eventData, keypair, currentState)
   const ledgerPath = join(mirqlDir, "ledger", "events.jsonl");
   mkdirSync(dirname(ledgerPath), { recursive: true });
   appendFileSync(ledgerPath, jcs(signed) + "\n", "utf8");
+  // O(1) verified head sidecar (Law 4, Phase 6.2).
+  writeLedgerHeadSidecar(mirqlDir, signed);
 
   if (currentState) {
     currentState.seq = nextSeq;

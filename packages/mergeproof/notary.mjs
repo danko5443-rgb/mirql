@@ -19,6 +19,7 @@ import { trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 //   under withLedgerLock, hash-chained onto the ledger head.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
+import { GENESIS_PREV_HASH, writeLedgerHeadSidecar } from "../core/ledger-verify.mjs";
 import {
   EXIT_CODES,
   generateEd25519Keypair,
@@ -42,8 +43,8 @@ export const NOTARY_KEY_FILE = "notary.key.json";
 /** W2 alias key file inside <mirqlDir>/keys/. */
 export const NOTARY_KEY_ALIAS_FILE = "mergeproof.key.json";
 
-/** prev_hash anchor of the very first event in any ledger. */
-export const GENESIS_PREV_HASH = `sha256:${"0".repeat(64)}`;
+/** prev_hash anchor of the first event, re-exported from the canonical core primitive. */
+export { GENESIS_PREV_HASH };
 
 /**
  * Maps a mergeproof verdict to its canonical ledger event type (Law 3 ACL:
@@ -351,6 +352,8 @@ export function signAndAppendVerdict(mirqlDir, verdictDoc, options = {}) {
       jcs(probe) + "\n",
       { encoding: "utf8", flag: "a" },
     );
+    // O(1) verified head sidecar (Law 4, Phase 6.2).
+    writeLedgerHeadSidecar(dir, probe);
 
     return {
       status: "appended",

@@ -25,33 +25,27 @@ const REPRODUCER_TIMEOUT_MS = 30000;
 const SUITE_TIMEOUT_DEFAULT_MS = 20 * 60 * 1000;
 const COVERAGE_DRIVER_PATH = fileURLToPath(new URL("./coverage-driver.mjs", import.meta.url));
 
+/** Law 8 detail used whenever unsandboxed execution caps an auto_merge verdict. */
+const SANDBOX_NONE_DETAIL = 'Execution ran with sandbox: "none" (no OS/container isolation); human review required.';
+
+/** Law 8 gate: true when the evidence shows the candidate ran with no OS/container isolation (`sandbox: "none"`), or isolation was required (`requireSandbox`) yet no container runtime was selected. / */
+function isUnsandboxedExecution(options = {}) {
+  return options.sandbox === "none" || options.evidence?.sandbox === "none" ||
+    (options.requireSandbox === true && options.sandbox !== "docker" && options.sandbox !== "podman");
+}
+
+/** Cap an `auto_merge` verdict at `needs_human` under unsandboxed execution (Law 8 + Law 5); other verdicts pass through. */
+function capUnsandboxedAutoMerge(result, options = {}) {
+  if (!isUnsandboxedExecution(options) || result?.verdict !== "auto_merge") return result;
+  return { ...result, verified: false, verdict: "needs_human", rule: "UNSANDBOXED_EXECUTION", violation: "SANDBOX_NONE", detail: SANDBOX_NONE_DETAIL };
+}
+
 function positiveIntMs(value) {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-/**
- * Verifies a candidate fix/feature:
- * 1. AST / Anti-Cheat Gate: MP-001 through MP-005 rules over the measured diff.
- * 2. Law 13 Complexity Potential Gate: delta phi is measured from the git trees
- *    and judged against the signed warrant's cumulative allowance.
- * 3. Warrant scope gate: changed non-test paths must match the signed scope
- *    before any candidate code is executed.
- * 4. Law 16 causal execution sequence, run in a disposable worktree with a
- *    disposable HOME and measured out-of-band coverage:
- *    - Red-on-Base twice: reproducer must fail with an assertion failure.
- *    - Green-on-Head twice: reproducer passes, coverage collected over the
- *      Node inspector (never from a file or env var the candidate can write),
- *      every changed non-blank line of changed source fully executed.
- *    - Full suite passes on head, then passes again with the base versions of
- *      pre-existing tests the patch modified (weakened-test detection).
- *    - Necessity: each non-test file reverted must re-red the reproducer.
- * 5. Fail-closed everywhere: missing proof, missing runner, unmeasurable
- *    coverage, or non-integer exit codes reject.
- *
- * @param {object} options
- * @returns {any} verification result
- */
+/** Verifies a candidate fix/feature: 1. AST / Anti-Cheat Gate: MP-001 through MP-005 rules over the measured diff. 2. Law 13 Complexity Potential Gate: delta phi is measured from the git trees and judged against the signed warrant's cumulative allowance. 3. Warrant scope gate: changed non-test paths must match the signed scope before any candidate code is executed. 4. Law 16 causal execution sequence, run in a disposable worktree with a disposable HOME and measured out-of-band coverage: - Red-on-Base twice: reproducer must fail with an assertion failure. - Green-on-Head twice: reproducer passes, coverage collected over the Node inspector (never from a file or env var the candidate can write), every changed non-blank line of changed source fully executed. - Full suite passes on head, then passes again with the base versions of pre-existing tests the patch modified (weakened-test detection). - Necessity: each non-test file reverted must re-red the reproducer. 5. Fail-closed everywhere: missing proof, missing runner, unmeasurable coverage, or non-integer exit codes reject. */
 export function verifyAttempt(options = {}) {
   // 1. Fixture mode
   if (options.fixture) {
@@ -84,9 +78,7 @@ export function verifyAttempt(options = {}) {
   return verifyExecutionAttempt(options);
 }
 
-/**
- * Checks Law 13 Complexity Potential: Delta Phi <= 0 (and strictly < 0 for consolidator).
- */
+/** Checks Law 13 Complexity Potential: Delta Phi <= 0 (and strictly < 0 for consolidator). / */
 function checkPhiLaw13(options, fixture = {}) {
   const phiBase =
     options.phiBefore ??
@@ -140,9 +132,7 @@ function checkPhiLaw13(options, fixture = {}) {
   return { ok: true };
 }
 
-/**
- * Verifies a PR/Outcome fixture file.
- */
+/** Verifies a PR/Outcome fixture file. / */
 function verifyFixture(fixtureInput) {
   let fixture;
   if (typeof fixtureInput === "string") {
@@ -177,10 +167,7 @@ function verifyFixture(fixtureInput) {
   return evaluateCheckResult(antiCheatCheck, fixture);
 }
 
-/**
- * Formats the evaluation result according to the Law 10 specification.
- * Enforces fail-closed proof validation.
- */
+/** Formats the evaluation result according to the Law 10 specification. Enforces fail-closed proof validation. / */
 function evaluateCheckResult(check, fixture = {}) {
   if (check.ok) {
     // Fail closed: proof must be present
@@ -229,27 +216,7 @@ function evaluateCheckResult(check, fixture = {}) {
   };
 }
 
-/**
- * Executes honest causal proof against a real git repository (Phase 3).
- *
- * Security posture of the execution phase:
- * - H2 (isolation): every candidate command runs inside a disposable
- *   `git worktree` under the OS temp directory, force-removed in `finally`.
- * - H4 (disposable home): every candidate command also gets one per-verification
- *   temp HOME/USERPROFILE (HOMEDRIVE/HOMEPATH on Windows), so credentials in
- *   the real user home are unreachable; the temp home is removed in `finally`.
- * - H3 (env sanitization): candidate environments come from `sanitizeAgentEnv`
- *   with the disposable home applied on top.
- * - Out-of-band coverage: the green-on-head run executes through
- *   coverage-driver.mjs, which measures V8 precise coverage over the Node
- *   inspector. No NODE_V8_COVERAGE directory is created and no coverage file
- *   is ever read back. An entry counts only when the source V8 compiled hashes
- *   to the head commit's blob, so a script claiming a file's URL or a rewritten
- *   worktree file supplies no execution evidence.
- * - Timeouts: reproducer runs keep the 30s cap; full-suite runs (and the
- *   restored-tests re-run) use options.suiteTimeoutMs /
- *   MIRQL_SUITE_TIMEOUT_MS (default 20 minutes).
- */
+/** Executes honest causal proof against a real git repository (Phase 3). */
 function verifyGitRepository(options) {
   // Candidate code runs as this OS user, so a readable owner key could be stolen
   // and used to sign its own approval. Refuse before anything candidate runs.
@@ -947,7 +914,7 @@ function verifyGitRepository(options) {
           phi: measuredPhi, detail: "The complexity spend could not be durably recorded: " + error.message };
       }
     }
-    return {
+    return capUnsandboxedAutoMerge({
       phi: phiConsumption ? { ...measuredPhi, consumption_event: phiConsumption.hash } : measuredPhi,
       verified: !conformance,
       verdict: conformance ? "conformance_pass" : "auto_merge",
@@ -976,21 +943,31 @@ function verifyGitRepository(options) {
         anti_cheat: { passed: true, violations_count: 0 },
         full_suite: { passed: true, exitCode: fullRes.exitCode },
       },
-    };
+    }, options);
   } finally {
     if (disposableHome !== null) {
-      try { rmSync(disposableHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch {}
+      try { rmSync(disposableHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); }
+      catch (error) {
+        // mp-003-allow: best-effort disposal of the disposable verification home; it started empty, so it leaks no credentials.
+        void error;
+      }
     }
     if (worktreeDir !== null) {
-      try { git(["worktree", "remove", "--force", worktreeDir]); } catch {}
-      try { rmSync(worktreeDir, { recursive: true, force: true }); } catch {}
+      try { git(["worktree", "remove", "--force", worktreeDir]); }
+      catch (error) {
+        // mp-003-allow: git worktree removal is best-effort; rmSync below and git pruning reclaim the directory.
+        void error;
+      }
+      try { rmSync(worktreeDir, { recursive: true, force: true }); }
+      catch (error) {
+        // mp-003-allow: best-effort temp cleanup after forced worktree removal.
+        void error;
+      }
     }
   }
 }
 
-/**
- * Executes or evaluates the Triple-Execution Red-Green-ReRed sequence.
- */
+/** Executes or evaluates the Triple-Execution Red-Green-ReRed sequence. / */
 function verifyExecutionAttempt(options = {}) {
   // A. AST & Anti-Cheat gate first
   if (Array.isArray(options.modifiedFiles) && options.modifiedFiles.length > 0) {
@@ -1165,7 +1142,7 @@ function verifyExecutionAttempt(options = {}) {
       }
       return null;
     };
-    const success = (base, head, reRed) => ({
+    const success = (base, head, reRed) => capUnsandboxedAutoMerge({
       verified: true,
       verdict: "auto_merge",
       rule: "MP-000",
@@ -1181,7 +1158,7 @@ function verifyExecutionAttempt(options = {}) {
         re_red_on_revert: { passed: true, exitCode: reRed.exitCode },
         anti_cheat: { passed: true, violations_count: 0 },
       },
-    });
+    }, options);
 
     const firstResult = step("red_on_base");
     if (firstResult && typeof firstResult.then === "function") {
