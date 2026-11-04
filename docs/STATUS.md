@@ -9,13 +9,13 @@ test. "Partial" means the law's mechanism exists but a documented gap remains.
 
 | Law | Name | Status | Code pointers |
 |-----|------|--------|---------------|
-| Law 1 | Offline Litmus | Implemented | `package.json` (zero dependencies), `tests/structure.test.mjs` |
+| Law 1 | Offline Litmus | Implemented | `package.json` (zero dependencies), `tests/structure.test.mjs` (mechanical gates are strictly offline; PR Court LLM review in `scripts/pr-court.mjs` runs out-of-band after mechanical checks and fails closed if unreachable) |
 | Law 2 | Lifeguard Law | Implemented | `packages/run/supervisor.mjs`, `tests/lifeguard-rollback.test.mjs` |
-| Law 3 | Roles Propose / Tools Author | Implemented | `packages/core/acl.mjs` (`WRITER_ACL`), `packages/core/schema.mjs` (event `writer`) |
+| Law 3 | Roles Propose / Tools Author | Implemented | `packages/core/acl.mjs` (`WRITER_ACL`), `packages/core/schema.mjs` (event `writer`), `scripts/pr-court.mjs` (`roles/critic.md`, `roles/advocate.md`, `roles/judge.md` emit JSON proposals; host tool validates, applies, commits, posts, and merges) |
 | Law 4 | One Durable Ledger | Implemented | `packages/log/index.mjs`, `packages/core/ledger-verify.mjs` (canonical `GENESIS_PREV_HASH`, `head.json` tail cache with an unkeyed `events_sha256` digest, `verifyChainBeforeAppend` walks the whole chain on every append), all five writers: `packages/run/ledger.mjs`, `packages/queue/ledger.mjs`, `packages/mergeproof/notary.mjs`, `packages/inbox/ledger.mjs` |
-| Law 5 | Base-Pinned Mortal Verdicts | Implemented | `packages/mergeproof/evaluator.mjs` (MP-004 `STALE_BASE`) |
-| Law 6 | Silence Is Never Consent | Implemented | `packages/mergeproof/evaluator.mjs` (MP-005 `UNCITED_SURFACE`, `MISSING_PHI` fail-closed) |
-| Law 7 | Notary Outside Blast Radius | Implemented | `packages/mergeproof/notary.mjs`, `packages/mergeproof/evaluator.mjs` (`getGitDiffInfo` git cross-check, `LAW_7` fail-closed) |
+| Law 5 | Base-Pinned Mortal Verdicts | Implemented | `packages/mergeproof/evaluator.mjs` (MP-004 `STALE_BASE`), `scripts/pr-court.mjs` (`landCourtMerge` verifies current base tip, green notary on `head_sha`, and `--match-head-commit`) |
+| Law 6 | Silence Is Never Consent | Implemented | `packages/mergeproof/evaluator.mjs` (MP-005 `UNCITED_SURFACE`, `MISSING_PHI` fail-closed), `scripts/ci-review-gate.mjs` + `scripts/pr-court.mjs` (malformed/missing LLM output or receipts fail closed) |
+| Law 7 | Notary Outside Blast Radius | Implemented | `packages/mergeproof/notary.mjs`, `packages/mergeproof/evaluator.mjs` (`getGitDiffInfo` git cross-check, `LAW_7` fail-closed), `.github/workflows/mergeproof-retrigger.yml` (`base-notary` scripts only; candidate checkout read strictly as text) |
 | Law 8 | Speechless Sandboxes | Implemented | `packages/run/agent.mjs` (`buildContainerArgs`: `--network none`, `--read-only`, `--cap-drop ALL`, `no-new-privileges`, uid 65534; `SANDBOX_UNAVAILABLE` fail-closed), `packages/run/agent-workspace.mjs` (link-safe staging and sync-back; `WORKSPACE_ESCAPE`), `packages/run/verify.mjs` + `packages/mergeproof/evaluator.mjs` (`UNSANDBOXED_EXECUTION`: `sandbox: "none"` never yields `auto_merge`; git-mode verification has no container runner and refuses sandbox requests) |
 | Law 9 | N-1 Processes N | Partial | `packages/queue/index.mjs` (tick/lease pipeline, `withLedgerLock`); multi-node N-1 throughput is not yet exercised by tests |
 | Law 10 | Ship Invariants Not Features | Implemented | `surface.lock`, `bin/mirql.mjs` (`m check --surface`), `schemas/*.schema.json` |
@@ -55,6 +55,7 @@ rejects any uncited delta. Schemas pinned: `event/v1`, `warrant/v1`,
 | Phase 6.2 | Verified head sidecar + fail-closed pre-append verification of the whole chain (appends are O(n); `head.json` cannot vouch for earlier lines) | Implemented |
 | Phase 6.3 | Stale-lock break hardening in `packages/core/lock.mjs` (atomic rename tombstone + PID/nonce verification) | Implemented |
 | Phase 6.4 | MP-003 empty-catch cleanliness (self-check + `// mp-003-allow: <reason>` convention; a marker only exempts a catch unchanged from the asserted `--base`, so a candidate cannot approve its own) | Partial — files touched by Phase 5–6 are clean; a repo-wide sweep remains, and `scripts/ci-evidence.mjs` does not yet supply `sourceCode`, so the CI gate does not run this scan |
-| Phase 6.5 | Referee path protection (`policy/paths.yaml` `humanOnly`/`humanApprove` coverage) | Implemented |
+| Phase 6.5 | Referee path protection (`policy/paths.yaml` Courthouse Lock in `humanOnly` + engineering paths in `humanApprove` + `roles/judge.md` protected by `AI_REVIEWER_CONFIG_PATTERNS`) | Implemented |
 | Phase 6.6 | MP-003/MP-005 documented as lints, optional strengthening | Partial — documented in `packages/core/anti-cheat.mjs`; strengthening open |
 | Phase 6.7 | Honest per-law/per-tool status matrix (this document) | Implemented |
+| PR Court | 3-Agent PR Court (`Critic` ↔ `Advocate` Ping-Pong → `Judge` in `scripts/pr-court.mjs`, `scripts/ci-review-gate.mjs`, `roles/{critic,advocate,judge}.md`, `.github/workflows/mergeproof-retrigger.yml`, `.github/workflows/mergeproof-review-signal.yml`, `docs/pr-court.md`) | Implemented |

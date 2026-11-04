@@ -26,7 +26,7 @@
 
 1. **`m` — mergeproof**: The isolated notary gate. Evaluates candidate pull requests against base branch invariants, requiring causal RED-to-GREEN proofs, potential $\Phi$ within the human-signed allowance, and anti-cheat verification before signing verdicts.
 2. **`i` — inbox**: The communication membrane between human operators and autonomous roles. Ingests human intent, digests activity logs, and facilitates 1-tap warrant sign-off.
-3. **`r` — run**: The execution engine and supervisor. Spawns workers with a stripped environment and a disposable home directory, with explicit resource budgets and lease timeouts. Workers run as the same OS user: this is not yet an OS sandbox.
+3. **`r` — run**: The execution engine and supervisor. Spawns workers in hardened container sandboxes (`docker` / `podman` with `--network none`, `--read-only`, `--cap-drop ALL`, `no-new-privileges`, and non-root UID `65534`), or with a stripped environment and disposable home directory (`sandbox: "none"`, which never yields `auto_merge`), enforcing explicit resource budgets and lease timeouts.
 4. **`q` — queue**: The deterministic job scheduler. Mints cryptographic warrants, leases jobs to tiered agents (`flash`, `mid`, `max`), and tracks macro-state transitions (`BUILD`, `HARDEN`, `PATROL`, `QUIESCENT`).
 5. **`l` — log**: The append-only, tamper-evident cryptographic event ledger. All system state is a pure deterministic fold over immutable ledger events.
 
@@ -42,7 +42,7 @@ All operations in `mirql` are strictly governed by [CONSTITUTION.md](CONSTITUTIO
 - **Law 5: Base-Pinned Mortal Verdicts** — Proofs are pinned to base commit SHA and lease TTL.
 - **Law 6: Silence Is Never Consent** — Timeouts and ambiguities always evaluate to refusal.
 - **Law 7: Notary Outside Blast Radius** — Notary operates outside worker boundaries.
-- **Law 8: Speechless Sandboxes** — The goal is workers with zero network access or ambient credentials. Today only the environment and home directory are isolated; network access and same-user file access remain open until OS isolation lands.
+- **Law 8: Speechless Sandboxes** — Workers run in hardened container sandboxes (`docker` / `podman` with `--network none`, `--read-only`, `--cap-drop ALL`, `no-new-privileges`, UID `65534`, and link-safe workspace staging); unsandboxed runs (`sandbox: "none"`) are capped at `needs_human` and never yield `auto_merge`.
 - **Law 9: N-1 Processes N** — Stable version N-1 gates candidate version N.
 - **Law 10: Ship Invariants Not Features** — Merges require machine-checked behavioral invariants.
 - **Law 11: No Warrant No Work** — Execution prohibited without signed, unexpired warrant.
@@ -72,8 +72,8 @@ The public surface is strictly locked in [`surface.lock`](surface.lock):
 
 ### Run (`mirql r`)
 - `mirql r supervisor` — Execute the reactive agent supervisor daemon. Each leased job runs its worker in a private clone of the workspace's committed `HEAD`, with its own Git store that is deleted afterwards, so a retry starts from the base commit and your checkout is never touched. Filters such as Git LFS are not applied in that clone, so the worker sees and records raw bytes. A host tool commits the worker's output, then the Git-mode verifier judges that commit against the warrant's scope, its cumulative `phi_budget` and the reproducer the owner signed (`mirql i send --reproducer <test-file>`; without one the attempt ends `NO_REPRODUCER_DECLARED`). An accepted candidate is pinned at `refs/mirql/attempts/<sha>` for you to merge. `mirql i digest` shows the rule behind each outcome.
-- `mirql r agent` — Run a worker command with a stripped environment and a disposable home directory (not an OS sandbox).
-- `mirql r verify --workspace <repo> --base <ref> --head <ref> --reproducer <changed-test-file>` — Run the measured Git causal checks and the project's full npm test suite. For humanApprove changes, add `--dir <ledger> --warrant-id <id>` to consume an exact owner-signed approval. `--fixture` checks conformance only. Candidate tests execute with a stripped environment and a disposable home directory, but still under the invoking user account; OS isolation remains unfinished. The verifier refuses to run candidate code while the owner key is plaintext (`OWNER_KEY_UNPROTECTED`).
+- `mirql r agent` — Run a worker command inside a hardened container sandbox (`--sandbox docker|podman`) or with a stripped environment and disposable home directory (`--sandbox none`, default for local runs; never yields `auto_merge`).
+- `mirql r verify --workspace <repo> --base <ref> --head <ref> --reproducer <changed-test-file>` — Run the measured Git causal checks and the project's full npm test suite. For humanApprove changes, add `--dir <ledger> --warrant-id <id>` to consume an exact owner-signed approval. `--fixture` checks conformance only. Candidate tests execute with a stripped environment and a disposable home directory in Git mode (which refuses container sandbox requests so host execution is never misreported as sandboxed) and are capped at `needs_human` under `sandbox: "none"`. The verifier refuses to run candidate code while the owner key is plaintext (`OWNER_KEY_UNPROTECTED`).
 - `mirql r probe` — Run declarative health probes (tests, drift, mutants, complexity, surface).
 - `mirql r bing-bong` (alias `mirql r bb`) — Multi-agent frontier consensus loop where 2–3 cross-family agents debate until reaching unanimous `CONVERGED` consensus or escalating to `mirql-inbox` with exit code `10`.
 
@@ -223,19 +223,36 @@ them, so complexity cannot be hidden behind a test-shaped path. Computed
 `import(variable)` specifiers cannot be resolved statically and remain a
 residual risk.
 
-The CI notary runs without a ledger, so its allowance is always 0. A pull
-request that grows $\Phi$ is rejected in CI, including one that touches a
-`humanApprove` path, so merging it is a human decision.
+The CI notary runs without a ledger, so its default $\Phi$ allowance is 0. A pull
+request that grows $\Phi$ is rejected in CI (`PHI_INCREASE`) before surface-review
+holds (`MP-005`), unless the repository owner explicitly signs off on the exact
+head commit (`reviewed:<head sha>`).
 GitHub enforces that only when `main` requires the Mergeproof check and agents
 use an identity without merge rights; otherwise an agent can merge over red.
 
 The gate runs on `pull_request_target`, so it always uses the base branch's
 workflow and a pull request cannot rewrite its own check. A workflow change
-first takes effect on the pull requests opened after it lands. A review does
-not re-trigger the check: after an AI reviewer approves, re-run the job or add a
-label to the pull request.
+first takes effect on the pull requests opened after it lands.
 
-After reviewing a pull request, the repository owner can sign off on it:
+### PR Court (`Critic` ↔ `Advocate` → `Judge`) & Courthouse Lock
+
+To eliminate manual review bottlenecks and recover from external bot rate limits while keeping every state mutation inside deterministic host tooling (**Law 3: Roles Propose / Tools Author** and **Law 7: Notary Outside Blast Radius**), `mirql` runs a three-role **PR Court** (`scripts/pr-court.mjs`, orchestrated by `.github/workflows/mergeproof-retrigger.yml` and woken on review submissions by `.github/workflows/mergeproof-review-signal.yml`; see [`docs/pr-court.md`](docs/pr-court.md)):
+
+1. **Courthouse Lock (`humanOnly` in [`policy/paths.yaml`](policy/paths.yaml)):**
+   - Only the files that define the laws, the CI gate wiring, and the Judge's own instructions remain locked in `humanOnly`: `CONSTITUTION.md`, `NOT-ROADMAP.md`, `policy/**`, `.github/**`, `roles/judge.md`, `.coderabbit.yaml`, `.coderabbit.yml`, and `AGENTS.md`.
+   - Engineering paths (`bin/**`, `scripts/**`, `conformance/**`, `schemas/**`, `packages/**`, `roles/**`) sit in `humanApprove` (`MP-005`), allowing the PR Court and verified AI reviewers to review and clear them without `MP-001` rejection while still enforcing **Law 13** ($\Delta\Phi \le 0$) and anti-cheat rules (`MP-002`, `MP-003`).
+   - PR Court receipts (`mirql-judge[bot]`, `mirql-critic[bot]`) never clear `humanOnly` paths or reviewer configuration files (`AI_REVIEWER_CONFIG_PATTERNS`, including `roles/judge.md`).
+2. **The 3 Court Roles (up to 3 Ping-Pong rounds per PR):**
+   - **Critic (`roles/critic.md`):** Independent fallback reviewer when external bots (`coderabbitai[bot]`, `chatgpt-codex-connector[bot]`) are rate-limited or absent. Evaluates nonce-fenced diffs strictly as untrusted data and emits `APPROVE` or `COMMENT` with P1/P2 findings while respecting **Law 13** ($\Delta\Phi \le 0$).
+   - **Advocate (`roles/advocate.md`):** Ping-Pong responder that answers every open finding from Codex, CodeRabbit, or Critic with either `AGREE_AND_FIX` (minimal search/replace patches verified in-memory against the Courthouse Lock, `MP-002`, `MP-003`, and $\Delta\Phi \le 0$ before committing and pushing via `MIRQL_COURT_TOKEN`) or `REBUT` (evidence-backed rebuttal citing exact files, line ranges, test pins, or Constitutional laws).
+   - **Judge (`roles/judge.md`):** Final constitutional arbiter invoked only after deterministic preconditions pass (`OWNER`/`MEMBER`/`COLLABORATOR` author, zero diff hazards, no Courthouse Lock path touched, `Candidate Tests` and `Base Suite` green, and $\Delta\Phi \le 0$). Verifies that `AGREE_AND_FIX` patches landed in `HEAD`, adjudicates `REBUT` arguments (`FIXED`, `OVERRULED_FALSE_POSITIVE`, or `UNRESOLVED`), and emits `MERGE`, `REMAND` (when `round < 3`), or `ESCALATE` (when `round >= 3` or uncertain).
+3. **Receipts, Notary Re-Run, and Auto-Merge:**
+   - Each role records a tamper-checked state marker (`<!-- mirql-court-state:v1 {...} -->`) in PR comments under the `github-actions[bot]` identity (`scripts/ci-review-gate.mjs`).
+   - A verified Judge `MERGE` receipt clears `findAiApproval` as `mirql-judge[bot]` (overruling false-positive reviewer findings adjudicated on that exact `HEAD`), re-runs a failed `Mergeproof External Notary` gate if needed, and—when `MIRQL_COURT_AUTO_MERGE=1` is enabled—lands the PR with `gh pr merge --match-head-commit <head_sha>`.
+
+### Owner Sign-Off (`reviewed:<head sha>`)
+
+For pull requests that touch the **Courthouse Lock** (`humanOnly`) or intentionally grow $\Phi$, the repository owner can sign off directly:
 
 ```bash
 node scripts/owner-signoff.mjs <pr-number>
@@ -244,15 +261,13 @@ node scripts/owner-signoff.mjs <pr-number>
 This shows the head commit and asks for a typed yes, then adds the label
 `reviewed:<head sha>`, which re-runs the gate. A new push voids the sign-off;
 after removing the label, re-run the job. The other rules still run, the verdict
-stays `needs_human` at best, and the merge stays manual. Only this sign-off, not
-an AI approval, can clear a pull request that grows the complexity score Φ; it
-grants no warrant allowance, and refactors must still shrink Φ. A pull request that
-changes reviewer config or agent instructions (such as `AGENTS.md`) stays red, so
+stays `needs_human` at best, and the merge stays manual. Only this owner sign-off—never
+an AI reviewer or PR Court receipt—can clear a pull request that grows the complexity score $\Phi$
+(`phiGrowthSignedOff`); it grants no warrant allowance, and refactors must still shrink $\Phi$. A pull request that
+changes reviewer config or agent instructions (such as `AGENTS.md` or `roles/judge.md`) is never cleared by AI approval, so
 merging it is the owner's decision. The label records a review; it is not a
 signature, because GitHub cannot tell the owner from an agent using the owner's
-`gh` login. An open pull request needs `main` merged into it before its first
-sign-off after this feature lands, because the gate uses the base commit recorded
-on the pull request.
+`gh` login.
 
 
 Worker commands require a readable, committed Git baseline. After execution,

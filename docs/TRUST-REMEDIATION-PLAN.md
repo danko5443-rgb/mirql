@@ -17,7 +17,10 @@ and inbox — now append through the canonical core primitives with the
 `head.json` tail cache and whole-chain pre-append verification), Phase 6.3
 (stale-lock atomic-rename breaking with PID/nonce verification in
 `packages/core/lock.mjs`) and Phase 6.5 (referee path protection in
-`policy/paths.yaml`) are implemented as well. The remaining open item is
+`policy/paths.yaml`, narrowed to the Courthouse Lock in `humanOnly` with
+engineering paths in `humanApprove` and `roles/judge.md` protected by
+`AI_REVIEWER_CONFIG_PATTERNS`, paired with the 3-role PR Court in
+`scripts/pr-court.mjs` and `docs/pr-court.md`) are implemented as well. The remaining open item is
 tracked in `docs/STATUS.md` (6.6 lint strengthening). The owner
 chose to keep the repository private and leave the unavailable main ruleset
 requirement open. Human review requirements are not satisfied by
