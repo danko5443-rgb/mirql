@@ -1,4 +1,4 @@
-import { requireAuthorizedWarrant } from "../core/warrant.mjs";
+import { declaredReproducer, requireAuthorizedWarrant } from "../core/warrant.mjs";
 import { assertKeyEnrolled } from "../core/keyring.mjs";
 import { resolveTrustRoot } from "../core/trust-root.mjs";
 import { spawn, spawnSync } from "node:child_process";
@@ -20,6 +20,16 @@ import {
   createLedgerWatcher,
 } from "../core/index.mjs";
 import { runAgent } from "./agent.mjs";
+import {
+  authorCandidate,
+  disposeAttempt,
+  gitAuthorityDigest,
+  measureTreeSurface,
+  prepareAttempt,
+  releaseCandidate,
+  snapshotWorkerTree,
+  treeMatchesBase,
+} from "./supervisor-attempt.mjs";
 import { verifyAttempt } from "./verify.mjs";
 import { computePhi } from "./phi.mjs";
 import { appendSupervisorEvent, getOrGenerateSupervisorKey } from "./ledger.mjs";
@@ -95,61 +105,104 @@ export function runSupervisor(options = {}) {
     throw breakerErr;
   }
 
-  // Issue #47: the pre-execution workspace Φ must be captured before the
-  // builder mutates it — after runAgent, phi_before is no longer observable
-  // and ΔΦ collapses to ~0 in the ledger.
-  const phiBeforeMeasured = Number.isSafeInteger(options.phiBefore)
-    ? options.phiBefore
-    : computePhi(workspaceDir).total;
+  // The signed warrant names the reproducer, so a worker cannot pick the test
+  // that judges its own change.
+  const reproducerFile = declaredReproducer(warrant);
+  const prepared = reproducerFile
+    ? prepareAttempt(workspaceDir)
+    : { ok: false, rule: "NO_REPRODUCER_DECLARED", detail: "The signed warrant does not name evidence.reproducer_test" };
+  if (!prepared.ok) {
+    return finalizeSupervisor(options, mirqlDir, workspaceDir, keypair, warrant, {
+      agentResult: { ok: false, exitCode: EXIT_CODES.POLICY_DENIAL, violation: prepared.rule, detail: prepared.detail },
+      verifyResult: refused(prepared.rule, prepared.detail),
+      agentDuration: 0,
+      treeDir: workspaceDir,
+    });
+  }
+  try {
+    return finalizeSupervisor(options, mirqlDir, workspaceDir, keypair, warrant,
+      superviseAttempt(options, mirqlDir, keypair, warrant, prepared.attempt, reproducerFile));
+  } finally {
+    disposeAttempt(prepared.attempt);
+  }
+} finally {
+  cleanupState();
+}
+}
 
-  // 3. Invoke unprivileged agent worker
+function refused(rule, detail) {
+  return { verified: false, verdict: "reject", rule, detail };
+}
+
+/**
+ * One attempt: the worker runs in a disposable checkout of the base commit, a
+ * host tool authors its output (Law 3), and only the Git-mode verifier decides.
+ * The verifier takes nothing from the caller beyond the warrant selection, so
+ * a library caller cannot swap in its own checks and skip the warrant's scope
+ * or its cumulative phi_budget (Law 13).
+ */
+function superviseAttempt(options, mirqlDir, keypair, warrant, attempt, reproducerFile) {
+  const { attemptDir, baseSha } = attempt;
+  const measured = { treeDir: attemptDir, baseCommit: baseSha };
+
+  // Issue #47: the pre-execution Φ must be captured before the builder mutates
+  // the tree. The verifier's measurement replaces it when one exists.
+  measured.phiBefore = Number.isSafeInteger(options.phiBefore) ? options.phiBefore : computePhi(attemptDir).total;
+
+  const authority = gitAuthorityDigest(attempt);
   const agentStartTime = Date.now();
   const agentResult = runAgent({
     ...options.agentOptions,
     env: options.env,
     command: options.builderCommand,
     modifiedFiles: options.modifiedFiles,
-    cwd: workspaceDir,
+    cwd: attemptDir,
   });
-  const agentDuration = Date.now() - agentStartTime;
+  const done = (verifyResult, extra = {}) => ({
+    ...measured, agentResult, verifyResult, agentDuration: Date.now() - agentStartTime, ...extra,
+  });
 
-  // 4. Run verifyAttempt
-  const verifyResult = verifyAttempt(
-    options.verifyOptions ?? {
-      workspaceDir,
-      fixture: options.fixture,
-      reproducer: options.reproducer,
-      runCheck: options.runCheck,
-      modifiedFiles: options.modifiedFiles,
-      sourceCode: options.sourceCode,
-    },
-  );
-
-  if (verifyResult && typeof verifyResult.then === "function") {
-    return verifyResult
-      .then((vRes) =>
-        finalizeSupervisor(options, mirqlDir, workspaceDir, keypair, warrant, agentResult, vRes, agentDuration, phiBeforeMeasured),
-      )
-      .finally(cleanupState);
+  if (gitAuthorityDigest(attempt) !== authority) {
+    return done(refused("WORKER_TAMPERED_GIT", "The worker changed the repository's Git configuration"));
   }
-
-  const res = finalizeSupervisor(
-    options,
-    mirqlDir,
-    workspaceDir,
-    keypair,
-    warrant,
-    agentResult,
-    verifyResult,
-    agentDuration,
-    phiBeforeMeasured,
-  );
-  cleanupState();
-  return res;
-} catch (err) {
-  cleanupState();
-  throw err;
-}
+  let tree;
+  try {
+    tree = snapshotWorkerTree(attempt);
+    measured.surface = measureTreeSurface(attempt, tree);
+  } catch (error) {
+    return done(refused("HOST_COMMIT_FAILED", error.message));
+  }
+  if (agentResult.ok !== true || agentResult.exitCode !== 0 || agentResult.signal) {
+    return done(refused(agentResult.violation ?? agentResult.rule ?? "WORKER_FAILED",
+      agentResult.detail ?? `The worker exited with ${agentResult.workerExitCode ?? agentResult.exitCode}`));
+  }
+  if (treeMatchesBase(attempt, tree)) {
+    return done(refused("NO_WORKER_CHANGES", "The worker left no change to verify"));
+  }
+  let headSha;
+  try {
+    headSha = authorCandidate(attempt, tree, { jobId: options.jobId, warrantId: warrant.id });
+  } catch (error) {
+    return done(refused("HOST_COMMIT_FAILED", error.message));
+  }
+  measured.headCommit = headSha;
+  let verifyResult;
+  try {
+    verifyResult = verifyAttempt({
+      git: true,
+      workspaceDir: attempt.workspaceDir,
+      baseSha,
+      headSha,
+      reproducerFile,
+      mirqlDir,
+      warrantId: warrant.id,
+      supervisorKeypair: keypair,
+    });
+    return done(verifyResult);
+  } finally {
+    // Only an accepted candidate stays pinned for the owner to merge.
+    if (verifyResult?.verified !== true) releaseCandidate(attempt, headSha);
+  }
 }
 
 /**
@@ -208,41 +261,8 @@ function measureGitHead(workspaceDir) {
   return null;
 }
 
-/** Real change surface (files/lines) from `git diff --numstat HEAD`, or null off-repo. */
-function measureSurface(workspaceDir) {
-  try {
-    const res = spawnSync("git", ["diff", "--numstat", "HEAD"], {
-      cwd: workspaceDir,
-      encoding: "utf8",
-      timeout: 10_000,
-    });
-    if (res.status !== 0) return null;
-    let filesChanged = 0;
-    let linesAdded = 0;
-    let linesRemoved = 0;
-    for (const line of String(res.stdout || "").split(/\r?\n/)) {
-      if (!line.trim()) continue;
-      const [add, del] = line.split("\t");
-      filesChanged += 1;
-      if (/^\d+$/.test(add)) linesAdded += parseInt(add, 10);
-      if (/^\d+$/.test(del)) linesRemoved += parseInt(del, 10);
-    }
-    return { files_changed: filesChanged, lines_added: linesAdded, lines_removed: linesRemoved };
-  } catch {}
-  return null;
-}
-
-function finalizeSupervisor(
-  options,
-  mirqlDir,
-  workspaceDir,
-  keypair,
-  warrant,
-  agentResult,
-  verifyResult,
-  agentDuration,
-  phiBeforeMeasured,
-) {
+function finalizeSupervisor(options, mirqlDir, workspaceDir, keypair, warrant, run) {
+  const { agentResult, verifyResult, agentDuration, treeDir, baseCommit, headCommit } = run;
   const nowMs = Number.isSafeInteger(options.nowMs)
     ? options.nowMs
     : Date.now();
@@ -258,38 +278,30 @@ function finalizeSupervisor(
       ? options.epoch
       : 1;
 
-  // Real metrics computation (no hardcoded fake placeholders). phi_before is
-  // the pre-execution snapshot captured by runSupervisor (issue #47); the Φ
-  // measured here, after the attempt, is phi_after.
-  const phiMetrics = computePhi(workspaceDir);
-  const realPhi = phiMetrics.total;
-  const phiBefore = options.phiBefore ?? phiBeforeMeasured ?? realPhi;
-  const phiAfter = options.phiAfter ?? realPhi;
+  // Real metrics computation (no hardcoded fake placeholders). The verifier's
+  // measurement of the Git trees wins. Without one, phi_before is the snapshot
+  // taken before the worker ran (issue #47) and phi_after is measured here.
+  const verifierPhi = verifyResult.phi;
+  const hasVerifierPhi = Number.isSafeInteger(verifierPhi?.phi_before) && Number.isSafeInteger(verifierPhi?.phi_after);
+  const realPhi = hasVerifierPhi ? verifierPhi.phi_after : computePhi(treeDir).total;
+  const phiBefore = hasVerifierPhi ? verifierPhi.phi_before : (options.phiBefore ?? run.phiBefore ?? realPhi);
+  const phiAfter = hasVerifierPhi ? realPhi : (options.phiAfter ?? realPhi);
   const deltaPhi = phiAfter - phiBefore;
 
   // Measured-or-flagged digests (issue #16): every SHA below is a REAL
-  // measurement — a content digest of the produced tree, or a digest of the
-  // workspace's actual git HEAD — so Law-5 base-pinning can be cross-checked
-  // against git later. No synthetic "sha256 of a prose string" placeholders.
+  // measurement — a content digest of the produced tree, or a digest of an
+  // actual git commit — so Law-5 base-pinning can be cross-checked against git
+  // later. No synthetic "sha256 of a prose string" placeholders.
   const treeHash =
     options.treeHash && /^sha256:[0-9a-f]{64}$/.test(options.treeHash)
       ? options.treeHash
-      : `sha256:${measureTreeDigest(workspaceDir)}`;
+      : `sha256:${measureTreeDigest(treeDir)}`;
 
-  const gitHead = measureGitHead(workspaceDir);
-  const headSha =
-    options.headSha && /^sha256:[0-9a-f]{64}$/.test(options.headSha)
-      ? options.headSha
-      : gitHead
-        ? sha256(`git-head:${gitHead}`) // core sha256() returns the prefixed form
-        : treeHash; // no git: the measured tree digest is the honest head witness
-  // The attempt's true base (lease-start HEAD) is not captured by this layer;
-  // absent an explicit base we record the same measured witness rather than
-  // inventing one. Callers with a leased base pass options.baseSha.
-  const baseSha =
-    options.baseSha && /^sha256:[0-9a-f]{64}$/.test(options.baseSha)
-      ? options.baseSha
-      : headSha;
+  // Without a host-authored candidate the attempt produced nothing past its
+  // base. Without Git at all, the tree digest is the honest witness.
+  const baseGit = baseCommit ?? measureGitHead(workspaceDir);
+  const baseSha = baseGit ? sha256(`git-head:${baseGit}`) : treeHash; // core sha256() returns the prefixed form
+  const headSha = headCommit ? sha256(`git-head:${headCommit}`) : baseSha;
 
   // Measured-or-flagged telemetry (issue #16): the supervisor has no real
   // usage counter of its own, so it NEVER invents thrift/cost numbers. Real
@@ -323,6 +335,8 @@ function finalizeSupervisor(
   const isOverallPass = isAgentSuccess && verifyResult.verified === true;
   const outcomeStatus = isOverallPass ? "pass" : "fail";
   const outcomeVerdict = isOverallPass ? "auto_merge" : "reject";
+  // Why the attempt ended this way, shown in `mirql i digest`.
+  const rule = verifyResult.rule ?? (isOverallPass ? "MP-000" : "VERIFIER_NO_RULE");
 
   // Build canonical Outcome document (schemas/outcome.schema.json)
   const outcome = {
@@ -340,7 +354,7 @@ function finalizeSupervisor(
       checks_run: 4,
       red_on_base: verifyResult.checks?.red_on_base?.passed ? 1 : 0,
       green_on_head: verifyResult.checks?.green_on_head?.passed ? 1 : 0,
-      re_red_on_revert: verifyResult.checks?.re_red_on_revert?.passed ? 1 : 0,
+      re_red_on_revert: (verifyResult.checks?.re_red_on_revert ?? verifyResult.checks?.necessity_check)?.passed ? 1 : 0,
       duration_ms: Math.max(1, agentDuration),
     },
     anti_cheat: {
@@ -361,8 +375,7 @@ function finalizeSupervisor(
       ) {
         return { measured: 1, ...options.surface };
       }
-      const measured = measureSurface(workspaceDir);
-      return measured ? { measured: 1, ...measured } : { measured: 0 };
+      return run.surface ? { measured: 1, ...run.surface } : { measured: 0 };
     })(),
     thrift: thriftMeasured
       ? { measured: 1, ...thriftInput }
@@ -397,7 +410,11 @@ function finalizeSupervisor(
         epoch,
         status: isOverallPass ? "completed" : "failed",
         verdict: outcomeVerdict,
+        rule,
+        ...(verifyResult.verdict && verifyResult.verdict !== outcomeVerdict ? { verifier_verdict: verifyResult.verdict } : {}),
         head_commit: headSha,
+        ...(baseCommit ? { base_commit: baseCommit } : {}),
+        ...(headCommit ? { candidate_commit: headCommit } : {}),
         // Issue #46: unmeasured telemetry is omitted, never null — the log
         // fold behind `mirql l view` rejects a null cost as a Law 17
         // violation, which bricks replay of the supervisor's own ledger.
@@ -416,6 +433,7 @@ function finalizeSupervisor(
     validation,
     verified: isOverallPass,
     verdict: outcomeVerdict,
+    rule,
     agentResult,
     verifyResult,
     event,
@@ -465,7 +483,7 @@ export function startHeartbeatTicker(heartbeatPath, intervalMs = 2000) {
  * Emits a failure attempt.outcome to the ledger to release a job lease
  * when a supervisor step fails to retrieve the warrant or throws an unhandled error.
  */
-function recordFailureOutcome(mirqlDir, jobId, warrantId, epoch, reason = "execution_failure") {
+function recordFailureOutcome(mirqlDir, jobId, warrantId, epoch, reason = "execution_failure", rule = "SUPERVISOR_ERROR") {
   try {
     const keypair = getOrGenerateSupervisorKey(mirqlDir);
     appendSupervisorEvent(
@@ -479,6 +497,7 @@ function recordFailureOutcome(mirqlDir, jobId, warrantId, epoch, reason = "execu
           epoch,
           status: "failed",
           verdict: "reject",
+          rule,
           cost_micro_usd: 0,
           tokens_consumed: 0,
           error: reason,
@@ -713,6 +732,7 @@ export async function runSupervisorReactive(options = {}) {
               leasedWarrantId ?? warrant?.id,
               epoch,
               stepErr.message,
+              typeof stepErr.code === "string" ? stepErr.code : undefined,
             );
           }
         }

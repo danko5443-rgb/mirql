@@ -31,7 +31,7 @@ test("a bare warrant ID cannot fabricate human authority or start a worker", () 
 });
 import { readFileSync, appendFileSync, unlinkSync } from "node:fs";
 import { requireAuthorizedWarrant } from "../packages/core/warrant.mjs";
-import { authorizeTestWarrant } from "./helpers/warrant.mjs";
+import { authorizeTestWarrant, dispatchableWarrant } from "./helpers/warrant.mjs";
 import { appendEvent } from "../packages/log/index.mjs";
 import { generateEd25519Keypair, signEvent, jcs, sha256 } from "../packages/core/index.mjs";
 import { authorizeTestKey } from "./helpers/keyring.mjs";
@@ -43,7 +43,7 @@ const execute = overrides => runSupervisor({
 });
 
 test("a human-signed warrant authorizes the exact document and real worker dispatch", () => {
-  const warrant = authorizeTestWarrant(metadata, ID);
+  const warrant = authorizeTestWarrant(metadata, dispatchableWarrant(ID));
   assert.deepEqual(requireAuthorizedWarrant(metadata, { warrantId: ID }), warrant);
   execute();
   assert.equal(readFileSync(marker, "utf8"), "ran");
@@ -163,7 +163,7 @@ test("a green verifier cannot override the worker's measured protected edit", as
   writeFileSync(join(workspace, "policy", "guard.json"), "base");
   git(workspace, "add", "policy/guard.json");
   git(workspace, "commit", "-qm", "protected base");
-  authorizeTestWarrant(metadata, ID);
+  authorizeTestWarrant(metadata, dispatchableWarrant(ID));
   writeFileSync(worker, 'import {writeFileSync} from "node:fs";writeFileSync("policy/guard.json","tampered");');
   const result = await execute({ runCheck: ({stage}) => ({exitCode: stage === "green_on_head" ? 0 : 1}) });
   assert.equal(result.agentResult.violation, "TOUCH_HUMAN_ONLY");

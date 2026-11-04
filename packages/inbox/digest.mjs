@@ -173,7 +173,8 @@ function formatMarkdownDigest(digest) {
     lines.push(`*No recorded outcomes.*`);
   } else {
     for (const outcome of digest.recent_outcomes) {
-      lines.push(`- seq ${outcome.seq}: \`${outcome.verdict}\` (job: \`${outcome.job_id || "none"}\`, cost: ${outcome.cost_micro_usd || 0} µUSD)`);
+      const rule = outcome.rule ? ` \`${outcome.rule}\`` : "";
+      lines.push(`- seq ${outcome.seq}: \`${outcome.verdict}\`${rule} (job: \`${outcome.job_id || "none"}\`, cost: ${outcome.cost_micro_usd || 0} µUSD)`);
     }
   }
 

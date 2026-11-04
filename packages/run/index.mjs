@@ -271,7 +271,6 @@ export function runCli(argv = []) {
           workspaceDir: flags.workspace ?? process.cwd(),
           warrant: flags.warrant || flags.w,
           warrantId: flags.warrantId ?? flags["warrant-id"],
-          fixture: flags.fixture,
           builderCommand: flags.command,
           epoch,
         });

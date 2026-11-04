@@ -1,4 +1,4 @@
-import { authorizeTestWarrant } from "./helpers/warrant.mjs";
+import { authorizeTestWarrant, dispatchableWarrant } from "./helpers/warrant.mjs";
 import { provisionTestTrust, authorizeTestKey } from "./helpers/keyring.mjs";
 import { git, initEmptyRepo } from "./helpers/git.mjs";
 // tests/honest-metrics.test.mjs — measured-or-flagged telemetry (issue #16).
@@ -65,7 +65,9 @@ describe("supervisor telemetry honesty (issue #16)", () => {
   afterEach(() => rmSync(tempDir, { recursive: true, force: true }));
 
   it("unmeasured thrift and cost stay flagged while Git surface is measured", async () => {
-    const res = await supervisorRun({ workspaceDir: tempDir });
+    const warrantId = "01HWWWWWWWWWWWWWWWWWWWWWWV";
+    authorizeTestWarrant(tempDir, dispatchableWarrant(warrantId));
+    const res = await supervisorRun({ workspaceDir: tempDir, warrantId });
     assert.equal(res.outcome.thrift.measured, 0);
     assert.deepEqual(Object.keys(res.outcome.thrift), ["measured"]);
     assert.equal(res.outcome.cost.measured, 0);
@@ -108,7 +110,9 @@ describe("supervisor telemetry honesty (issue #16)", () => {
     assert.notEqual(d.outcome.tree_hash, a.outcome.tree_hash, "source change must alter the digest");
   });
 
-  it("git workspaces: surface measured via numstat, head from real git HEAD", async () => {
+  it("git workspaces: surface measured via numstat, head digest names the host's commit", async () => {
+    const warrantId = "01HWWWWWWWWWWWWWWWWWWWWWWV";
+    authorizeTestWarrant(tempDir, dispatchableWarrant(warrantId));
     const ws = mkdtempSync(join(tmpdir(), "mirql-honest-git-"));
     git(ws, "init", "-q");
     git(ws, "config", "user.email", "t@mirql.local");
@@ -117,21 +121,23 @@ describe("supervisor telemetry honesty (issue #16)", () => {
     writeFileSync(join(ws, "code.mjs"), "export const a = 1;\n");
     git(ws, "add", "-A");
     git(ws, "commit", "-q", "-m", "base");
-    // Agent's uncommitted work: 1 file changed, 2 added, 1 removed
-    writeFileSync(join(ws, "code.mjs"), "export const a = 2;\nexport const b = 3;\n");
+    // The worker's output: 1 file changed, 2 added, 1 removed
+    const worker = join(tempDir, "worker.mjs");
+    writeFileSync(worker, `import { writeFileSync } from "node:fs";\nwriteFileSync("code.mjs", "export const a = 2;\\nexport const b = 3;\\n");\n`);
 
     try {
-      const res = await supervisorRun({ workspaceDir: ws });
+      const res = await supervisorRun({ workspaceDir: ws, warrantId, builderCommand: `"${process.execPath}" "${worker}"` });
       assert.equal(res.outcome.surface.measured, 1);
       assert.equal(res.outcome.surface.files_changed, 1);
       assert.equal(res.outcome.surface.lines_added, 2);
       assert.equal(res.outcome.surface.lines_removed, 1);
 
-      // head_sha is a digest OF the real git HEAD (cross-checkable)
-      const head = git(ws, "rev-parse", "HEAD").trim();
+      // head_sha is a digest of the commit the host authored, not the base
+      assert.equal(git(ws, "rev-parse", `${res.event.payload.candidate_commit}^`), git(ws, "rev-parse", "HEAD"));
+      assert.equal(res.event.payload.base_commit, git(ws, "rev-parse", "HEAD").trim());
       assert.match(res.outcome.head_sha, /^sha256:[0-9a-f]{64}$/);
+      assert.notEqual(res.outcome.head_sha, res.outcome.base_sha);
       assert.notEqual(res.outcome.head_sha, res.outcome.tree_hash);
-      void head;
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
