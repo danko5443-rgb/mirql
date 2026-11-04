@@ -27,6 +27,8 @@ import {
   resolveHumanKeyPath,
   keyringEntry,
   derivePublicParts,
+  protectOwnerKey,
+  plaintextOwnerKeyAllowed,
   FACTORY_WRITERS,
   CANONICAL_WRITERS,
   HUMAN_WRITER_NS,
@@ -62,6 +64,8 @@ export {
   requireHumanKey,
   authenticateHumanWriter,
   resolveHumanKeyPath,
+  protectOwnerKey,
+  plaintextOwnerKeyAllowed,
   keyringEntry,
   derivePublicParts,
   readEvents,
@@ -75,7 +79,34 @@ export {
 
 export { FACTORY_WRITERS, CANONICAL_WRITERS, HUMAN_WRITER_NS, HUMAN_KEY_FILENAME };
 
-const SUBCOMMANDS = Object.freeze(["genesis", "send", "digest", "act", "propose", "enroll-key", "approve-merge"]);
+const SUBCOMMANDS = Object.freeze(["genesis", "send", "digest", "act", "propose", "enroll-key", "approve-merge", "protect-key"]);
+
+/**
+ * CLI genesis gate: minting a new owner key requires a passphrase (owner key
+ * encryption at rest, Law 6) unless the operator explicitly allowed plaintext
+ * keys (MIRQL_ALLOW_PLAINTEXT_OWNER_KEY=1, test fixtures). Checked before any
+ * write, so a refusal leaves the trust root untouched. The library runGenesis
+ * does not gate on its own — many callers provision keys programmatically.
+ *
+ * @param {object} options
+ * @returns {void}
+ * @throws structured Error (errorCode OWNER_KEY_PASSPHRASE_REQUIRED)
+ */
+function requireGenesisPassphrase(options) {
+  if (plaintextOwnerKeyAllowed()) return;
+  const passphrase = typeof options.passphrase === "string" && options.passphrase.length > 0
+    ? options.passphrase
+    : process.env.MIRQL_HUMAN_PASSPHRASE;
+  if (typeof passphrase !== "string" || passphrase.length === 0) {
+    const err = new Error(
+      "OWNER_KEY_PASSPHRASE_REQUIRED: genesis needs a passphrase to encrypt the human:owner key at rest",
+    );
+    err.errorCode = "OWNER_KEY_PASSPHRASE_REQUIRED";
+    err.exitCode = EXIT_CODES.POLICY_DENIAL;
+    err.hint = "provide --passphrase <secret> or set MIRQL_HUMAN_PASSPHRASE (MIRQL_ALLOW_PLAINTEXT_OWNER_KEY=1 opts out for test fixtures)";
+    throw err;
+  }
+}
 
 // Law 3 note: WRITER_ACL is imported so this module fails fast if the frozen
 // ACL table is ever absent — but it is NEVER mutated here. The canonical
@@ -171,7 +202,9 @@ function emitUsage() {
       dir: "--dir <path> | MIRQL_DIR | <cwd>/.mirql",
       subcommands: {
         genesis:
-          "bootstrap .mirql/, provision factory keys, sign mirql.genesis; --human-key-out <path> (default: <trustRoot>/human_owner.key.private.json, mode 0600)",
+          "bootstrap .mirql/, provision factory keys, sign mirql.genesis; --human-key-out <path> (default: <trustRoot>/human_owner.key.private.json, mode 0600) --passphrase <secret> (key encrypted at rest; required unless MIRQL_ALLOW_PLAINTEXT_OWNER_KEY=1)",
+        "protect-key":
+          "encrypt an existing plaintext owner key in place (scrypt + AES-256-GCM); --passphrase <secret> or MIRQL_HUMAN_PASSPHRASE; idempotent (already_protected)",
         "approve-merge": "sign exact Git commit/tree/path approval; --warrant-id <ULID> --workspace <repo> --base <ref> --head <ref> --key <human-key>",
         "enroll-key": "enroll a public key for a writer namespace; requires --key <human-private-key>",
         send:
@@ -220,7 +253,13 @@ export function runCli(argv = []) {
         return EXIT_CODES.OK;
       }
       case "genesis": {
+        requireGenesisPassphrase(options);
         const result = runGenesis(mirqlDir, options);
+        process.stdout.write(JSON.stringify(result) + "\n");
+        return EXIT_CODES.OK;
+      }
+      case "protect-key": {
+        const result = protectOwnerKey(mirqlDir, options);
         process.stdout.write(JSON.stringify(result) + "\n");
         return EXIT_CODES.OK;
       }

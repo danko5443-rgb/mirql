@@ -1,6 +1,8 @@
 import { writePrivateFile, writePrivateFiles, protectPrivatePaths } from "../core/private-files.mjs";
 import { requireTrustForKeyCreation } from "../core/trust-root.mjs";
 import { readSignedKeyring, sealKeyring, readOwnerPin } from "../core/keyring.mjs";
+import { HUMAN_KEY_FILENAME, plaintextOwnerKeyAllowed, resolveHumanKeyPath } from "../core/owner-key-guard.mjs";
+export { HUMAN_KEY_FILENAME, plaintextOwnerKeyAllowed, resolveHumanKeyPath, findUnprotectedOwnerKey } from "../core/owner-key-guard.mjs";
 import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/trust-root.mjs";
 // packages/inbox/keys.mjs — Key Management & Keyring Provisioning for mirql-inbox.
 //
@@ -8,7 +10,10 @@ import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/tr
 // - The human:owner private key is NEVER persisted inside `.mirql/` (and in
 //   particular never under `.mirql/keys/`). It lives in an operator-controlled
 //   file OUTSIDE the ledger directory, written with file mode 0o600.
-// - `.mirql/keys/` holds factory (machine) writer keys only.
+// - At rest that file is encrypted with a passphrase (scrypt + AES-256-GCM)
+//   whenever one is available, so a stolen file alone cannot sign. A locked
+//   key fails closed with OWNER_KEY_LOCKED instead of being regenerated.
+// - `.mirql/keys/` holds factory (machine) writer keys only (plaintext).
 // - Loading human credentials is always explicit: `--key <path>` /
 //   `--signing-key <material>` or the `MIRQL_HUMAN_KEY` environment variable.
 //   There is no implicit fallback; omitted credentials fail closed.
@@ -20,7 +25,7 @@ import { resolveTrustRoot, trustFile, assertExternalTrustPath } from "../core/tr
 //   namespace can never authenticate events claiming another namespace.
 import { readFileSync, existsSync, mkdirSync, chmodSync, statSync, rmSync } from "node:fs";
 import { join, sep as pathSep, resolve as resolvePath } from "node:path";
-import { createPrivateKey, createPublicKey } from "node:crypto";
+import { createPrivateKey, createPublicKey, randomBytes, scryptSync, createCipheriv, createDecipheriv } from "node:crypto";
 import { generateEd25519Keypair, EXIT_CODES } from "../core/index.mjs";
 
 /** The human writer namespace. */
@@ -33,7 +38,6 @@ export const HUMAN_KEY_FORBIDDEN_FILES = Object.freeze([
 ]);
 
 /** Default filename of the human private key, written OUTSIDE `.mirql/`. */
-export const HUMAN_KEY_FILENAME = "human_owner.key.private.json";
 
 /**
  * Machine (factory) writer namespaces provisioned at genesis inside
@@ -74,6 +78,141 @@ function credentialsError(code, message, hint) {
     EXIT_CODES.POLICY_DENIAL,
     hint ?? "provide --key <path> or MIRQL_HUMAN_KEY outside .mirql",
   );
+}
+
+/** Encrypted owner-key envelope version and KDF bounds (Law 6, at rest). */
+const OWNER_KEY_FORMAT_VERSION = 1;
+/** Minimum accepted scrypt cost (N >= 2^15): a tampered file cannot downgrade the KDF. */
+const OWNER_KEY_KDF_MIN_N = 1 << 15;
+/** scrypt parameters used when writing (128*N*r = 32 MiB, well under ~300 ms). */
+const OWNER_KEY_KDF = Object.freeze({ N: 1 << 15, r: 8, p: 1 });
+/** scrypt maxmem headroom; also caps what a tampered file can demand (128 MiB). */
+const OWNER_KEY_SCRYPT_MAXMEM = 128 * (1 << 17) * 8;
+/** Minimum passphrase length accepted whenever an owner key is encrypted. */
+const OWNER_KEY_MIN_PASSPHRASE = 12;
+
+/** Passphrase source: options.passphrase, else MIRQL_HUMAN_PASSPHRASE. Never stored or logged. */
+function resolveOwnerKeyPassphrase(options = {}) {
+  return firstString(options.passphrase, process.env.MIRQL_HUMAN_PASSPHRASE);
+}
+
+/**
+ * The single error every locked-owner-key refusal throws: no detail about
+ * WHY unlocking failed (missing passphrase, wrong passphrase, or tampered
+ * envelope) is ever revealed.
+ */
+function ownerKeyLockedError() {
+  return credentialsError(
+    "OWNER_KEY_LOCKED",
+    "OWNER_KEY_LOCKED: the encrypted human:owner key could not be unlocked",
+    "provide --passphrase <secret> or set MIRQL_HUMAN_PASSPHRASE",
+  );
+}
+
+/** An owner key may only be encrypted under a passphrase of sane length. */
+function assertPassphraseStrength(passphrase) {
+  if (typeof passphrase !== "string" || passphrase.length < OWNER_KEY_MIN_PASSPHRASE) {
+    throw domainError(
+      "OWNER_KEY_PASSPHRASE_REQUIRED",
+      `OWNER_KEY_PASSPHRASE_REQUIRED: encrypting the owner key requires a passphrase of at least ${OWNER_KEY_MIN_PASSPHRASE} characters`,
+      EXIT_CODES.POLICY_DENIAL,
+      "provide --passphrase <secret> or set MIRQL_HUMAN_PASSPHRASE",
+    );
+  }
+}
+
+/** Additional authenticated data binding the envelope's public identity. */
+function ownerKeyAad(keyId, publicKey) {
+  return Buffer.from(`mirql.owner.key:v${OWNER_KEY_FORMAT_VERSION}:${keyId}:${publicKey}`, "utf8");
+}
+
+/**
+ * Encrypt one owner-key document (scrypt + AES-256-GCM). The publicKey/keyId
+ * in the envelope are DERIVED from the private key and bound as GCM
+ * additional authenticated data, so editing them makes decryption fail.
+ *
+ * @param {{ privateKey: string }} document plaintext keypair document
+ * @param {string} passphrase
+ * @returns {object} encrypted envelope ({ v, encrypted, kdf, kdfParams, salt, iv, tag, ciphertext, publicKey, keyId })
+ */
+function encryptOwnerKeyDocument(document, passphrase) {
+  assertPassphraseStrength(passphrase);
+  const derived = derivePublicParts(document.privateKey);
+  if (!derived) {
+    throw domainError(
+      "credentials_invalid",
+      "owner key material is not a usable Ed25519 private key",
+      EXIT_CODES.INTEGRITY_VIOLATION,
+    );
+  }
+  const salt = randomBytes(16);
+  const iv = randomBytes(12);
+  const key = scryptSync(passphrase, salt, 32, {
+    N: OWNER_KEY_KDF.N, r: OWNER_KEY_KDF.r, p: OWNER_KEY_KDF.p,
+    maxmem: OWNER_KEY_SCRYPT_MAXMEM,
+  });
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  cipher.setAAD(ownerKeyAad(derived.keyId, derived.publicKey));
+  const ciphertext = Buffer.concat([
+    cipher.update(Buffer.from(JSON.stringify(document), "utf8")),
+    cipher.final(),
+  ]);
+  return {
+    v: OWNER_KEY_FORMAT_VERSION,
+    encrypted: true,
+    kdf: "scrypt",
+    kdfParams: { N: OWNER_KEY_KDF.N, r: OWNER_KEY_KDF.r, p: OWNER_KEY_KDF.p },
+    salt: salt.toString("base64"),
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+    publicKey: derived.publicKey,
+    keyId: derived.keyId,
+  };
+}
+
+/**
+ * Decrypt an encrypted owner-key envelope back into its keypair document.
+ * Every refusal — no passphrase, wrong passphrase, tampered fields, or a
+ * downgraded KDF — throws the same OWNER_KEY_LOCKED error with no detail.
+ *
+ * @param {object} envelope
+ * @param {string | undefined} passphrase
+ * @returns {object} the original keypair document
+ */
+function decryptOwnerKeyDocument(envelope, passphrase) {
+  const params = envelope && typeof envelope === "object" ? envelope.kdfParams : null;
+  if (envelope?.kdf !== "scrypt" || params === null ||
+      !Number.isSafeInteger(params.N) || params.N < OWNER_KEY_KDF_MIN_N ||
+      !Number.isSafeInteger(params.r) || !Number.isSafeInteger(params.p) ||
+      typeof envelope.salt !== "string" || typeof envelope.iv !== "string" ||
+      typeof envelope.tag !== "string" || typeof envelope.ciphertext !== "string" ||
+      typeof envelope.publicKey !== "string" || typeof envelope.keyId !== "string" ||
+      typeof passphrase !== "string" || passphrase.length === 0) {
+    throw ownerKeyLockedError();
+  }
+  let document = null;
+  try {
+    const key = scryptSync(passphrase, Buffer.from(envelope.salt, "base64"), 32, {
+      N: params.N, r: params.r, p: params.p, maxmem: OWNER_KEY_SCRYPT_MAXMEM,
+    });
+    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(envelope.iv, "base64"));
+    decipher.setAAD(ownerKeyAad(envelope.keyId, envelope.publicKey));
+    decipher.setAuthTag(Buffer.from(envelope.tag, "base64"));
+    document = JSON.parse(Buffer.concat([
+      decipher.update(Buffer.from(envelope.ciphertext, "base64")),
+      decipher.final(),
+    ]).toString("utf8"));
+  } catch {
+    throw ownerKeyLockedError();
+  }
+  const derived = document && typeof document.privateKey === "string"
+    ? derivePublicParts(document.privateKey)
+    : null;
+  if (!derived || derived.publicKey !== envelope.publicKey || derived.keyId !== envelope.keyId) {
+    throw ownerKeyLockedError();
+  }
+  return document;
 }
 
 /** First non-empty string among the arguments. @returns {string | undefined} */
@@ -156,40 +295,34 @@ export function keyringEntry(entry, entryKey) {
  */
 export { writePrivateFile };
 
-/** Read and validate a keypair JSON document. @returns {object | null} */
-function readKeypairFile(filePath) {
+/**
+ * Read and validate a keypair JSON document. Plaintext documents need a
+ * `privateKey` string; encrypted envelopes are decrypted with the resolved
+ * passphrase, and a locked or tampered envelope throws OWNER_KEY_LOCKED
+ * instead of returning null (a locked key is never silently regenerated).
+ *
+ * @param {string} filePath
+ * @param {object} [options] passphrase carrier (options.passphrase / env)
+ * @returns {object | null}
+ */
+function readKeypairFile(filePath, options = {}) {
+  let parsed = null;
   try {
     protectPrivatePaths([filePath]);
-    const parsed = JSON.parse(readFileSync(filePath, "utf8"));
-    if (parsed && typeof parsed === "object" && typeof parsed.privateKey === "string") {
-      return parsed;
-    }
+    parsed = JSON.parse(readFileSync(filePath, "utf8"));
   } catch (error) {
     if (error.code === "PRIVATE_PERMISSIONS") throw error;
+    return null;
+  }
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    if (parsed.encrypted === true) {
+      return decryptOwnerKeyDocument(parsed, resolveOwnerKeyPassphrase(options));
+    }
+    if (typeof parsed.privateKey === "string") {
+      return parsed;
+    }
   }
   return null;
-}
-
-/**
- * Resolve where the human private key lives: explicit `--human-key-out` /
- * `options.humanKeyPath`, else `<operatorDir>/human_owner.key.private.json`
- * where operatorDir is the parent of the `.mirql` directory (always outside
- * `.mirql/`).
- *
- * @param {string} mirqlDir
- * @param {object} [options]
- * @returns {string} absolute path outside `.mirql/`
- */
-export function resolveHumanKeyPath(mirqlDir, options = {}) {
-  const explicit = firstString(
-    options.humanKeyOut,
-    options["human-key-out"],
-    options.humanKeyPath,
-  );
-  if (typeof explicit === "string" && explicit.length > 0) {
-    return assertExternalTrustPath(explicit, mirqlDir);
-  }
-  return trustFile(mirqlDir, HUMAN_KEY_FILENAME);
 }
 
 /** Remove any stale human private key files left inside `.mirql/keys/` (Law 6). */
@@ -219,6 +352,7 @@ function purgeStaleHumanKeys(keysDir) {
  * @param {object} [options]
  * @param {string} [options.humanKeyPath] existing human key file to reuse (outside .mirql/)
  * @param {object} [options.humanKeypair] explicit human keypair to register
+ * @param {string} [options.passphrase] encrypt the owner key at rest (else MIRQL_HUMAN_PASSPHRASE)
  * @returns {Record<string, { publicKey: string, privateKey: string, keyId: string, writer: { ns: string, key_id: string } }>}
  */
 export function generateFactoryKeypairs(mirqlDir, options = {}) {
@@ -255,7 +389,7 @@ export function generateFactoryKeypairs(mirqlDir, options = {}) {
     humanKp = options.humanKeypair;
   } else {
     const humanPath = resolveHumanKeyPath(mirqlDir, options);
-    humanKp = readKeypairFile(humanPath);
+    humanKp = readKeypairFile(humanPath, options);
     if (existsSync(humanPath) && !humanKp) {
       throw credentialsError("credentials_invalid", "Existing human key is unreadable; refusing to replace it");
     }
@@ -322,7 +456,14 @@ export function generateFactoryKeypairs(mirqlDir, options = {}) {
     registerKeyringEntry(keyring, item.ns, kp);
   }
 
-  privateFiles.push({ path: resolveHumanKeyPath(mirqlDir, options), contents: JSON.stringify(humanEntry, null, 2) + "\n" });
+  // The human key is encrypted at rest whenever a passphrase is available;
+  // without one the legacy plaintext document is kept (library callers and
+  // MIRQL_ALLOW_PLAINTEXT_OWNER_KEY fixtures; the CLI gate refuses to mint).
+  const ownerPassphrase = resolveOwnerKeyPassphrase(options);
+  const humanEntryDoc = ownerPassphrase !== undefined
+    ? JSON.stringify(encryptOwnerKeyDocument(humanEntry, ownerPassphrase), null, 2) + "\n"
+    : JSON.stringify(humanEntry, null, 2) + "\n";
+  privateFiles.push({ path: resolveHumanKeyPath(mirqlDir, options), contents: humanEntryDoc });
   writePrivateFiles(privateFiles, { directories: [resolveTrustRoot(mirqlDir), keysDir] });
   sealKeyring(mirqlDir, keyring, humanEntry, { initialize: true });
   return result;
@@ -358,7 +499,7 @@ export function loadKeyring(mirqlDir) {
 export function loadWriterKey(mirqlDir, writerNs, options = {}) {
   const directKey = firstString(options.signingKey, options.privateKey, options["signing-key"]);
   if (directKey) {
-    const kp = parseKeyMaterial(directKey);
+    const kp = parseKeyMaterial(directKey, options);
     if (kp) {
       return { ...kp, writer: { ns: writerNs, key_id: kp.keyId } };
     }
@@ -367,7 +508,7 @@ export function loadWriterKey(mirqlDir, writerNs, options = {}) {
 
   const customKeyFile = firstString(options.key, options.keyFile, options["key-file"]);
   if (customKeyFile) {
-    const kp = readKeypairFile(resolvePath(customKeyFile));
+    const kp = readKeypairFile(resolvePath(customKeyFile), options);
     if (kp) {
       const derived = derivePublicParts(kp.privateKey);
       if (derived) {
@@ -410,26 +551,32 @@ export function loadWriterKey(mirqlDir, writerNs, options = {}) {
 }
 
 /**
- * Parse inline key material: a JSON keypair document or a raw base64url
- * PKCS#8 private key. The publicKey/keyId are always derived from the
- * private key so they cannot be spoofed.
+ * Parse inline key material: a JSON keypair document (plaintext or encrypted
+ * envelope) or a raw base64url PKCS#8 private key. The publicKey/keyId are
+ * always derived from the private key so they cannot be spoofed. An encrypted
+ * envelope is decrypted with the resolved passphrase and throws
+ * OWNER_KEY_LOCKED when it cannot be unlocked.
  *
  * @param {string} material
+ * @param {object} [options] passphrase carrier (options.passphrase / env)
  * @returns {{ publicKey: string, privateKey: string, keyId: string } | null}
  */
-function parseKeyMaterial(material) {
+function parseKeyMaterial(material, options = {}) {
   if (typeof material !== "string" || material.trim().length === 0) return null;
   const text = material.trim();
   let privateKey = text;
   if (text.startsWith("{")) {
+    let parsed;
     try {
-      const parsed = JSON.parse(text);
-      if (parsed && typeof parsed.privateKey === "string") {
-        privateKey = parsed.privateKey;
-      } else {
-        return null;
-      }
+      parsed = JSON.parse(text);
     } catch {
+      return null;
+    }
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.encrypted === true) {
+      privateKey = decryptOwnerKeyDocument(parsed, resolveOwnerKeyPassphrase(options)).privateKey;
+    } else if (parsed && typeof parsed === "object" && typeof parsed.privateKey === "string") {
+      privateKey = parsed.privateKey;
+    } else {
       return null;
     }
   }
@@ -444,13 +591,17 @@ function parseKeyMaterial(material) {
  *   2. key file: `--key <path>` / `--key-file <path>`
  *   3. environment: `MIRQL_HUMAN_KEY` (path, or inline material)
  *
- * The key file must live OUTSIDE `.mirql/`. Every failure mode throws a
- * structured error with exit code POLICY_DENIAL (fail closed).
+ * The key file must live OUTSIDE `.mirql/`. A plaintext keypair document and
+ * an encrypted envelope (unlocked with `--passphrase` / MIRQL_HUMAN_PASSPHRASE)
+ * are both accepted; a locked or tampered envelope fails closed with
+ * OWNER_KEY_LOCKED. Every failure mode throws a structured error with exit
+ * code POLICY_DENIAL (fail closed).
  *
  * @param {string} mirqlDir
  * @param {object} [options]
+ * @param {string} [options.passphrase] passphrase for an encrypted owner key file
  * @returns {{ publicKey: string, privateKey: string, keyId: string, writer: { ns: string, key_id: string }, sourceFile: string | null }}
- * @throws structured Error (errorCode credentials_*)
+ * @throws structured Error (errorCode credentials_* / OWNER_KEY_LOCKED)
  */
 export function requireHumanKey(mirqlDir, options = {}) {
   const inline = firstString(options.signingKey, options.privateKey, options["signing-key"]);
@@ -494,7 +645,7 @@ export function requireHumanKey(mirqlDir, options = {}) {
     }
   }
 
-  const kp = parseKeyMaterial(material);
+  const kp = parseKeyMaterial(material, options);
   if (!kp) {
     throw credentialsError(
       "credentials_invalid",
@@ -552,4 +703,59 @@ export function authenticateHumanWriter(mirqlDir, options = {}) {
   }
 
   return kp;
+}
+
+/**
+ * Encrypt an existing plaintext human:owner key file in place (Law 6, at
+ * rest). The replacement is atomic (temp file mode 0o600 + rename via
+ * writePrivateFile) and only happens after the envelope is verified to
+ * decrypt back to the same keypair. An already-encrypted file is reported
+ * as { status: "already_protected" } without touching it.
+ *
+ * @param {string} mirqlDir
+ * @param {object} [options] humanKeyOut/humanKeyPath resolution + options.passphrase
+ * @returns {{ status: "protected" | "already_protected", key_path: string }}
+ */
+export function protectOwnerKey(mirqlDir, options = {}) {
+  const keyPath = resolveHumanKeyPath(mirqlDir, options);
+  let parsed = null;
+  try {
+    protectPrivatePaths([keyPath]);
+    parsed = JSON.parse(readFileSync(keyPath, "utf8"));
+  } catch (error) {
+    if (error.code === "PRIVATE_PERMISSIONS") throw error;
+  }
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.encrypted === true) {
+    return { status: "already_protected", key_path: keyPath };
+  }
+  if (!parsed || typeof parsed !== "object" || typeof parsed.privateKey !== "string") {
+    throw credentialsError(
+      "credentials_invalid",
+      `no readable plaintext owner key at ${keyPath}`,
+      "run mirql i genesis first, then mirql i protect-key",
+    );
+  }
+  const passphrase = resolveOwnerKeyPassphrase(options);
+  if (passphrase === undefined) {
+    throw domainError(
+      "OWNER_KEY_PASSPHRASE_REQUIRED",
+      "OWNER_KEY_PASSPHRASE_REQUIRED: a passphrase is required to encrypt the owner key",
+      EXIT_CODES.POLICY_DENIAL,
+      "provide --passphrase <secret> or set MIRQL_HUMAN_PASSPHRASE",
+    );
+  }
+  const envelope = encryptOwnerKeyDocument(parsed, passphrase);
+  // Refuse to replace the file unless the envelope reopens to the same key.
+  const reopened = decryptOwnerKeyDocument(envelope, passphrase);
+  const before = derivePublicParts(parsed.privateKey);
+  const after = derivePublicParts(reopened.privateKey);
+  if (!before || !after || before.publicKey !== after.publicKey) {
+    throw domainError(
+      "INTEGRITY_VIOLATION",
+      "encrypted owner key did not round-trip to the same keypair; refusing to replace it",
+      EXIT_CODES.INTEGRITY_VIOLATION,
+    );
+  }
+  writePrivateFile(keyPath, JSON.stringify(envelope, null, 2) + "\n");
+  return { status: "protected", key_path: keyPath };
 }

@@ -7,9 +7,12 @@
 //   - proof.suite_pass_base / proof.suite_pass_head mirror the real outcomes of
 //     the base-notary and candidate suite steps (Law 7: base-authored evidence)
 //   - phi.delta_phi is computed by the base-notary's own computePhi (Law 13)
-//   - proof.causal_cycle_completed stays false unless a VERIFIED reproducer
-//     artifact is supplied — silence or absence is never a completed cycle
-//     (Law 6), and a cycle is never faked (Law 16).
+//   - proof.causal_cycle_completed is ALWAYS false in CI: the exit codes of a
+//     candidate-supplied script are attestation, not measurement (a script
+//     can inspect which tree it runs in and pick its exit code), so no
+//     candidate script is ever executed here (Laws 6 & 16). The only accepted
+//     causal proof is the measured git-worktree verifier (packages/run).
+//     A reproducer manifest, when present, is validated and recorded as DATA.
 //
 // Zero external dependencies. Environment contract (all required except noted):
 //   BASE_NOTARY_DIR   - base-notary checkout root (Laws 7 & 9)
@@ -101,11 +104,14 @@ export function collectDiff(baseSha, headSha, repoDir) {
  * @param {{ files_changed: string[], tests_deleted: string[] }} input.diff
  * @param {{ pass_base: boolean, pass_head: boolean }} input.suite
  * @param {{ delta_phi: number }} input.phi
- * @param {boolean} [input.causalCompleted=false] - only true with a VERIFIED reproducer cycle
+ * @param {boolean} [input.causalCompleted=false] - main() NEVER passes true:
+ *        causal proof comes only from the measured git-worktree verifier,
+ *        never from a candidate reproducer's exit codes
  * @param {{ passed: boolean, evidence?: object, reasons?: string[] }} [input.thrift]
  *        - MEASURED thrift test verdict (issue #13). Only ever true when a
  *          real thrift test ran; absent for non-consolidation PRs.
- * @param {object} [input.reproducer] - measured reproducer evidence (see verifyCausalReproducer)
+ * @param {object} [input.reproducer] - DATA-ONLY manifest record (see
+ *        loadReproducerManifest); never a source of causal proof
  * @returns {object} pr-doc consumable by `mirql m check`
  */
 export function buildPrDoc({ pr, diff, suite, phi, causalCompleted = false, thrift, reproducer }) {
@@ -146,19 +152,16 @@ export function buildPrDoc({ pr, diff, suite, phi, causalCompleted = false, thri
 
 /**
  * Loads and validates a candidate's `reproducer/manifest.json` (Law 16
- * verified-reproducer contract). The only meaningful causal shape is
- * red-on-base → green-on-head: a reproducer that already passes on base
- * proves nothing, so anything else is rejected fail-closed.
+ * verified-reproducer contract). The manifest is recorded as DATA ONLY —
+ * presence and declared entry — never as causal proof: executing a
+ * candidate-supplied script would let it inspect which tree it runs in and
+ * pick its own exit codes, which is attestation, not measurement. The only
+ * accepted causal cycle is the one measured by the git-worktree verifier
+ * (packages/run), and it never flows through this builder.
  *
- * Manifest shape:
+ * Manifest shape (validated, not executed):
  *   { "description": "...", "entry": "reproducer/x.mjs",
  *     "expect_base": "fail", "expect_head": "pass" }
- *
- * The entry script is spawned by ci-evidence itself (no shell) TWICE — once
- * against the base-notary checkout and once against the candidate — with
- * process.env.MIRQL_TARGET_ROOT set to the checkout under test. The script
- * must exercise the code under test via that root and exit non-zero when the
- * defect reproduces, zero when it is fixed.
  *
  * @param {string} candidateDir
  * @returns {{ ok: boolean, manifest?: object, error?: string }}
@@ -184,75 +187,6 @@ export function loadReproducerManifest(candidateDir) {
     return { ok: false, error: 'manifest must declare expect_base:"fail" and expect_head:"pass"' };
   }
   return { ok: true, manifest };
-}
-
-/**
- * Runs one reproducer script against a target checkout. Fail-closed: spawn
- * errors and timeouts yield exit_code null and never verify anything.
- *
- * @param {object} options
- * @param {string} options.entryAbs - absolute path to the reproducer script
- * @param {string} options.targetRoot - checkout under test (cwd + MIRQL_TARGET_ROOT)
- * @param {number} [options.timeoutMs=120000]
- * @returns {{ exit_code: number | null, timed_out: boolean, error?: string }}
- */
-export function runReproducerScript({ entryAbs, targetRoot, timeoutMs = 120000 }) {
-  const res = spawnSync(process.execPath, [entryAbs], {
-    cwd: resolve(targetRoot),
-    env: { ...process.env, MIRQL_TARGET_ROOT: resolve(targetRoot) },
-    timeout: timeoutMs,
-    encoding: "utf8",
-  });
-  if (res.error) {
-    return { exit_code: null, timed_out: false, error: res.error.message };
-  }
-  if (res.signal || !Number.isSafeInteger(res.status)) {
-    return { exit_code: null, timed_out: true, error: `terminated by signal ${res.signal ?? "unknown"}` };
-  }
-  return { exit_code: res.status, timed_out: false };
-}
-
-/**
- * Verifies the causal red→green reproducer cycle against the two real
- * checkouts (Law 16: measured, never attested). causal is true ONLY when the
- * base run genuinely exits non-zero AND the head run genuinely exits zero.
- *
- * @param {object} options
- * @param {string} options.candidateDir
- * @param {string} options.baseDir
- * @param {number} [options.timeoutMs=120000]
- * @returns {{ present: boolean, causal: boolean, entry?: string, description?: string,
- *            base_exit_code: number | null, head_exit_code: number | null, error?: string }}
- */
-export function verifyCausalReproducer({ candidateDir, baseDir, timeoutMs = 120000 }) {
-  const loaded = loadReproducerManifest(candidateDir);
-  if (!loaded.ok) {
-    return { present: false, causal: false, base_exit_code: null, head_exit_code: null };
-  }
-  const manifest = loaded.manifest;
-  const entryAbs = join(resolve(candidateDir), ...manifest.entry.split("/"));
-  if (!existsSync(entryAbs)) {
-    return {
-      present: true, causal: false, entry: manifest.entry,
-      base_exit_code: null, head_exit_code: null,
-      error: `entry script not found: ${manifest.entry}`,
-    };
-  }
-  const baseRun = runReproducerScript({ entryAbs, targetRoot: baseDir, timeoutMs });
-  const headRun = runReproducerScript({ entryAbs, targetRoot: candidateDir, timeoutMs });
-  const causal =
-    baseRun.exit_code !== null && baseRun.exit_code !== 0 &&
-    headRun.exit_code !== null && headRun.exit_code === 0;
-  const error = baseRun.error ?? headRun.error;
-  return {
-    present: true,
-    causal,
-    entry: manifest.entry,
-    description: typeof manifest.description === "string" ? manifest.description : "",
-    base_exit_code: baseRun.exit_code,
-    head_exit_code: headRun.exit_code,
-    ...(error ? { error } : {}),
-  };
 }
 
 /**
@@ -436,13 +370,27 @@ export async function main(env = process.env) {
     }
   }
 
-  // 3. Law 16 verified-reproducer cycle: when the candidate carries a
-  // reproducer/manifest.json, run its entry against BOTH real checkouts and
-  // measure the red→green cycle. causal is true ONLY on a genuinely observed
-  // non-zero-on-base + zero-on-head outcome pair — never attested (Law 6).
-  const reproducer = verifyCausalReproducer({ candidateDir, baseDir });
+  // 3. Law 16: causal proof is NEVER produced in CI. A candidate-supplied
+  // reproducer script runs with this job's environment on both checkouts and
+  // can inspect which tree it is in before picking its exit code — that is
+  // attestation, not measurement — so it is never executed. causalCompleted
+  // is therefore always false here; the only accepted causal proof is the
+  // measured git-worktree verifier (packages/run). The manifest, when
+  // present, is validated and recorded as DATA ONLY.
+  const manifestInfo = loadReproducerManifest(candidateDir);
+  const reproducer = manifestInfo.ok
+    ? {
+        present: true,
+        causal: false,
+        entry: manifestInfo.manifest.entry,
+        description:
+          typeof manifestInfo.manifest.description === "string"
+            ? manifestInfo.manifest.description
+            : "",
+      }
+    : { present: false, causal: false };
 
-  // 4. Honest suite outcomes (measured by the CI steps, never assumed)
+  // 4. Honest suite outcomes (measured by the CI jobs, never assumed)
   const prDoc = buildPrDoc({
     pr: { number: prNumber, base_sha: baseSha, head_sha: headSha, author: env.PR_AUTHOR },
     diff: { files_changed: diff.files, tests_deleted: diff.deletedTests },
@@ -451,7 +399,6 @@ export async function main(env = process.env) {
       pass_head: parseBoolEnv(env.SUITE_PASS_HEAD),
     },
     phi: { delta_phi: deltaPhi },
-    causalCompleted: reproducer.causal,
     thrift,
     ...(reproducer.present ? { reproducer } : {}),
   });
@@ -459,7 +406,7 @@ export async function main(env = process.env) {
   const outPath = resolve(env.PR_DOC_PATH ?? join(candidateDir, "pr-doc.json"));
   writeFileSync(outPath, JSON.stringify(prDoc), "utf8");
   process.stdout.write(
-    `ci-evidence: wrote ${outPath} (suite base=${prDoc.proof.suite_pass_base} head=${prDoc.proof.suite_pass_head} delta_phi=${deltaPhi} causal=${reproducer.causal}${reproducer.present ? ` reproducer_base=${reproducer.base_exit_code} reproducer_head=${reproducer.head_exit_code}` : ""}${thrift ? ` thrift=${prDoc.phi.thrift_test_passed}` : ""})\n`,
+    `ci-evidence: wrote ${outPath} (suite base=${prDoc.proof.suite_pass_base} head=${prDoc.proof.suite_pass_head} delta_phi=${deltaPhi} causal=${prDoc.proof.causal_cycle_completed}${reproducer.present ? ` reproducer=present-data-only` : ""}${thrift ? ` thrift=${prDoc.phi.thrift_test_passed}` : ""})\n`,
   );
 }
 

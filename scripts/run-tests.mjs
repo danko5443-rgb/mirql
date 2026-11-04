@@ -33,6 +33,7 @@ if (missing.length > 0) {
 const extraArgs = process.argv.slice(2);
 const res = spawnSync(process.execPath, ["--test", ...extraArgs, ...files], {
   cwd: root,
+  env: { ...process.env, MIRQL_ALLOW_PLAINTEXT_OWNER_KEY: "1" }, // fixtures use plaintext owner keys
   stdio: "inherit",
 });
 process.exit(res.status ?? 1);

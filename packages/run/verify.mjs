@@ -2,7 +2,8 @@ import { readFileSync, existsSync, mkdtempSync, rmSync, realpathSync } from "nod
 import { resolve, join, dirname, delimiter, relative, isAbsolute, sep } from "node:path";
 import { tmpdir, constants as osConstants } from "node:os";
 import { spawnSync } from "node:child_process";
-import { EXIT_CODES, isTestFilePath } from "../core/index.mjs";
+import { fileURLToPath } from "node:url";
+import { EXIT_CODES, isTestFilePath, normalizePath, isPathMatchingPattern } from "../core/index.mjs";
 import { sanitizeAgentEnv } from "./agent.mjs";
 import {
   checkAntiCheat,
@@ -11,23 +12,42 @@ import {
   checkTestWeakenings,
 } from "./anti-cheat.mjs";
 import { findExactMergeApproval } from "../core/merge-approval.mjs";
+import { findUnprotectedOwnerKey } from "../core/owner-key-guard.mjs";
 import { parsePathPolicies } from "../core/anti-cheat.mjs";
 import { measureAuthorizedPhi, recordPhiConsumption } from "./authorized-phi.mjs";
 import { requireAuthorizedWarrant } from "../core/warrant.mjs";
 import { evaluatePhiGate } from "./phi.mjs";
 import { extractChangedLines } from "./mutant.mjs";
-import { parseTapOutput, checkV8Coverage } from "./causal-evidence.mjs";
-export { parseTapOutput, checkV8Coverage } from "./causal-evidence.mjs";
+import { parseTapOutput, checkV8Coverage, checkCoverageEntries } from "./causal-evidence.mjs";
+export { parseTapOutput, checkV8Coverage, checkCoverageEntries } from "./causal-evidence.mjs";
+
+const REPRODUCER_TIMEOUT_MS = 30000;
+const SUITE_TIMEOUT_DEFAULT_MS = 20 * 60 * 1000;
+const COVERAGE_DRIVER_PATH = fileURLToPath(new URL("./coverage-driver.mjs", import.meta.url));
+
+function positiveIntMs(value) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
 
 /**
- * Verifies a candidate fix/feature across the deterministic checks (Laws 10, 13, 16):
- * 1. AST / Anti-Cheat Gate: MP-001 through MP-005 rules.
- * 2. Law 13 Complexity Potential Gate: Delta Phi <= 0 (strictly < 0 for consolidator).
- * 3. Law 16 Triple-Execution Red-Green-ReRed sequence:
- *    - Red-on-Base: reproducer must fail with test assertion failure (exit 1). Crashes or passes are rejected.
- *    - Green-on-Head: full suite and reproducer pass on head (exit 0).
- *    - Re-Red: reproducer fails (exit 1) when non-test changes are reverted. Tautological tests are rejected.
- * 4. Fail-closed: missing proof, missing runner, or non-integer exit codes reject.
+ * Verifies a candidate fix/feature:
+ * 1. AST / Anti-Cheat Gate: MP-001 through MP-005 rules over the measured diff.
+ * 2. Law 13 Complexity Potential Gate: delta phi is measured from the git trees
+ *    and judged against the signed warrant's cumulative allowance.
+ * 3. Warrant scope gate: changed non-test paths must match the signed scope
+ *    before any candidate code is executed.
+ * 4. Law 16 causal execution sequence, run in a disposable worktree with a
+ *    disposable HOME and measured out-of-band coverage:
+ *    - Red-on-Base twice: reproducer must fail with an assertion failure.
+ *    - Green-on-Head twice: reproducer passes, coverage collected over the
+ *      Node inspector (never from a file or env var the candidate can write),
+ *      every changed non-blank line of changed source fully executed.
+ *    - Full suite passes on head, then passes again with the base versions of
+ *      pre-existing tests the patch modified (weakened-test detection).
+ *    - Necessity: each non-test file reverted must re-red the reproducer.
+ * 5. Fail-closed everywhere: missing proof, missing runner, unmeasurable
+ *    coverage, or non-integer exit codes reject.
  *
  * @param {object} options
  * @returns {any} verification result
@@ -210,30 +230,35 @@ function evaluateCheckResult(check, fixture = {}) {
 }
 
 /**
- * Executes the Triple-Execution Red-Green-ReRed sequence against a real git repository.
- *
- * H2 (isolation): the triple-run NEVER executes in the live working tree.
- * A disposable `git worktree` is created under the OS temp directory
- * (`mirql-verify-wt-*`) and every checkout/test command runs inside it, so
- * the user's checked-out branch and any uncommitted/untracked files are
- * completely untouched. The worktree is force-removed in a `finally` block.
- *
- * H3 (env sanitization): candidate runner commands are spawned with the
- * sanitized environment from `sanitizeAgentEnv` — MIRQL_HUMAN_KEY, AI
- * provider API keys, and every other non-allowlisted variable are stripped
- * from child processes; only safe variables (PATH, NODE_ENV, SystemRoot,
- * TEMP, ...) survive.
- *
- * H5 (anti-cheat wiring): the base..head diff is fed into `checkAntiCheat`
- * before any verdict is returned. A humanOnly path (e.g. CONSTITUTION.md)
- * modified in the diff escalates to `{ verified: false, verdict:
- * "needs_human", rule: "MP-001" }`; deleted test files reject under MP-002;
- * other anti-cheat violations reject or escalate per their rule.
- */
-/**
  * Executes honest causal proof against a real git repository (Phase 3).
+ *
+ * Security posture of the execution phase:
+ * - H2 (isolation): every candidate command runs inside a disposable
+ *   `git worktree` under the OS temp directory, force-removed in `finally`.
+ * - H4 (disposable home): every candidate command also gets one per-verification
+ *   temp HOME/USERPROFILE (HOMEDRIVE/HOMEPATH on Windows), so credentials in
+ *   the real user home are unreachable; the temp home is removed in `finally`.
+ * - H3 (env sanitization): candidate environments come from `sanitizeAgentEnv`
+ *   with the disposable home applied on top.
+ * - Out-of-band coverage: the green-on-head run executes through
+ *   coverage-driver.mjs, which measures V8 precise coverage over the Node
+ *   inspector. No NODE_V8_COVERAGE directory is created and no coverage file
+ *   is ever read back. An entry counts only when the source V8 compiled hashes
+ *   to the head commit's blob, so a script claiming a file's URL or a rewritten
+ *   worktree file supplies no execution evidence.
+ * - Timeouts: reproducer runs keep the 30s cap; full-suite runs (and the
+ *   restored-tests re-run) use options.suiteTimeoutMs /
+ *   MIRQL_SUITE_TIMEOUT_MS (default 20 minutes).
  */
 function verifyGitRepository(options) {
+  // Candidate code runs as this OS user, so a readable owner key could be stolen
+  // and used to sign its own approval. Refuse before anything candidate runs.
+  const unprotectedKey = findUnprotectedOwnerKey(options.mirqlDir);
+  if (unprotectedKey !== null) {
+    return { verified: false, verdict: "needs_human", rule: "OWNER_KEY_UNPROTECTED", violation: "OWNER_KEY_UNPROTECTED",
+      detail: `Plaintext owner key at ${unprotectedKey}. Run: mirql i protect-key` };
+  }
+
   let repoDir = options.workspaceDir ?? options.repoDir ?? process.cwd();
   const baseRef = options.baseCommit ?? options.baseSha ?? "HEAD~1";
   const headRef = options.headCommit ?? options.headSha ?? "HEAD";
@@ -272,11 +297,34 @@ function verifyGitRepository(options) {
 
   // Only explicit conformance commands use a shell.
   // A reproducer filename is always passed as one argument to the Node runner.
-  function runCommand(command, args, cwd, extraEnv = {}) {
-    const { env: cleanEnv } = sanitizeAgentEnv(process.env);
+  // Every candidate command runs with a sanitized environment plus one shared
+  // disposable home (pattern of runAgent): the real HOME, with its keys and
+  // credentials, must be unreachable from candidate code.
+  const { env: sanitizedEnv } = sanitizeAgentEnv(process.env);
+  let disposableHome = null;
+  const candidateEnv = (extraEnv = {}) => {
+    const env = { ...sanitizedEnv, ...extraEnv };
+    for (const key of Object.keys(env)) {
+      const upper = key.toUpperCase();
+      if (upper === "HOME" || upper === "USERPROFILE" || upper === "HOMEDRIVE" || upper === "HOMEPATH") {
+        delete env[key];
+      }
+    }
+    env.HOME = disposableHome;
+    env.USERPROFILE = disposableHome;
+    if (process.platform === "win32") {
+      const match = disposableHome.match(/^([a-zA-Z]:)(.*)$/);
+      if (match) {
+        env.HOMEDRIVE = match[1];
+        env.HOMEPATH = match[2];
+      }
+    }
+    return env;
+  };
+  function runCommand(command, args, cwd, extraEnv = {}, timeoutMs = REPRODUCER_TIMEOUT_MS) {
     const spawnOptions = {
-      shell: args === null, cwd, env: { ...cleanEnv, ...extraEnv },
-      encoding: "utf8", timeout: 30000, windowsHide: true,
+      shell: args === null, cwd, env: candidateEnv(extraEnv),
+      encoding: "utf8", timeout: timeoutMs, windowsHide: true,
     };
     const res = args === null
       ? spawnSync(command, spawnOptions)
@@ -429,6 +477,42 @@ function verifyGitRepository(options) {
     ? runCommand(process.execPath, ["--test", "--test-reporter=tap", resolve(cwd, reproducerFile)], cwd, extraEnv)
     : runCommand(conformanceCommand, null, cwd, extraEnv);
 
+  // Out-of-band coverage run: the driver measures precise coverage over the
+  // Node inspector and reports the child's exit code; no disk or env channel
+  // the candidate can write participates. Only a real reproducer file can be
+  // measured — a conformance command has no inspector session.
+  const runReproducerWithCoverage = (cwd) => {
+    const res = runCommand(
+      process.execPath,
+      [COVERAGE_DRIVER_PATH, resolve(cwd, reproducerFile), cwd, String(REPRODUCER_TIMEOUT_MS)],
+      cwd, {}, REPRODUCER_TIMEOUT_MS + 30000,
+    );
+    let driverReport = null;
+    try { driverReport = JSON.parse((res.stdout ?? "").trim().split(/\r?\n/).at(-1) || "null"); }
+    catch { driverReport = null; }
+    if (driverReport === null || typeof driverReport !== "object") {
+      return { exitCode: res.exitCode, stdout: res.stdout ?? "", stderr: res.stderr ?? "",
+        timedOut: true, coverage: null };
+    }
+    return {
+      exitCode: driverReport.exitCode,
+      stdout: typeof driverReport.stdout === "string" ? driverReport.stdout : "",
+      stderr: typeof driverReport.stderr === "string" ? driverReport.stderr : "",
+      timedOut: driverReport.timedOut === true || res.timedOut,
+      coverage: Array.isArray(driverReport.coverage) ? driverReport.coverage : null,
+    };
+  };
+
+  const suiteTimeoutMs = positiveIntMs(options.suiteTimeoutMs)
+    ?? positiveIntMs(process.env.MIRQL_SUITE_TIMEOUT_MS)
+    ?? SUITE_TIMEOUT_DEFAULT_MS;
+
+  // Pre-existing test files the patch modified; the reproducer itself is
+  // excluded because its base->head edit is the fix being proven (red-on-base).
+  const modifiedPreexistingTests = changeEntries
+    .filter((e) => e.status === "M" && isTestFilePath(e.path) && e.path !== reproducerFile)
+    .map((e) => e.path);
+
   let measuredPhi;
   try {
     measuredPhi = measureAuthorizedPhi({ repoDir, baseSha, headSha,
@@ -441,9 +525,41 @@ function verifyGitRepository(options) {
   if (!measuredPhi.ok) return { verified: false, verdict: "reject", rule: measuredPhi.rule,
     violation: "PHI_INCREASED", phi: measuredPhi };
 
+  // Warrant scope gate: only the signed scope patterns authorize changed
+  // non-test paths, checked before any candidate code is executed. A reject
+  // here is never clearable by an approval. A bare `**` anchor is the
+  // universal-wildcard idiom send.mjs accepts (a single `*` already matches
+  // everything); every other anchor goes through isPathMatchingPattern.
+  if (Array.isArray(measuredPhi.warrant_scope_allow)) {
+    const scopeCovers = (file) => {
+      const normalized = normalizePath(file);
+      return measuredPhi.warrant_scope_allow.some((pattern) =>
+        typeof pattern === "string" &&
+        (normalizePath(pattern) === "**" || isPathMatchingPattern(normalized, pattern)));
+    };
+    const outOfScope = nonTestFiles.filter((file) => !scopeCovers(file));
+    if (outOfScope.length > 0) {
+      return {
+        verified: false,
+        verdict: "reject",
+        rule: "OUT_OF_SCOPE",
+        violation: "OUT_OF_SCOPE",
+        detail: `Warrant scope [${measuredPhi.warrant_scope_allow.join(", ")}] does not authorize changed non-test file(s): ${outOfScope.join(", ")}`,
+      };
+    }
+  }
+
+  // Coverage is judged against the commit's blobs, read here before any
+  // candidate code runs, never against worktree files the candidate can rewrite.
+  const headSources = new Map();
+  for (const file of nonTestSourceFiles) {
+    const blob = git(["cat-file", "blob", `${headSha}:${file}`]);
+    if (!blob.error && blob.status === 0) headSources.set(file, blob.stdout);
+  }
+
   let worktreeDir = null;
-  let covDir = null;
   try {
+    disposableHome = mkdtempSync(join(tmpdir(), "mirql-verify-home-"));
     worktreeDir = mkdtempSync(join(tmpdir(), "mirql-verify-wt-"));
     const addRes = git(["worktree", "add", "--detach", worktreeDir, headSha]);
     if (addRes.error || addRes.status !== 0) {
@@ -539,12 +655,13 @@ function verifyGitRepository(options) {
     }
 
     // 2. Green on Head: full head state.
-    // Phase 3.3: Run with V8 Coverage.
+    // Coverage is measured out of band over the inspector (Phase 3.3).
     const greenCheckout = checkout([headSha, "--force"]);
     if (greenCheckout !== null) return greenCheckout;
 
-    covDir = mkdtempSync(join(tmpdir(), "mirql-v8cov-"));
-    const greenRes1 = runReproducer(worktreeDir, { NODE_V8_COVERAGE: covDir });
+    const greenRes1 = reproducerFile !== null
+      ? runReproducerWithCoverage(worktreeDir)
+      : runReproducer(worktreeDir);
 
     if (!Number.isInteger(greenRes1.exitCode) || greenRes1.exitCode !== 0) {
       return {
@@ -579,9 +696,11 @@ function verifyGitRepository(options) {
 
     // Phase 3.4: Full Test Suite
     // A passing reproducer never substitutes for the project's full suite.
+    // Full-suite runs get their own limit (default 20 minutes), not the 30s
+    // reproducer cap: honest suites may simply be slower than a reproducer.
     const fullRes = npmCli === null
       ? { exitCode: null, stdout: "", stderr: "Cannot locate an installed npm CLI outside the candidate" }
-      : runCommand(process.execPath, [npmCli, "test"], worktreeDir);
+      : runCommand(process.execPath, [npmCli, "test"], worktreeDir, {}, suiteTimeoutMs);
     if (!Number.isInteger(fullRes.exitCode) || fullRes.exitCode !== 0) {
       return {
         verified: false,
@@ -607,8 +726,23 @@ function verifyGitRepository(options) {
     }
 
     let coverageReport = null;
-    if (nonTestSourceFiles.length > 0) {
-      coverageReport = checkV8Coverage(covDir, worktreeDir, changedLinesMap);
+    if (nonTestSourceFiles.length > 0 && reproducerFile !== null) {
+      // Fail closed: coverage that never came back cannot prove anything.
+      if (greenRes1.coverage === null) {
+        return {
+          verified: false,
+          verdict: "reject",
+          rule: "COVERAGE_UNAVAILABLE",
+          violation: "COVERAGE_UNAVAILABLE",
+          detail: "Out-of-band coverage measurement returned no result for the green-on-head run.",
+          checks: {
+            red_on_base: { passed: true, exitCode: 1, runs: 2 },
+            green_on_head: { passed: true, exitCode: 0, runs: 2 },
+            full_suite: { passed: true, exitCode: fullRes.exitCode },
+          },
+        };
+      }
+      coverageReport = checkCoverageEntries(greenRes1.coverage, worktreeDir, changedLinesMap, headSources);
       let totalChangedLines = 0;
       for (const set of changedLinesMap.values()) totalChangedLines += set.size;
 
@@ -708,6 +842,97 @@ function verifyGitRepository(options) {
       };
     }
 
+    // Exact signed owner approval: may clear the needs_human gates below on
+    // non-surgical warrants. It never clears a reject (UNNECESSARY_CHANGE,
+    // OUT_OF_SCOPE, ...), so those return before reaching this point.
+    let approvalLookup;
+    const findOwnerApproval = () => {
+      if (approvalLookup !== undefined) return approvalLookup;
+      if (!options.mirqlDir || !options.warrantId) { approvalLookup = null; return null; }
+      try {
+        approvalLookup = findExactMergeApproval(options.mirqlDir, {
+          workspaceDir: repoDir, baseSha, headSha, warrantId: options.warrantId,
+        });
+      } catch {
+        // An unverifiable approval never clears a gate.
+        approvalLookup = null;
+      }
+      return approvalLookup;
+    };
+    const needsHumanUnlessApproved = (rule, detail, extraChecks) => {
+      const approval = findOwnerApproval();
+      if (measuredPhi.warrant_class !== "surgical" && approval) {
+        approvalRecord = approvalRecord ?? approval;
+        return null;
+      }
+      return { verified: false, verdict: "needs_human", rule, violation: rule, detail,
+        ...(extraChecks ? { checks: extraChecks } : {}) };
+    };
+
+    // Weakened tests, static half: a changed test file may not carry more
+    // weakening patterns (skip/only/todo/...) than its base version did.
+    const showFile = (commit, file) => {
+      const res = git(["show", `${commit}:${file}`]);
+      return res.error || res.status !== 0 ? null : res.stdout;
+    };
+    for (const f of testFiles) {
+      const baseCount = checkTestWeakenings(showFile(baseSha, f) ?? "", f).count;
+      const headCount = checkTestWeakenings(showFile(headSha, f) ?? "", f).count;
+      if (headCount > baseCount) {
+        const held = needsHumanUnlessApproved("TEST_WEAKENED",
+          `Changed test file ${f} adds weakening patterns (base count ${baseCount}, head count ${headCount}).`);
+        if (held) return held;
+        break;
+      }
+    }
+
+    // Weakened tests, behavioural half: restore the base versions of every
+    // pre-existing test file the patch modified and re-run the full suite. A
+    // failure means the patch broke behavior those tests guarded.
+    if (modifiedPreexistingTests.length > 0) {
+      const restoreBase = checkout([baseSha, "--", ...modifiedPreexistingTests]);
+      if (restoreBase !== null) return restoreBase;
+      const restoredRes = runCommand(process.execPath, [npmCli, "test"], worktreeDir, {}, suiteTimeoutMs);
+      const restoreHead = checkout([headSha, "--", ...modifiedPreexistingTests]);
+      if (restoreHead !== null) return restoreHead;
+      if (!Number.isInteger(restoredRes.exitCode) || restoredRes.exitCode !== 0) {
+        const held = needsHumanUnlessApproved("TEST_WEAKENED",
+          `Full suite failed with base versions of modified test file(s) restored: ${modifiedPreexistingTests.join(", ")} (exit ${restoredRes.exitCode}).`);
+        if (held) return held;
+      }
+    }
+
+    // Unproven change: under a non-surgical warrant, a file the reproducer
+    // does not need is held for review rather than silently merged; pure
+    // documentation files (*.md, *.txt) stay exempt.
+    if (unnecessaryFiles.length > 0) {
+      const unproven = unnecessaryFiles.filter((f) => !/\.(?:md|txt)$/i.test(f));
+      if (unproven.length > 0) {
+        const held = needsHumanUnlessApproved("UNPROVEN_CHANGE",
+          `Unproven change: file(s) not needed by the reproducer: ${unproven.join(", ")}`);
+        if (held) return held;
+      }
+    }
+
+    // Every changed line must run: a line whose code characters are not fully
+    // executed hides untested behavior (e.g. a never-called backdoor export).
+    if (coverageReport !== null && !coverageReport.fullyExecutedChangedLines) {
+      const uncoveredFiles = Object.entries(coverageReport.uncoveredLinesMap)
+        .filter(([, lines]) => lines.length > 0)
+        .map(([file, lines]) => `${file}: line(s) ${lines.join(", ")}`);
+      if (uncoveredFiles.length > 0) {
+        if (measuredPhi.warrant_class === "surgical") {
+          return { verified: false, verdict: "reject", rule: "UNCOVERED_CHANGE",
+            violation: "UNCOVERED_CHANGE",
+            detail: `Unexecuted changed line(s): ${uncoveredFiles.join("; ")}`,
+            checks: { coverage: { passed: false, uncovered: uncoveredFiles } } };
+        }
+        const held = needsHumanUnlessApproved("UNCOVERED_CHANGE",
+          `Unexecuted changed line(s): ${uncoveredFiles.join("; ")}`);
+        if (held) return held;
+      }
+    }
+
     let phiConsumption = null;
     if (!conformance) {
       try { requireAuthorizedWarrant(options.mirqlDir, { warrantId: options.warrantId }); }
@@ -753,8 +978,8 @@ function verifyGitRepository(options) {
       },
     };
   } finally {
-    if (covDir !== null) {
-      try { rmSync(covDir, { recursive: true, force: true }); } catch {}
+    if (disposableHome !== null) {
+      try { rmSync(disposableHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch {}
     }
     if (worktreeDir !== null) {
       try { git(["worktree", "remove", "--force", worktreeDir]); } catch {}

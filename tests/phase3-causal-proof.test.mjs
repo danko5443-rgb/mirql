@@ -227,16 +227,18 @@ not ok 1 - broken import
         git(repo, ["commit", "-q", "-m", "head with extra unneeded file"]);
         const head = git(repo, ["rev-parse", "HEAD"]);
 
-        // In standard mode: auto_merges but reports unnecessary_files
+        // In standard mode: held for the owner, naming only the unneeded file
         const resStandard = verifyAuthorizedGitFixture({
           git: true,
           workspaceDir: repo,
           baseSha: base,
           headSha: head,
         });
-        assert.equal(resStandard.verified, true);
-        assert.deepEqual(resStandard.proof?.necessity_check?.necessary_files, ["src/math.mjs"]);
-        assert.deepEqual(resStandard.proof?.necessity_check?.unnecessary_files, ["src/extra.mjs"]);
+        assert.equal(resStandard.verified, false);
+        assert.equal(resStandard.verdict, "needs_human");
+        assert.equal(resStandard.rule, "UNPROVEN_CHANGE");
+        assert.match(resStandard.detail, /src\/extra\.mjs/);
+        assert.doesNotMatch(resStandard.detail, /src\/math\.mjs/);
 
         // In surgical mode: rejects with UNNECESSARY_CHANGE
         const resSurgical = verifyAuthorizedGitFixture({

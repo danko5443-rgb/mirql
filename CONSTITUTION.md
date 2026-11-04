@@ -61,9 +61,9 @@ Every functional subsystem and public surface interface must be guarded by decla
 
 ### Law 13: Monotone Potential PHI & Thrift Test
 System potential $\Phi$ measures production-source complexity and debt. Test files and `conformance/` fixtures do not contribute to the potential; test-gap counts remain separate diagnostics so adding a reproducer never changes $\Phi$.
-Every state transition must stay within the complexity allowance explicitly authorized by the human in the signed warrant:
-$$\Phi_{t+1} - \Phi_t \le \text{warrant.phi\_budget}$$
-An absent allowance means zero. A caller-supplied number or unsigned document grants no allowance. Refactoring and consolidation tasks must still strictly decrease potential ($\Phi_{t+1} < \Phi_t$), regardless of budget. Superfluous code, redundant dependencies, or complexity above the authorized allowance fails the Thrift Test.
+Every state transition must stay within the complexity allowance the human signed into the warrant. That allowance is cumulative per warrant: it is spent across every accepted transition under the warrant, and it is never re-granted per transition. Only increases spend it:
+$$\sum_{i \le t} \max(0,\ \Phi_{i+1} - \Phi_i) \le \text{warrant.phi\_budget}$$
+A decrease does not refund the allowance, because a recorded transition is not proof that it was merged. An absent allowance means zero. A caller-supplied number or unsigned document grants no allowance. Refactoring and consolidation tasks must still strictly decrease potential ($\Phi_{t+1} < \Phi_t$), regardless of budget. Superfluous code, redundant dependencies, or complexity above the authorized allowance fails the Thrift Test.
 
 ### Law 14: Quiescence Is Success
 When all active warrants are completed and all declarative probes report green, the factory must settle into a stable quiescent state. Continuous idle execution, repetitive non-productive polling, or artificial token expenditure is classified as a runaway malfunction. In quiescence, consumption must drop below the defined budget ceiling (`quiescent_max_budget_bp`).

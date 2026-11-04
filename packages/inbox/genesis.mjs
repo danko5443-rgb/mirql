@@ -11,7 +11,9 @@
 //
 // Remediation B1 (Law 6): the human:owner private key is written OUTSIDE
 // `.mirql/` (`--human-key-out <path>`, default `<operatorDir>/human_owner.key.private.json`)
-// with file mode 0o600; `.mirql/keys/` holds factory keys only.
+// with file mode 0o600; `.mirql/keys/` holds factory keys only. When a
+// passphrase is available (options.passphrase / MIRQL_HUMAN_PASSPHRASE) the
+// owner key file is encrypted at rest (scrypt + AES-256-GCM).
 import { mkdirSync, existsSync, statSync, readFileSync, rmSync } from "node:fs";
 import { join, dirname, resolve as resolvePath } from "node:path";
 import {
@@ -84,6 +86,7 @@ function purgeStaleHumanKeys(mirqlDir) {
  * @param {string} [options.tenantId]
  * @param {string} [options.macroState]
  * @param {string} [options.humanKeyOut] - explicit path for the human private key (outside .mirql/)
+ * @param {string} [options.passphrase] - encrypt the owner key at rest (else MIRQL_HUMAN_PASSPHRASE)
  * @returns {{ status: "initialized" | "already_initialized", seq: number, hash?: string, event: object, human_key_path?: string }}
  */
 export function runGenesis(mirqlDir, options = {}) {
@@ -131,10 +134,14 @@ export function runGenesis(mirqlDir, options = {}) {
 
   // 3. Provision all canonical writer keypairs. Factory (machine) keys are
   //    written under <dir>/keys; the human:owner private key is returned and
-  //    persisted OUTSIDE .mirql below. keyring.json is rebuilt cleanly (B4).
+  //    persisted OUTSIDE .mirql below (encrypted when a passphrase is given).
+  //    keyring.json is rebuilt cleanly (B4).
   purgeStaleHumanKeys(dir);
   const humanKeyOut = resolveHumanKeyPath(dir, options);
-  const keypairs = generateFactoryKeypairs(dir, { humanKeyPath: humanKeyOut });
+  const keypairs = generateFactoryKeypairs(dir, {
+    humanKeyPath: humanKeyOut,
+    passphrase: options.passphrase,
+  });
   const humanKp = keypairs[HUMAN_WRITER_NS];
   if (!humanKp?.privateKey) {
     throw domainError(

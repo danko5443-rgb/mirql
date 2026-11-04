@@ -18,10 +18,9 @@ import {
   buildPrDoc,
   measureThrift,
   loadReproducerManifest,
-  runReproducerScript,
-  verifyCausalReproducer,
   main,
 } from "../scripts/ci-evidence.mjs";
+import * as ciEvidence from "../scripts/ci-evidence.mjs";
 import { verifyThrift } from "../packages/run/index.mjs";
 
 
@@ -314,170 +313,177 @@ describe("ci-evidence: honest notary evidence builder", () => {
     });
   });
 
-  describe("6. Verified-reproducer causal cycle (Law 16)", () => {
+  describe("6. Reproducer manifest: recorded as data, never executed (Law 16)", () => {
     /**
-     * Fixture: a candidate carrying a reproducer whose script exits non-zero
-     * when MIRQL_TARGET_ROOT/marker.txt says "broken", zero on "fixed".
-     * baseDir gets the broken marker, candidate the fixed one — exactly the
-     * red-on-base → green-on-head contract.
+     * Law 16 pin: CI must NEVER execute a candidate-supplied reproducer
+     * script. A script that runs with this job's environment can inspect
+     * which tree it is in and pick its exit code — attestation, not
+     * measurement — so the evidence builder only validates and records the
+     * manifest as data, and causal_cycle_completed is always false here.
      */
-    function makeFixture({ baseMarker = "broken", headMarker = "fixed", manifest } = {}) {
+    const MANIFEST = {
+      description: "fixture reproducer",
+      entry: "reproducer/entry.mjs",
+      expect_base: "fail",
+      expect_head: "pass",
+    };
+
+    // Malicious entry: proves it ran by writing a marker file, then exits 0
+    // (the old verifier would have counted that as green-on-head).
+    const MARKER_ENTRY =
+      'import { writeFileSync } from "node:fs";\n' +
+      'import { join } from "node:path";\n' +
+      'const dir = process.env.MIRQL_MARKEDIR ?? process.cwd();\n' +
+      'writeFileSync(join(dir, "pwned.txt"), "candidate code ran");\n' +
+      "process.exit(0);\n";
+
+    // Old causal shape: exits 3 on a "broken" tree, 0 on a "fixed" one, and
+    // still proves execution via the marker file.
+    const CONDITIONAL_ENTRY =
+      'import { readFileSync, writeFileSync } from "node:fs";\n' +
+      'import { join } from "node:path";\n' +
+      'const root = process.env.MIRQL_TARGET_ROOT ?? process.cwd();\n' +
+      'try { writeFileSync(join(process.env.MIRQL_MARKEDIR ?? ".", "pwned.txt"), "candidate code ran"); } catch {}\n' +
+      'const marker = readFileSync(join(root, "marker.txt"), "utf8").trim();\n' +
+      'process.exit(marker === "broken" ? 3 : 0);\n';
+
+    /**
+     * A two-commit candidate git repo carrying a reproducer whose manifest
+     * declares the classic red-on-base → green-on-head contract (marker.txt
+     * reads "broken" at base, "fixed" at head — exactly what the removed
+     * executor would have "verified" as causal).
+     */
+    function makeCandidateRepo({ entry = MARKER_ENTRY, manifest = MANIFEST } = {}) {
       const candidate = mkdtempSync(join(tmpdir(), "mirql-repro-cand-"));
-      const base = mkdtempSync(join(tmpdir(), "mirql-repro-base-"));
+      git(candidate, "init", "-q");
+      git(candidate, "config", "user.email", "test@mirql.local");
+      git(candidate, "config", "user.name", "mirql-test");
       mkdirSync(join(candidate, "reproducer"), { recursive: true });
-      writeFileSync(
-        join(candidate, "reproducer", "entry.mjs"),
-        `import { readFileSync } from "node:fs";\n` +
-          `import { join } from "node:path";\n` +
-          `const root = process.env.MIRQL_TARGET_ROOT;\n` +
-          `if (!root) { console.error("MIRQL_TARGET_ROOT not set"); process.exit(5); }\n` +
-          `const marker = readFileSync(join(root, "marker.txt"), "utf8").trim();\n` +
-          `process.exit(marker === "broken" ? 3 : 0);\n`,
-        "utf8",
-      );
-      writeFileSync(
-        join(candidate, "reproducer", "manifest.json"),
-        JSON.stringify(
-          manifest ?? {
-            description: "fixture reproducer",
-            entry: "reproducer/entry.mjs",
-            expect_base: "fail",
-            expect_head: "pass",
-          },
-        ),
-        "utf8",
-      );
-      writeFileSync(join(base, "marker.txt"), baseMarker, "utf8");
-      writeFileSync(join(candidate, "marker.txt"), headMarker, "utf8");
-      return { candidate, base };
+      writeFileSync(join(candidate, "reproducer", "entry.mjs"), entry, "utf8");
+      writeFileSync(join(candidate, "reproducer", "manifest.json"), JSON.stringify(manifest), "utf8");
+      writeFileSync(join(candidate, "marker.txt"), "broken", "utf8");
+      git(candidate, "add", "-A");
+      git(candidate, "commit", "-q", "-m", "base");
+      writeFileSync(join(candidate, "marker.txt"), "fixed", "utf8");
+      git(candidate, "add", "-A");
+      git(candidate, "commit", "-q", "-m", "head");
+      return {
+        candidate,
+        baseSha: git(candidate, "rev-parse", "HEAD~1").trim(),
+        headSha: git(candidate, "rev-parse", "HEAD").trim(),
+      };
     }
 
-    it("validates the manifest fail-closed", () => {
-      const { candidate, base } = makeFixture();
+    /** Runs the evidence builder CLI end-to-end against a fixture. */
+    function runEvidenceCli(fixture, extraEnv = {}) {
+      const outPath = join(fixture.candidate, "out-pr-doc.json");
+      const res = spawnSync(process.execPath, [resolve("scripts/ci-evidence.mjs")], {
+        env: {
+          ...process.env,
+          BASE_NOTARY_DIR: resolve("."),
+          CANDIDATE_DIR: fixture.candidate,
+          BASE_SHA: fixture.baseSha,
+          HEAD_SHA: fixture.headSha,
+          PR_NUMBER: "31",
+          PR_AUTHOR: "test-author",
+          SUITE_PASS_BASE: "true",
+          SUITE_PASS_HEAD: "true",
+          PR_DOC_PATH: outPath,
+          ...extraEnv,
+        },
+        encoding: "utf8",
+      });
+      return { res, outPath };
+    }
+
+    it("validates the manifest fail-closed (including absent manifest)", () => {
+      const dirs = [];
       try {
-        assert.equal(loadReproducerManifest(candidate).ok, true);
+        const ok = makeCandidateRepo();
+        dirs.push(ok.candidate);
+        assert.equal(loadReproducerManifest(ok.candidate).ok, true);
 
-        const noEntry = makeFixture({ manifest: { expect_base: "fail", expect_head: "pass" } });
-        assert.match(loadReproducerManifest(noEntry.candidate).error, /entry/);
-
-        const escaping = makeFixture({
+        const noEntry = makeCandidateRepo({ manifest: { expect_base: "fail", expect_head: "pass" } });
+        const escaping = makeCandidateRepo({
           manifest: { entry: "reproducer/../../escape.mjs", expect_base: "fail", expect_head: "pass" },
         });
-        assert.match(loadReproducerManifest(escaping.candidate).error, /escape/);
-
-        const wrongExpects = makeFixture({
+        const wrongExpects = makeCandidateRepo({
           manifest: { entry: "reproducer/entry.mjs", expect_base: "pass", expect_head: "pass" },
         });
+        dirs.push(noEntry.candidate, escaping.candidate, wrongExpects.candidate);
+        assert.match(loadReproducerManifest(noEntry.candidate).error, /entry/);
+        assert.match(loadReproducerManifest(escaping.candidate).error, /escape/);
         assert.match(loadReproducerManifest(wrongExpects.candidate).error, /expect_base/);
 
-        rmSync(noEntry.candidate, { recursive: true, force: true });
-        rmSync(noEntry.base, { recursive: true, force: true });
-        rmSync(escaping.candidate, { recursive: true, force: true });
-        rmSync(escaping.base, { recursive: true, force: true });
-        rmSync(wrongExpects.candidate, { recursive: true, force: true });
-        rmSync(wrongExpects.base, { recursive: true, force: true });
+        const empty = mkdtempSync(join(tmpdir(), "mirql-repro-none-"));
+        dirs.push(empty);
+        assert.match(loadReproducerManifest(empty).error, /no reproducer manifest/);
       } finally {
-        rmSync(candidate, { recursive: true, force: true });
-        rmSync(base, { recursive: true, force: true });
+        for (const d of dirs) rmSync(d, { recursive: true, force: true });
       }
     });
 
-    it("verifies causal only on genuinely observed red-on-base + green-on-head", () => {
-      const { candidate, base } = makeFixture();
+    it("never executes a candidate reproducer script (no marker file)", () => {
+      const markerDir = mkdtempSync(join(tmpdir(), "mirql-repro-marker-"));
+      const fixture = makeCandidateRepo();
       try {
-        const res = verifyCausalReproducer({ candidateDir: candidate, baseDir: base });
-        assert.equal(res.present, true);
-        assert.equal(res.causal, true);
-        assert.equal(res.base_exit_code, 3);
-        assert.equal(res.head_exit_code, 0);
+        const { res, outPath } = runEvidenceCli(fixture, { MIRQL_MARKEDIR: markerDir });
+        assert.equal(res.status, 0, `evidence build failed: ${res.stderr}`);
+        assert.ok(!existsSync(join(markerDir, "pwned.txt")), "the reproducer entry must never execute");
+        assert.ok(!existsSync(join(fixture.candidate, "pwned.txt")), "no cwd-fallback execution either");
+
+        const doc = JSON.parse(readFileSync(outPath, "utf8"));
+        assert.equal(doc.proof.causal_cycle_completed, false, "presence of a manifest is never causal proof");
+        assert.equal(doc.proof.reproducer.present, true, "manifest recorded as data");
+        assert.equal(doc.proof.reproducer.causal, false);
       } finally {
-        rmSync(candidate, { recursive: true, force: true });
-        rmSync(base, { recursive: true, force: true });
+        rmSync(markerDir, { recursive: true, force: true });
+        rmSync(fixture.candidate, { recursive: true, force: true });
       }
     });
 
-    it("never verifies when the defect does not reproduce on base", () => {
-      const { candidate, base } = makeFixture({ baseMarker: "fixed" });
-
+    it("a red→green-looking reproducer still cannot produce causal_completed", () => {
+      const markerDir = mkdtempSync(join(tmpdir(), "mirql-repro-marker2-"));
+      const fixture = makeCandidateRepo({ entry: CONDITIONAL_ENTRY });
       try {
-        const res = verifyCausalReproducer({ candidateDir: candidate, baseDir: base });
-        assert.equal(res.causal, false, "green-on-base proves nothing");
+        const { res, outPath } = runEvidenceCli(fixture, { MIRQL_MARKEDIR: markerDir });
+        assert.equal(res.status, 0, `evidence build failed: ${res.stderr}`);
+        assert.ok(!existsSync(join(markerDir, "pwned.txt")), "exit-code-choosing scripts must never run");
+
+        const doc = JSON.parse(readFileSync(outPath, "utf8"));
+        assert.equal(doc.proof.causal_cycle_completed, false);
+        assert.equal(doc.proof.reproducer.causal, false);
+        assert.equal(doc.proof.reproducer.entry, "reproducer/entry.mjs");
+        assert.equal("base_exit_code" in doc.proof.reproducer, false, "no exit codes are recorded anymore");
+        assert.equal("head_exit_code" in doc.proof.reproducer, false);
       } finally {
-        rmSync(candidate, { recursive: true, force: true });
-        rmSync(base, { recursive: true, force: true });
+        rmSync(markerDir, { recursive: true, force: true });
+        rmSync(fixture.candidate, { recursive: true, force: true });
       }
     });
 
-    it("never verifies when the fix does not fix the head", () => {
-      const { candidate, base } = makeFixture({ headMarker: "broken" });
-
-      try {
-        const res = verifyCausalReproducer({ candidateDir: candidate, baseDir: base });
-        assert.equal(res.causal, false, "red-on-head means the cycle is incomplete");
-        assert.equal(res.head_exit_code, 3);
-      } finally {
-        rmSync(candidate, { recursive: true, force: true });
-        rmSync(base, { recursive: true, force: true });
-      }
+    it("candidate-execution helpers are gone from the module surface", () => {
+      assert.equal("runReproducerScript" in ciEvidence, false);
+      assert.equal("verifyCausalReproducer" in ciEvidence, false);
+      assert.equal(typeof ciEvidence.loadReproducerManifest, "function");
     });
 
-    it("fails closed on timeout (never a verified red)", () => {
-      const candidate = mkdtempSync(join(tmpdir(), "mirql-repro-hang-"));
-      const base = mkdtempSync(join(tmpdir(), "mirql-repro-hangb-"));
-      try {
-        mkdirSync(join(candidate, "reproducer"), { recursive: true });
-        writeFileSync(
-          join(candidate, "reproducer", "entry.mjs"),
-          `setTimeout(() => {}, 30000);\n`,
-          "utf8",
-        );
-        writeFileSync(
-          join(candidate, "reproducer", "manifest.json"),
-          JSON.stringify({ entry: "reproducer/entry.mjs", expect_base: "fail", expect_head: "pass" }),
-          "utf8",
-        );
-        const res = verifyCausalReproducer({ candidateDir: candidate, baseDir: base, timeoutMs: 1000 });
-        assert.equal(res.causal, false);
-        assert.ok(res.error, "timeout must be reported");
-      } finally {
-        rmSync(candidate, { recursive: true, force: true });
-        rmSync(base, { recursive: true, force: true });
-      }
-    });
-
-    it("reports present:false when the candidate carries no manifest", () => {
-      const candidate = mkdtempSync(join(tmpdir(), "mirql-repro-none-"));
-      try {
-        const res = verifyCausalReproducer({ candidateDir: candidate, baseDir: candidate });
-        assert.equal(res.present, false);
-        assert.equal(res.causal, false);
-      } finally {
-        rmSync(candidate, { recursive: true, force: true });
-      }
-    });
-
-    it("propagates measured reproducer evidence into proof (buildPrDoc)", () => {
+    it("propagates the data-only manifest record into proof (buildPrDoc)", () => {
+      const base = {
+        pr: { number: 9, base_sha: "b".repeat(40), head_sha: "h".repeat(40), author: "agent" },
+        diff: { files_changed: [], tests_deleted: [] },
+        suite: { pass_base: true, pass_head: true },
+        phi: { delta_phi: -5 },
+      };
       const doc = buildPrDoc({
-        pr: { number: 9, base_sha: "b".repeat(40), head_sha: "h".repeat(40), author: "agent" },
-        diff: { files_changed: [], tests_deleted: [] },
-        suite: { pass_base: true, pass_head: true },
-        phi: { delta_phi: -5 },
-        causalCompleted: true,
-        reproducer: {
-          present: true, causal: true, entry: "reproducer/entry.mjs",
-          base_exit_code: 3, head_exit_code: 0,
-        },
+        ...base,
+        reproducer: { present: true, causal: false, entry: "reproducer/entry.mjs", description: "fixture" },
       });
-      assert.equal(doc.proof.causal_cycle_completed, true);
-      assert.equal(doc.proof.reproducer.base_exit_code, 3);
-      assert.equal(doc.proof.reproducer.head_exit_code, 0);
+      assert.equal(doc.proof.causal_cycle_completed, false, "a manifest record is never causal proof");
+      assert.equal(doc.proof.reproducer.entry, "reproducer/entry.mjs");
+      assert.equal(doc.proof.reproducer.causal, false);
 
-      const bare = buildPrDoc({
-        pr: { number: 9, base_sha: "b".repeat(40), head_sha: "h".repeat(40), author: "agent" },
-        diff: { files_changed: [], tests_deleted: [] },
-        suite: { pass_base: true, pass_head: true },
-        phi: { delta_phi: -5 },
-      });
+      const bare = buildPrDoc(base);
       assert.equal(bare.proof.reproducer, undefined);
     });
   });

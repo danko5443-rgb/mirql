@@ -21,6 +21,6 @@
     "test": "node scripts/run-tests.mjs"
   },
   "engines": {
-    "node": ">=18.17"
+    "node": ">=22"
   }
 }
