@@ -352,7 +352,7 @@ export function signAndAppendVerdict(mirqlDir, verdictDoc, options = {}) {
       jcs(probe) + "\n",
       { encoding: "utf8", flag: "a" },
     );
-    // O(1) verified head sidecar (Law 4, Phase 6.2).
+    // Refresh the head sidecar (Law 4, Phase 6.2).
     writeLedgerHeadSidecar(dir, probe);
 
     return {

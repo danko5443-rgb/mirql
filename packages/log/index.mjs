@@ -677,7 +677,7 @@ export function appendEvent(mirqlDir, eventInput, options = {}) {
     );
   }
 
-  // 4. Atomic append + cache update + O(1) head sidecar update (Law 4).
+  // 4. Atomic append + cache update + head sidecar update (Law 4).
   appendLedgerLine(dir, jcs(event));
   writeLedgerHeadSidecar(dir, event);
   updateCache(dir);

@@ -96,7 +96,7 @@ export function appendEvent(mirqlDir, signedEvent) {
 
   const line = jcs(signedEvent) + "\n";
   appendFileSync(eventsPath, line, "utf8");
-  // O(1) verified head sidecar (Law 4, Phase 6.1/6.2): every inbox append refreshes it.
+  // Refresh the head sidecar (Law 4, Phase 6.1/6.2) on every inbox append.
   writeLedgerHeadSidecar(mirqlDir, signedEvent);
 
   // Update materialized state cache
