@@ -186,6 +186,24 @@ jobs:
           gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/comments" --jq '.[]' > "$REVIEW_COMMENTS_PATH"
           node base-notary/scripts/ci-review-gate.mjs
 
+      # Owner sign-off: the repository owner added `reviewed:<head sha>` to this
+      # PR. The rules live in scripts/ci-owner-signoff.mjs (base copy): exact
+      # head commit, owner User account, label still on the PR. No bootstrap
+      # fallback: base lacking the script fails closed. The label re-triggers
+      # this workflow through the `labeled` type above.
+      - name: Find Owner Sign-off (Base Copy)
+        id: owner_signoff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENTS_PATH: ${{ runner.temp }}/events.jsonl
+        run: |
+          gh api --paginate "repos/$REPO/issues/$PR_NUMBER/events" --jq '.[]' > "$EVENTS_PATH"
+          node base-notary/scripts/ci-owner-signoff.mjs
+
       # The evaluator reads policy/paths.yaml and runs its Law 7 git
       # cross-check from its working directory, so it runs from base-notary
       # (BASE policy — never the candidate's copy). This step copies the
@@ -197,20 +215,25 @@ jobs:
         run: git -C base-notary fetch --no-tags ../candidate "$HEAD_SHA"
 
       # Exit policy: only auto_merge passes unconditionally. needs_human and
-      # conformance_pass pass ONLY when the lookup above found an aiReviewers
-      # approver on the exact head commit; otherwise the check stays red until
-      # such a review exists. A reject or any unknown/missing verdict fails.
+      # conformance_pass pass ONLY when a lookup above found the owner's sign-off
+      # or an aiReviewers approver on the exact head commit; otherwise the check
+      # stays red until one exists. A reject or any unknown/missing verdict fails.
       - name: Evaluate Mergeproof Notary Gate (Base-Authored Conscience)
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           AI_APPROVER: ${{ steps.ai_review.outputs.approver }}
+          OWNER_SIGNOFF: ${{ steps.owner_signoff.outputs.owner }}
           PR_DOC: ${{ github.workspace }}/pr-doc.json
         working-directory: base-notary
         run: |
+          REVIEWER="${OWNER_SIGNOFF:-$AI_APPROVER}"
           reviewer_args=()
-          if [ -n "$AI_APPROVER" ]; then
-            reviewer_args=(--human-only-reviewer "$AI_APPROVER")
+          if [ -n "$REVIEWER" ]; then
+            reviewer_args=(--human-only-reviewer "$REVIEWER")
+          else
+            echo "::notice::To sign off after reviewing, the repo owner runs scripts/owner-signoff.mjs with PR number $PR_NUMBER"
           fi
           set +e
           node bin/mirql.mjs m check \
@@ -227,11 +250,11 @@ jobs:
               echo "::notice::mergeproof verdict: auto_merge"
               exit 0 ;;
             needs_human|conformance_pass)
-              if [ -n "$AI_APPROVER" ]; then
-                echo "::notice::mergeproof verdict: $verdict - AI review by $AI_APPROVER on $HEAD_SHA"
+              if [ -n "$REVIEWER" ]; then
+                echo "::notice::mergeproof verdict: $verdict - reviewed by $REVIEWER on $HEAD_SHA"
                 exit 0
               fi
-              echo "::error::mergeproof verdict: $verdict requires review: no aiReviewers account (base policy/paths.yaml) approved head commit $HEAD_SHA. After the approval lands, re-run this job or toggle a PR label - a review alone does not re-trigger this check."
+              echo "::error::mergeproof verdict: $verdict requires review: neither the repo owner's reviewed:<sha> label nor an aiReviewers approval (base policy/paths.yaml) covers head commit $HEAD_SHA. After an approval lands, re-run this job or toggle a PR label - a review alone does not re-trigger this check."
               exit 1 ;;
             *)
               echo "::error::mergeproof verdict: ${verdict:-none} (exit $status)"

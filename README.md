@@ -71,7 +71,7 @@ The public surface is strictly locked in [`surface.lock`](surface.lock):
 - `mirql i protect-key` — Encrypt the owner's private key with a passphrase.
 
 ### Run (`mirql r`)
-- `mirql r supervisor` — Execute the reactive agent supervisor daemon. It leases and dispatches jobs, but it cannot accept work yet: it passes the verifier no runner or Git proof, so every daemon attempt ends `reject` (`MISSING_RUNNER`). Use `mirql r verify` to accept a change.
+- `mirql r supervisor` — Execute the reactive agent supervisor daemon. Each leased job runs its worker in a private clone of the workspace's committed `HEAD`, with its own Git store that is deleted afterwards, so a retry starts from the base commit and your checkout is never touched. Filters such as Git LFS are not applied in that clone, so the worker sees and records raw bytes. A host tool commits the worker's output, then the Git-mode verifier judges that commit against the warrant's scope, its cumulative `phi_budget` and the reproducer the owner signed (`mirql i send --reproducer <test-file>`; without one the attempt ends `NO_REPRODUCER_DECLARED`). An accepted candidate is pinned at `refs/mirql/attempts/<sha>` for you to merge. `mirql i digest` shows the rule behind each outcome.
 - `mirql r agent` — Run a worker command with a stripped environment and a disposable home directory (not an OS sandbox).
 - `mirql r verify --workspace <repo> --base <ref> --head <ref> --reproducer <changed-test-file>` — Run the measured Git causal checks and the project's full npm test suite. For humanApprove changes, add `--dir <ledger> --warrant-id <id>` to consume an exact owner-signed approval. `--fixture` checks conformance only. Candidate tests execute with a stripped environment and a disposable home directory, but still under the invoking user account; OS isolation remains unfinished. The verifier refuses to run candidate code while the owner key is plaintext (`OWNER_KEY_UNPROTECTED`).
 - `mirql r probe` — Run declarative health probes (tests, drift, mutants, complexity, surface).
@@ -228,6 +228,23 @@ workflow and a pull request cannot rewrite its own check. A workflow change
 first takes effect on the pull requests opened after it lands. A review does
 not re-trigger the check: after an AI reviewer approves, re-run the job or add a
 label to the pull request.
+
+After reviewing a pull request, the repository owner can sign off on it:
+
+```bash
+node scripts/owner-signoff.mjs <pr-number>
+```
+
+This shows the head commit and asks for a typed yes, then adds the label
+`reviewed:<head sha>`, which re-runs the gate. A new push voids the sign-off;
+after removing the label, re-run the job. The other rules still run, the verdict
+stays `needs_human` at best, and the merge stays manual. A pull request that
+changes reviewer config or agent instructions (such as `AGENTS.md`) stays red, so
+merging it is the owner's decision. The label records a review; it is not a
+signature, because GitHub cannot tell the owner from an agent using the owner's
+`gh` login. An open pull request needs `main` merged into it before its first
+sign-off after this feature lands, because the gate uses the base commit recorded
+on the pull request.
 
 
 Worker commands require a readable, committed Git baseline. After execution,

@@ -13,6 +13,23 @@ function refusal(message) {
   return error;
 }
 
+/** A repository-relative, forward-slash path that cannot leave the repository. */
+export function isReproducerPath(value) {
+  return typeof value === "string"
+    && value.length > 0
+    && !value.includes("\\")
+    && !value.includes("\0")
+    && !value.startsWith("/")
+    && !/^[A-Za-z]:/.test(value)
+    && value.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
+
+/** The reproducer named by a signed warrant, or null if it names no valid one. */
+export function declaredReproducer(warrant) {
+  const declared = warrant?.evidence?.reproducer_test;
+  return isReproducerPath(declared) ? declared : null;
+}
+
 /** Resolve a selection, then require its exact human-signed ledger authorization. */
 export function requireAuthorizedWarrant(mirqlDir, options = {}) {
   let input = options.warrant;

@@ -466,11 +466,6 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
         leaseJob: () => leaseNextJob(tempDir),
         getWarrant: (wId) => warrantMap.get(wId) || null,
         builderCommand: "exit 0",
-        verifyOptions: {
-          runCheck: ({ stage }) => ({
-            exitCode: stage === "red_on_base" || stage === "re_red_on_revert" ? 1 : 0,
-          }),
-        },
       });
 
       try {
@@ -482,7 +477,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
           // no-stranding invariant this test pins. The absolute cap keeps the
           // test bounded even under pathological stall.
           const STEP_TIMEOUT_MS = 15000;
-          const ABSOLUTE_CAP_MS = 45000;
+          const ABSOLUTE_CAP_MS = 300000;
           let startedAt = Date.now();
           let settled = false;
           let timeout = null;
@@ -492,7 +487,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
               settled = true;
               reject(
                 new Error(
-                  `Timeout: received ${outcomesReceived.length} of 3 outcomes after ${Date.now() - startedAt}ms`,
+                  `Timeout: received ${outcomesReceived.length} of 9 outcomes after ${Date.now() - startedAt}ms`,
                 ),
               );
             }, STEP_TIMEOUT_MS);
@@ -505,7 +500,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
           reactive.watcher.on("event", (evt) => {
             if (evt.type === "attempt.outcome") {
               outcomesReceived.push(evt);
-              if (outcomesReceived.length === 3) {
+              if (outcomesReceived.length === 9) {
                 settled = true;
                 if (timeout) clearTimeout(timeout);
                 resolve(outcomesReceived);
@@ -524,8 +519,10 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
         startOutcomeDeadline();
 
         const outcomes = await outcomePromise;
-        assert.equal(outcomes.length, 3);
-        assert.equal(reactive.getStepsExecuted(), 3);
+        // Their worker ("exit 0") changes nothing, so each warrant is refused up to
+        // its attempt limit. Every job still gets its turn.
+        assert.equal(outcomes.length, 9);
+        assert.equal(reactive.getStepsExecuted(), 9);
 
         const outcomeWarrantIds = outcomes.map((o) => o.payload.warrant_id);
         assert.ok(outcomeWarrantIds.includes(w1.id));
@@ -562,18 +559,13 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
         leaseJob: () => leaseNextJob(tempDir),
         getWarrant: (wId) => (wId === wGood.id ? wGood : null),
         builderCommand: "exit 0",
-        verifyOptions: {
-          runCheck: ({ stage }) => ({
-            exitCode: stage === "red_on_base" || stage === "re_red_on_revert" ? 1 : 0,
-          }),
-        },
       });
 
       try {
         const outcomesReceived = [];
         const outcomePromise = new Promise((resolve, reject) => {
           const STEP_TIMEOUT_MS = 15000;
-          const ABSOLUTE_CAP_MS = 45000;
+          const ABSOLUTE_CAP_MS = 300000;
           const startedAt = Date.now();
           let timeout = null;
           const armStepTimeout = () => {
@@ -581,16 +573,19 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
             timeout = setTimeout(() => {
               reject(
                 new Error(
-                  `Timeout: received ${outcomesReceived.length} of 4 outcomes after ${Date.now() - startedAt}ms`,
+                  `Timeout: received ${outcomesReceived.length} of 6 outcomes after ${Date.now() - startedAt}ms`,
                 ),
               );
             }, STEP_TIMEOUT_MS);
           };
           armStepTimeout();
+          reactive.watcher.on("step", () => {
+            if (Date.now() - startedAt < ABSOLUTE_CAP_MS) armStepTimeout();
+          });
           reactive.watcher.on("event", (evt) => {
             if (evt.type === "attempt.outcome") {
               outcomesReceived.push(evt);
-              if (outcomesReceived.length === 4) {
+              if (outcomesReceived.length === 6) {
                 if (timeout) clearTimeout(timeout);
                 resolve(outcomesReceived);
               } else if (Date.now() - startedAt < ABSOLUTE_CAP_MS) {
@@ -605,7 +600,7 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
         submitWarrant(tempDir, wGood, { repoRoot: ROOT });
 
         const outcomes = await outcomePromise;
-        assert.equal(outcomes.length, 4);
+        assert.equal(outcomes.length, 6);
 
         // First 3 outcomes must be failed attempts for wBad (capped at max_attempts)
         const badOutcomes = outcomes.filter((o) => o.payload.warrant_id === wBad.id);
@@ -615,11 +610,11 @@ describe("Milestone M1: Event-Driven Wake Rules & Concurrency 1", () => {
           assert.equal(bo.payload.verdict, "reject");
         }
 
-        // Final outcome must be completed for wGood (not blocked by bad warrant lease!)
-        const goodOutcome = outcomes.find((o) => o.payload.warrant_id === wGood.id);
-        assert.ok(goodOutcome);
-        assert.equal(goodOutcome.payload.status, "completed");
-        assert.equal(goodOutcome.payload.verdict, "auto_merge");
+        // wGood was still leased and dispatched, not blocked by the bad warrant's
+        // lease. Its worker ("exit 0") changes nothing, so the supervisor refuses it on its merits.
+        const goodOutcomes = outcomes.filter((o) => o.payload.warrant_id === wGood.id);
+        assert.equal(goodOutcomes.length, 3);
+        for (const good of goodOutcomes) assert.equal(good.payload.rule, "NO_WORKER_CHANGES");
       } finally {
         reactive.close();
       }
