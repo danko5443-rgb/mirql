@@ -84,6 +84,9 @@ const runInSandbox = (workspace, binDir, command) => runAgent({
   env: { PATH: `${binDir}${delimiter}${dirname(process.execPath)}` },
 });
 
+/** What `sh -c` receives in the container: POSIX hosts prefix a umask for the unprivileged user's output. */
+const inContainer = (command) => (process.platform === "win32" ? command : `umask 000; ${command}`);
+
 const hostileCommands = (marker) => [
   `true & echo pwned > "${marker}"`,
   `true && echo pwned > "${marker}"`,
@@ -109,7 +112,7 @@ test("shell metacharacters in a worker command never run on the host and reach t
       assert.equal(existsSync(marker), false, `host shell ran: ${command}`);
       assert.equal(existsSync(join(workspace, "marker")), false, `host shell ran: ${command}`);
       assert.equal(res.ok, true, `${command}: ${JSON.stringify(res)}`);
-      assert.deepEqual(JSON.parse(readFileSync(argsFile, "utf8")).slice(-3), ["sh", "-c", command]);
+      assert.deepEqual(JSON.parse(readFileSync(argsFile, "utf8")).slice(-3), ["sh", "-c", inContainer(command)]);
     }
   } finally {
     rmSync(parent, { recursive: true, force: true });
@@ -125,7 +128,7 @@ test("variable syntax in a worker command is passed through, not expanded by the
 
     const res = runInSandbox(workspace, binDir, command);
     assert.equal(res.ok, true, JSON.stringify(res));
-    assert.equal(JSON.parse(readFileSync(argsFile, "utf8")).at(-1), command);
+    assert.equal(JSON.parse(readFileSync(argsFile, "utf8")).at(-1), inContainer(command));
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }
