@@ -234,6 +234,13 @@ The gate runs on `pull_request_target`, so it always uses the base branch's
 workflow and a pull request cannot rewrite its own check. A workflow change
 first takes effect on the pull requests opened after it lands.
 
+That workflow never runs a pull request's code. The candidate suite runs in its
+own `pull_request` workflow (`mergeproof-candidate.yml`), and the gate reads that
+run's conclusion by exact head commit, as one advisory bit: candidate code can
+still forge a pass. To recover from a flaky run, re-run the candidate workflow,
+then re-run the gate's failed jobs. A pull request with merge conflicts gets no
+`pull_request` run, so its gate stays red until the conflicts are resolved.
+
 ### PR Court (`Critic` ↔ `Advocate` → `Judge`) & Courthouse Lock
 
 To eliminate manual review bottlenecks and recover from external bot rate limits while keeping every state mutation inside deterministic host tooling (**Law 3: Roles Propose / Tools Author** and **Law 7: Notary Outside Blast Radius**), `mirql` runs a three-role **PR Court** (`scripts/pr-court.mjs`, orchestrated by `.github/workflows/mergeproof-retrigger.yml` and woken on review submissions by `.github/workflows/mergeproof-review-signal.yml`; see [`docs/pr-court.md`](docs/pr-court.md)):
