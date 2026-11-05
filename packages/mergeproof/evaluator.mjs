@@ -41,6 +41,7 @@ import {
   checkSwallowedExceptions,
   checkTestWeakenings,
 } from "../core/index.mjs";
+import { phiWarrantAllowance } from "../core/phi-warrant.mjs";
 
 /** Tool name reported by this package. */
 export const TOOL = "mergeproof";
@@ -498,17 +499,20 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     );
   }
 
-  // Refactors and consolidations must shrink Phi whoever signs off.
-  const phiGrowthSignedOff = deltaPhi > 0 && ownerSignoff !== null && !isConsolidation;
-  if (deltaPhi > 0) {
+  // Growth inside the owner's signed warrant is authorized. Refactors and
+  // consolidations must shrink Phi whoever signs off and whatever is warranted.
+  const phiAllowance = phiWarrantAllowance(options.rootDir, options.phiWarrant, options.phiSpent);
+  const phiGrowthWarranted = deltaPhi > 0 && !isConsolidation && deltaPhi <= phiAllowance;
+  const phiGrowthSignedOff = deltaPhi > 0 && !phiGrowthWarranted && ownerSignoff !== null && !isConsolidation;
+  if (deltaPhi > 0 && !phiGrowthWarranted) {
     checks.phi = false;
   }
-  if (deltaPhi > 0 && !phiGrowthSignedOff) {
+  if (deltaPhi > 0 && !phiGrowthWarranted && !phiGrowthSignedOff) {
     return fail(
       "LAW_13",
       "PHI_INCREASE",
       "reject",
-      `Law 13 invariant violation: complexity potential increased (delta_phi = +${deltaPhi} > 0). The notary sees no signed warrant, so the authorized allowance is 0; a human must decide this merge (the repo owner's reviewed:<head sha> label can clear this, capped at needs_human).`,
+      `Law 13 invariant violation: complexity potential increased (delta_phi = +${deltaPhi} > 0). ${phiAllowance > 0 ? `The signed warrant has only +${phiAllowance} left` : "The notary sees no signed warrant with allowance left, so the authorized allowance is 0"}; a human must decide this merge (the repo owner's reviewed:<head sha> label can clear this, capped at needs_human).`,
       { checks, delta_phi: deltaPhi },
     );
   }
@@ -577,7 +581,8 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
       "NO_CAUSAL_PROOF",
       "needs_human",
       "Suite passes on base and head, but no causal proof (red-green-re-red) was measured; human review required." +
-        (phiGrowthSignedOff ? ` Phi also grew by +${deltaPhi} under the owner's sign-off.` : ""),
+        (phiGrowthSignedOff ? ` Phi also grew by +${deltaPhi} under the owner's sign-off.` : "") +
+        (phiGrowthWarranted ? ` Phi grew by +${deltaPhi}, inside the +${phiAllowance} left on the signed warrant.` : ""),
       { checks, ...reviewerRecord },
     );
   }
@@ -587,7 +592,7 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
       "LAW_13",
       "PHI_INCREASE",
       "needs_human",
-      `Phi grew by +${deltaPhi} and the repo owner signed off as ${ownerSignoff}; no warrant allowance was granted; merge is manual, never auto_merge.`,
+      `Phi grew by +${deltaPhi} and the repo owner signed off as ${ownerSignoff}; no warrant allowance covered it; merge is manual, never auto_merge.`,
       {
         checks,
         delta_phi: deltaPhi,

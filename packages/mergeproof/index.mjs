@@ -5,7 +5,7 @@
 //   mirql m check [--pr <path|json>] [--base <sha>] [--head <sha>]
 //                 [--dir <mirqlDir>] [--key <notaryKeyPath>] [--sign]
 //                 [--surface] [--workspace <dir>] [--human-only-reviewer <login>]
-//                 [--owner-signoff <login>]
+//                 [--owner-signoff <login>] [--phi-warrant <json> --phi-spent <n>]
 //
 // - `--pr` accepts a fixture file path or inline JSON; without it the PR
 //   document is read from stdin.
@@ -19,6 +19,10 @@
 //   needs_human; it can never produce auto_merge.
 // - `--owner-signoff` names the repo owner CI found signing off the head commit.
 //   It lets a PR that grows Phi run the remaining rules, capped at needs_human.
+// - `--phi-warrant` is the owner's signed Phi warrant and `--phi-spent` what CI
+//   measured against it. Growth inside the rest runs the remaining rules. The
+//   signature is checked against the pin in this checkout: no pin, a bad
+//   signature or a non-integer spend means an allowance of 0, not an error.
 // - `--sign` signs the verdict with the notary key and appends the
 //   verdict.issued / verdict.rejected / verdict.needs_human event to
 //   <mirqlDir>/ledger/events.jsonl (writer ns `notary:mergeproof`).
@@ -297,6 +301,10 @@ function cliCheck(flags) {
   }
   if (typeof flags["owner-signoff"] === "string" && flags["owner-signoff"].length > 0) {
     options.ownerSignoff = flags["owner-signoff"];
+  }
+  if (typeof flags["phi-warrant"] === "string" && /^[0-9]+$/.test(String(flags["phi-spent"]))) {
+    options.phiWarrant = flags["phi-warrant"];
+    options.phiSpent = Number(flags["phi-spent"]);
   }
   // Law 3 & 6: Affirmative human sign-off cannot be claimed via raw CLI flag.
   // It must come from an external verified signed event or verified programmatic caller.

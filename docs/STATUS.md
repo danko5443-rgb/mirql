@@ -21,7 +21,7 @@ test. "Partial" means the law's mechanism exists but a documented gap remains.
 | Law 10 | Ship Invariants Not Features | Implemented | `surface.lock`, `bin/mirql.mjs` (`m check --surface`), `schemas/*.schema.json` |
 | Law 11 | No Warrant No Work | Implemented | `packages/core/warrant.mjs` (`requireAuthorizedWarrant`), `packages/queue` (submit/lease gates) |
 | Law 12 | The Probe Doctrine | Implemented | `packages/run/supervisor.mjs` (probes), `packages/run/doctor.mjs`, `tests/m5-doctor.test.mjs` |
-| Law 13 | Monotone Potential PHI & Thrift Test | Implemented | `packages/run/phi.mjs`, `packages/run/authorized-phi.mjs` (signed cumulative budget), `packages/mergeproof/evaluator.mjs` (`LAW_13` rules) |
+| Law 13 | Monotone Potential PHI & Thrift Test | Implemented | `packages/run/phi.mjs`, `packages/run/authorized-phi.mjs` (signed cumulative budget), `packages/core/phi-warrant.mjs` + `scripts/ci-phi-warrant.mjs` (the signed budget in CI), `packages/mergeproof/evaluator.mjs` (`LAW_13` rules) |
 | Law 14 | Quiescence Is Success | Partial | `packages/run/supervisor.mjs` (idle handling); explicit quiescence accounting is not surfaced as a projection |
 | Law 15 | Semantic Identity / Mechanical Location | Partial | `packages/core/warrant.mjs` (`semantic_fingerprint`, anchors); full mechanical-location resolution pending |
 | Law 16 | GREEN Must Be Causal | Implemented | `packages/run/verify.mjs` (Red-Green-ReRed, coverage, necessity), `packages/mergeproof/evaluator.mjs` (`NO_CAUSAL_PROOF`) |
