@@ -22,7 +22,7 @@ const COURT_ACTOR = { login: "github-actions[bot]", userId: 41898282, appId: 153
 const COURT_STATE_RE = /^<!-- mirql-court-state:v1 (\{[^\n]*?\}) -->\n(?:```json court-findings\n([^\n]*)\n```(?:\n|$))?/;
 const COURT_VERDICTS = new Map([["critic", ["APPROVE", "COMMENT"]], ["advocate", ["FIXED", "REBUT"]], ["judge", ["MERGE", "REMAND", "ESCALATE", "RECUSE"]]]);
 const COURT_PROVIDERS = [
-  { id: "zai", key: "ZAI_API_KEY", model: "glm-5.1", url: (env) => env.MIRQL_LLM_BASE_URL || "https://open.bigmodel.cn/api/paas/v4/chat/completions" },
+  { id: "zai", key: "ZAI_API_KEY", model: "glm-5.1", extra: { thinking: { type: "disabled" }, response_format: { type: "json_object" } }, url: (env) => env.MIRQL_LLM_BASE_URL || "https://open.bigmodel.cn/api/paas/v4/chat/completions" },
   { id: "anthropic", key: "ANTHROPIC_API_KEY", model: "claude-sonnet-4-20250514", url: () => "https://api.anthropic.com/v1/messages" },
   { id: "openai", key: "OPENAI_API_KEY", model: "gpt-4o-mini", url: () => "https://api.openai.com/v1/chat/completions" },
   { id: "openrouter", key: "OPENROUTER_API_KEY", model: "anthropic/claude-3.5-sonnet", url: () => "https://openrouter.ai/api/v1/chat/completions" },
@@ -182,23 +182,28 @@ function courtRequest(provider, model, key, system, user, maxTokens) {
     return { headers: { ...json, "x-goog-api-key": key }, body: { systemInstruction: system ? { parts: [{ text: system }] } : undefined, contents: [{ role: "user", parts: [{ text: user }] }], generationConfig: { maxOutputTokens: maxTokens } }, text: (d) => d?.candidates?.[0]?.content?.parts?.[0]?.text };
   }
   const messages = [...(system ? [{ role: "system", content: system }] : []), { role: "user", content: user }];
-  return { headers: { ...json, authorization: `Bearer ${key}` }, body: { model, max_tokens: maxTokens, messages }, text: (d) => d?.choices?.[0]?.message?.content };
+  return { headers: { ...json, authorization: `Bearer ${key}` }, body: { model, max_tokens: maxTokens, messages, ...(model === provider.model && provider.extra) }, text: (d) => d?.choices?.[0]?.message?.content };
 }
 
 /** Fetch only, and fails closed: returns { ok: true, data } or { ok: false, reason }, never a partial answer. */
-async function callCourtModel({ role, system = "", user, env = process.env, fetchImpl = globalThis.fetch, maxTokens = 4096, timeoutMs = 180000 } = {}) {
+async function callCourtModel({ role, system = "", user, env = process.env, fetchImpl = globalThis.fetch, maxTokens = 8192, timeoutMs = 180000 } = {}) {
   const name = String(role).toUpperCase();
   const wanted = env[`MIRQL_${name}_PROVIDER`];
   const provider = COURT_PROVIDERS.find((p) => env[p.key] && (!wanted || p.id === wanted));
   if (!provider || typeof fetchImpl !== "function") return { ok: false, reason: "NO_API_KEY" };
   const model = env[`MIRQL_${name}_MODEL`] || provider.model;
   const req = courtRequest(provider, model, env[provider.key], system, user, maxTokens);
+  // Counts and names only: a model reply or a JSON.parse message can quote the diff.
+  const fail = (reason, why) => { console.error(`pr-court: ${name} ${provider.id}/${model} ${reason}: ${why}`); return { ok: false, reason }; };
+  let seen = "no reply";
   try {
     const resp = await fetchImpl(provider.url(env, model), { method: "POST", headers: req.headers, body: JSON.stringify(req.body), signal: AbortSignal.timeout(timeoutMs) });
-    if (!resp?.ok) return { ok: false, reason: "LLM_HTTP_ERROR" };
-    const raw = String(req.text(await resp.json()) ?? "");
+    if (!resp?.ok) return fail("LLM_HTTP_ERROR", `status=${resp?.status}`);
+    const data = await resp.json();
+    const raw = String(req.text(data) ?? "");
+    seen = `finish=${data?.choices?.[0]?.finish_reason ?? data?.stop_reason ?? data?.candidates?.[0]?.finishReason} content_chars=${raw.length} reasoning_chars=${data?.choices?.[0]?.message?.reasoning_content?.length ?? 0} completion_tokens=${data?.usage?.completion_tokens}`;
     return { ok: true, data: JSON.parse((raw.match(/\{[\s\S]*\}/) ?? [raw])[0]) };
-  } catch { /* mp-003-allow: network or JSON failure fails closed without a verdict */ return { ok: false, reason: "LLM_PARSE_ERROR" }; }
+  } catch (err) { /* mp-003-allow: network or JSON failure fails closed without a verdict */ return fail("LLM_PARSE_ERROR", `${err?.name} ${seen}`); }
 }
 
 async function runFallbackReview({ diffText = "", authorAssociation = "", env = process.env, fetchImpl = globalThis.fetch } = {}) {

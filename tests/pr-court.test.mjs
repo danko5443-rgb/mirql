@@ -202,6 +202,36 @@ describe("court critic", () => {
     }
   });
 
+  it("Z.AI gets thinking off and JSON mode, but only on its default model", async () => {
+    const body = async (env) => {
+      const { fetchImpl, calls } = mockFetch({ verdict: "APPROVE", summary: "clean", findings: [] });
+      await runCriticRound({ diffText: trustedDiff, headSha: HEAD, authorAssociation: "OWNER", env, fetchImpl });
+      return calls[0].body;
+    };
+    const pinned = await body(ENV);
+    assert.deepEqual(pinned.thinking, { type: "disabled" });
+    assert.deepEqual(pinned.response_format, { type: "json_object" });
+    assert.equal(pinned.max_tokens, 8192);
+    const override = await body({ ...ENV, MIRQL_CRITIC_MODEL: "glm-5.3" });
+    assert.equal(override.thinking, undefined, "glm-5.3 refuses a disabled thinking setting");
+    assert.equal((await body({ OPENAI_API_KEY: "k" })).thinking, undefined);
+  });
+
+  it("logs why a model call failed, and never the reply", async () => {
+    const logged = [];
+    const original = console.error;
+    console.error = (line) => { logged.push(line); };
+    const run = (raw) => runCriticRound({ diffText: trustedDiff, headSha: HEAD, authorAssociation: "OWNER", env: ENV, fetchImpl: mockFetch({ raw }).fetchImpl });
+    try {
+      const truncated = { choices: [{ finish_reason: "length", message: { content: '{"secret', reasoning_content: "hidden" } }], usage: { completion_tokens: 8192 } };
+      assert.equal((await run({ ok: true, json: async () => truncated })).reason, "LLM_PARSE_ERROR");
+      assert.equal((await run({ ok: false, status: 429 })).reason, "LLM_HTTP_ERROR");
+    } finally { console.error = original; }
+    assert.match(logged[0], /CRITIC zai\/glm-5\.1 LLM_PARSE_ERROR: SyntaxError finish=length content_chars=8 reasoning_chars=6 completion_tokens=8192/);
+    assert.match(logged[1], /LLM_HTTP_ERROR: status=429/);
+    assert.ok(!logged.join().includes("secret") && !logged.join().includes("hidden"));
+  });
+
   it("reports a missing key without calling out", async () => {
     const { fetchImpl, calls } = mockFetch();
     const res = await runCriticRound({ diffText: trustedDiff, headSha: HEAD, authorAssociation: "OWNER", env: {}, fetchImpl });
@@ -332,13 +362,13 @@ describe("court advocate", () => {
     });
   });
 
-  it("recuses on an untrusted author or a hazard without calling the model", async () => {
+  it("recuses on an untrusted author and escalates a hazard, without calling the model", async () => {
     await withDir(async (dir) => {
       writeFileSync(join(dir, "src.mjs"), SOURCE);
-      for (const [extra, reason] of [[{ authorAssociation: "NONE" }, /^UNTRUSTED_AUTHOR$/], [{ diffText: "+a \u202Eb\n" }, /^DIFF_HAZARD: TROJAN_UNICODE$/]]) {
+      for (const [extra, reason, verdict] of [[{ authorAssociation: "NONE" }, /^UNTRUSTED_AUTHOR$/, "RECUSE"], [{ diffText: "+a \u202Eb\n" }, /^DIFF_HAZARD: TROJAN_UNICODE$/, "ESCALATE"]]) {
         const { fetchImpl, calls } = mockFetch();
         const res = await runAdvocateRound({ repoDir: dir, diffText: trustedDiff, authorAssociation: "OWNER", findings: [FINDING], basePhi: 0, policies: POLICIES, env: ENV, fetchImpl, ...extra });
-        assert.equal(res.verdict, "RECUSE");
+        assert.equal(res.verdict, verdict);
         assert.match(res.reason, reason);
         assert.equal(calls.length, 0);
       }
@@ -456,7 +486,8 @@ describe("court judge", () => {
     for (const [extra, reason] of cases) {
       const { res, calls } = await judge(undefined, extra);
       assert.equal(res.refused, true, String(reason));
-      assert.equal(res.verdict, String(reason).includes("SUITE") ? "WAIT" : "RECUSE", String(reason));
+      const expected = String(reason).includes("SUITE") ? "WAIT" : String(reason).includes("DIFF_HAZARD") ? "ESCALATE" : "RECUSE";
+      assert.equal(res.verdict, expected, String(reason));
       assert.match(res.reason, reason);
       assert.equal(calls.length, 0, String(reason));
     }
@@ -739,7 +770,7 @@ describe("court tick end to end", () => {
   const SOURCE = "export const keep = 1;\nexport const remove = 2;\nexport const extra = 3;\n";
 
   /** A real origin and candidate clone, with a GitHub stand-in that serves the PR and records every gh call. */
-  function sandbox(dir, extraFile = null) {
+  function sandbox(dir, extraFile = null, extraText = "changed\n") {
     const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", env: { ...process.env, ...COURT_GIT } }).trim();
     const origin = join(dir, "origin.git");
     const seed = join(dir, "seed");
@@ -754,7 +785,7 @@ describe("court tick end to end", () => {
     const baseSha = git(seed, "rev-parse", "HEAD");
     git(seed, "checkout", "-qb", "feature");
     writeFileSync(join(seed, "src.mjs"), SOURCE.replace("export const extra = 3;\n", ""));
-    if (extraFile) writeFileSync(join(seed, extraFile), "changed\n");
+    if (extraFile) writeFileSync(join(seed, extraFile), extraText);
     git(seed, "add", ".");
     git(seed, "commit", "-qm", "feature");
     git(seed, "remote", "add", "origin", origin);
@@ -867,6 +898,23 @@ describe("court tick end to end", () => {
       const approval = { user: { login: "coderabbitai[bot]", type: "Bot" }, state: "APPROVED", commit_id: box.pr.head.sha, submitted_at: "2026-11-04T11:00:00Z" };
       assert.equal(findAiApproval([approval], { reviewers: REVIEWERS, headSha: box.pr.head.sha, author: "ahmed-3m", comments: box.comments }), "coderabbitai[bot]");
     });
+  });
+
+  it("a hazard vetoes an external approval, on a locked PR and on an unreviewed one", async () => {
+    for (const [file, reviewed] of [["CONSTITUTION.md", true], ["notes.txt", false]]) {
+      await withDir(async (dir) => {
+        const box = sandbox(dir, file, "a \u202Eb\n");
+        const approval = { user: { login: "coderabbitai[bot]", type: "Bot" }, state: "APPROVED", commit_id: box.pr.head.sha, submitted_at: "2026-11-04T11:00:00Z" };
+        const list = box.io.list;
+        if (reviewed) box.io.list = (path) => (path.endsWith("/reviews") ? [approval] : list(path));
+        const { fetchImpl, calls } = mockFetch();
+        await quiet(() => runCourtTick({ env: box.env, io: box.io, fetchImpl, baseDir: ROOT }));
+        assert.deepEqual(box.verdicts(), ["judge:ESCALATE"], file);
+        assert.ok(box.comments[0].body.includes("DIFF_HAZARD: TROJAN_UNICODE"));
+        assert.equal(calls.length, 0);
+        assert.equal(findAiApproval([approval], { reviewers: REVIEWERS, headSha: box.pr.head.sha, author: "ahmed-3m", comments: box.comments }), null);
+      });
+    }
   });
 
   it("a reviewer-config PR is told that no sign-off clears it", async () => {

@@ -31,6 +31,8 @@ function refusalReason(diffText, authorAssociation) {
   return diffText.length > MAX_DIFF_CHARS ? "DIFF_HAZARD: DIFF_TOO_LARGE" : null;
 }
 
+const refusalVerdict = (reason) => (String(reason).startsWith("DIFF_HAZARD") ? "ESCALATE" : "RECUSE");
+
 function fenceData(sections) {
   const tag = `DATA_${randomBytes(8).toString("hex")}`;
   return Object.entries(sections)
@@ -56,9 +58,7 @@ function formatCourtReceipt({ round, headSha, role, verdict, count = 0, payload 
   return body;
 }
 
-function sameIdSet(ids, seen) {
-  return seen.length === ids.length && new Set(seen).size === ids.length && ids.every((id) => seen.includes(id));
-}
+const sameIdSet = (ids, seen) => seen.length === ids.length && new Set(seen).size === ids.length && ids.every((id) => seen.includes(id));
 
 function validateCritic(data) {
   if (!["APPROVE", "COMMENT"].includes(data?.verdict) || !Array.isArray(data.findings)) return null;
@@ -102,9 +102,7 @@ function resolveRepoFile(repoDir, file) {
   return lstatSync(current).isFile() ? current : null;
 }
 
-function isLockedPatchPath(rel, policies) {
-  return isHumanOnlyPath(rel, policies.humanOnly) || isReviewerConfigPath(rel) || ["package.json", ".npmrc"].includes(rel.split("/").at(-1));
-}
+const isLockedPatchPath = (rel, policies) => isHumanOnlyPath(rel, policies.humanOnly) || isReviewerConfigPath(rel) || ["package.json", ".npmrc"].includes(rel.split("/").at(-1));
 
 /** Computes every patch in memory first, so a refused round has touched nothing. */
 function stagePatches(repoDir, patches, policies) {
@@ -139,7 +137,7 @@ async function runAdvocateRound({ repoDir, diffText = "", authorAssociation, fin
   const escalate = (reason, extra = {}) => ({ ok: true, verdict: "ESCALATE", reason, ...extra });
   if (round > MAX_ROUNDS) return escalate("MAX_ROUNDS");
   const refused = refusalReason(diffText, authorAssociation);
-  if (refused) return { ok: true, verdict: "RECUSE", reason: refused };
+  if (refused) return { ok: true, verdict: refusalVerdict(refused), reason: refused };
   const contents = {};
   for (const file of new Set(findings.map((f) => f.file))) {
     const abs = resolveRepoFile(repoDir, file);
@@ -171,7 +169,7 @@ async function runAdvocateRound({ repoDir, diffText = "", authorAssociation, fin
 async function runJudgeArbitration({ diffText = "", files = [], headSha, authorAssociation, evidence = {}, findings = [], transcript = [], round = 1, policies, env, fetchImpl, rolePrompt = "" }) {
   const refuse = (reason, verdict = "RECUSE") => ({ ok: true, refused: true, verdict, reason, rationale: reason, rulings: [], unresolved: [] });
   const refused = refusalReason(diffText, authorAssociation);
-  if (refused) return refuse(refused);
+  if (refused) return refuse(refused, refusalVerdict(refused));
   const locked = lockedFiles(files, policies);
   if (locked.length > 0) return refuse(`COURTHOUSE_LOCK: ${locked.slice(0, 10).join(", ")}`);
   if (evidence.suitePassBase !== true || evidence.suitePassHead !== true) return refuse("SUITE_NOT_GREEN", "WAIT");
@@ -268,9 +266,7 @@ function diffSnapshot(io, repoDir, base, head) {
   return { diffText: git(), files: git("--name-only", "-z").split("\0").filter(Boolean) };
 }
 
-function advocateText(res) {
-  return [res.summary, res.reason, ...(res.responses ?? []).map((r) => `- **${r.finding_id}** ${r.action}: ${r.reply}`)].filter(Boolean).join("\n");
-}
+const advocateText = (res) => [res.summary, res.reason, ...(res.responses ?? []).map((r) => `- **${r.finding_id}** ${r.action}: ${r.reply}`)].filter(Boolean).join("\n");
 
 const failed = (res) => { console.log(`::error::pr-court: ${res.reason}`); return res.reason === "NO_API_KEY" ? 0 : 1; };
 
@@ -279,13 +275,15 @@ const COURT_STEPS = {
   wait: () => 0,
   stop: () => 0,
   recuse({ post, judgeRound, snapshot, ctx, prNumber }) {
-    const locked = lockedFiles(snapshot().files, ctx.policies);
-    post({ round: judgeRound, role: "judge", verdict: "RECUSE", text: `COURTHOUSE_LOCK: ${locked.slice(0, 10).join(", ")} - ${locked.some(isReviewerConfigPath) ? "reviewer config: no sign-off clears the gate, so the owner merges by hand." : `run node scripts/owner-signoff.mjs ${prNumber}`}` }); return 0;
+    const { diffText, files } = snapshot();
+    const locked = lockedFiles(files, ctx.policies);
+    const refused = refusalReason(diffText, ctx.authorAssociation);
+    post({ round: judgeRound, role: "judge", verdict: refusalVerdict(refused), text: refused ?? `COURTHOUSE_LOCK: ${locked.slice(0, 10).join(", ")} - ${locked.some(isReviewerConfigPath) ? "reviewer config: no sign-off clears the gate, so the owner merges by hand." : `run node scripts/owner-signoff.mjs ${prNumber}`}` }); return 0;
   },
   escalate: ({ post, judgeRound }) => { post({ round: judgeRound, role: "judge", verdict: "ESCALATE", text: "MAX_ROUNDS: findings remain open after the last Advocate round." }); return 0; },
   async critic({ ctx, snapshot, post, state, prompt }) {
     const res = await runCriticRound({ ...ctx, diffText: snapshot().diffText, round: state.advocateRounds + 1, rolePrompt: prompt("critic") });
-    if (res.refused) { post({ round: state.advocateRounds + 1, role: "judge", verdict: "RECUSE", text: res.reason }); return 0; }
+    if (res.refused) { post({ round: state.advocateRounds + 1, role: "judge", verdict: refusalVerdict(res.reason), text: res.reason }); return 0; }
     if (!res.ok) return failed(res);
     const list = res.findings.map((f) => `- **${f.severity} ${f.id}** \`${f.file}:${f.line}\` ${f.title}`);
     post({ round: state.advocateRounds + 1, role: "critic", verdict: res.verdict, count: res.findings.length, payload: { findings: res.findings }, text: [res.summary, ...list].join("\n") });
@@ -315,8 +313,7 @@ const COURT_STEPS = {
     return res.verdict === "MERGE" || res.verdict === "REMAND" ? null : 0;
   },
   async merge({ ctx, state, env, io, repo, prNumber }) {
-    const outcome = await landCourtMerge({ repo, prNumber, headSha: ctx.headSha, mergedAt: state.judgeAt, env, io });
-    log(`landing: ${outcome}`);
+    log(`landing: ${await landCourtMerge({ repo, prNumber, headSha: ctx.headSha, mergedAt: state.judgeAt, env, io })}`);
     return 0;
   },
 };

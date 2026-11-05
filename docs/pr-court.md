@@ -26,7 +26,9 @@ Note the boundary of the lock in "Known limits" below: `scripts/**` and `package
 
 ## RECUSE and ESCALATE
 
-RECUSE means the court declines to rule: a locked path, a diff hazard, an untrusted author, or a `delta_phi` above 0. It ends the court's work on that head but says nothing about the PR, so an external approval still clears the review gate. ESCALATE and REMAND are rulings against the PR, and they block the gate even over an external approval.
+RECUSE means the court declines to rule: a locked path, an untrusted author, or a `delta_phi` above 0. It ends the court's work on that head but says nothing about the PR, so an external approval still clears the review gate. ESCALATE and REMAND are rulings against the PR, and they block the gate even over an external approval.
+
+A diff hazard (an injection phrase, Trojan unicode, or an oversized diff) escalates, because text that could fool the court could fool an external reviewer too. An owner sign-off can still clear it.
 
 A red suite posts no receipt at all, so the court comes back when a re-run turns green.
 
@@ -42,7 +44,7 @@ A red suite posts no receipt at all, so the court comes back when a re-run turns
 - **`MIRQL_COURT_AUTO_MERGE=1`:** enables merging. Default is off; with it unset, the court stops at the Judge's verdict and a human lands the PR.
 - **`MIRQL_COURT_DISABLED=1`:** halts the court (for incidents or maintenance windows): no role runs and nothing merges. A review signal can still re-run a failed notary gate when the head has an approval or an owner sign-off.
 - **`MIRQL_LLM_BASE_URL`:** overrides the Z.AI API endpoint (self-hosted or proxied gateway).
-- **`MIRQL_CRITIC_MODEL` / `MIRQL_ADVOCATE_MODEL` / `MIRQL_JUDGE_MODEL`:** per-role model overrides — useful for running the Judge on a stronger model than the other roles.
+- **`MIRQL_CRITIC_MODEL` / `MIRQL_ADVOCATE_MODEL` / `MIRQL_JUDGE_MODEL`:** per-role model overrides — useful for running the Judge on a stronger model than the other roles. The court turns off thinking and turns on JSON mode only for the default Z.AI model, so an override runs with that model's own defaults.
 - **`MIRQL_CRITIC_PROVIDER` / `MIRQL_ADVOCATE_PROVIDER` / `MIRQL_JUDGE_PROVIDER`:** per-role provider overrides, one of `zai`, `anthropic`, `openai`, `openrouter`, `gemini` (each requires the matching API key secret).
 
 ### Turning it off
@@ -63,4 +65,5 @@ The court runs as a workflow from `main` (`.github/workflows/mergeproof-retrigge
 - **A Critic APPROVE is enough for the gate.** On a `humanApprove` PR, one Critic approval on the exact head turns the Mergeproof check green. It does not make the court merge; only a Judge MERGE does that, but a person may read the green check as a full review.
 - **A court merge starts no workflows.** The merge uses `GITHUB_TOKEN`, so a push-triggered workflow would not run on `main` for that commit. No workflow here uses `push` today, so this only matters if one is added.
 - **The engine is not locked.** `scripts/**` and `packages/mergeproof/**` are not Courthouse Lock paths, so the court can merge changes to its own engine. `roles/critic.md` and `roles/advocate.md` are likewise unlocked; only `roles/judge.md` is locked.
+- **Failed model calls are logged without content.** A failed call logs the provider, model, HTTP status or error name, finish reason and character counts. It never logs the reply, which can quote the diff.
 - **Network-dependent review.** The LLM calls mean the review step depends on the network. The mechanical gates stay offline-measured (Law 1: Offline Litmus) and still fail closed if the LLM step is unreachable.
