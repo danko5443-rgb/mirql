@@ -1,96 +1,117 @@
-name: Mergeproof Notary Re-Trigger & Fallback Reviewer
+name: Mergeproof Court
 
-# Runs strictly from the default branch (main) when a pinned AI reviewer bot
-# submits a review, edits its review-state issue comment (e.g., Codex moving
-# from status:"in_progress" to status:"completed"), or hits a rate limit
-# ("Review limit reached"). Never checks out or executes candidate code.
+# The PR Court orchestrator (docs/pr-court.md). Every trigger here runs this
+# file from main, and each one is only a wake-up: the engine rereads all state
+# from the API. Code runs from base-notary only; candidate/ is read as text.
+# pull_request_review must stay out of this file, because that event runs the
+# PR's own copy of a workflow. It wakes the court through mergeproof-review-signal.yml.
 on:
   issue_comment:
     types: [created, edited]
-  pull_request_review:
-    types: [submitted]
+  workflow_run:
+    workflows: ["Mergeproof External Notary", "Mergeproof Review Signal"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       pr_number:
-        description: "Pull request number to review / re-trigger"
+        description: "Pull request number to run the court on"
         required: true
         type: string
 
-permissions:
-  contents: read
-  actions: write
-  pull-requests: write
-  issues: write
+permissions: {}
 
 concurrency:
-  group: mergeproof-retrigger-${{ github.event.inputs.pr_number || github.event.issue.number || github.event.pull_request.number }}
+  group: mergeproof-court-${{ github.event.inputs.pr_number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 jobs:
-  retrigger:
-    name: Re-Trigger Mergeproof Notary or Run Fallback Review
+  court:
+    name: PR Court Tick
+    # Loop guard: court receipts come from github-actions[bot], which is not on
+    # the issue_comment list, and MAX_ROUNDS is enforced by the engine.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.sender.type == 'Bot' &&
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion != 'cancelled' &&
+       github.event.workflow_run.head_repository.full_name == github.repository) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       github.event.sender.type == 'Bot' &&
        (github.event.sender.login == 'chatgpt-codex-connector[bot]' ||
-        github.event.sender.login == 'coderabbitai[bot]') &&
-       (github.event_name == 'pull_request_review' || github.event.issue.pull_request != null))
+        github.event.sender.login == 'coderabbitai[bot]'))
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      actions: write
+      pull-requests: write
+      issues: write
     steps:
       - name: Check out base branch (authoritative scripts only)
         uses: actions/checkout@v4
         with:
+          ref: main
+          path: base-notary
+          persist-credentials: false
+
+      - name: Resolve pull request
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_INPUT: ${{ github.event.inputs.pr_number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          pr="$PR_INPUT"
+          if [ -z "$pr" ] && [ -n "$RUN_SHA" ]; then
+            pr=$(gh api "repos/$REPO/commits/$RUN_SHA/pulls" --jq '[.[] | select(.state == "open")][0].number // empty')
+          fi
+          case "$pr" in
+            ''|*[!0-9]*) echo "No pull request for this wake-up."; exit 0 ;;
+          esac
+          pr_json=$(gh api "repos/$REPO/pulls/$pr")
+          {
+            echo "pr_number=$pr"
+            echo "head_sha=$(printf '%s' "$pr_json" | jq -r '.head.sha')"
+            echo "head_repo=$(printf '%s' "$pr_json" | jq -r '.head.repo.full_name // empty')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out candidate (text data only)
+        if: steps.resolve.outputs.head_repo == github.repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve.outputs.head_sha }}
+          path: candidate
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Node.js 22
+        if: steps.resolve.outputs.pr_number != ''
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Run Fallback Reviewer when Rate-Limited and Re-Trigger Notary
+      - name: Run court tick
+        if: steps.resolve.outputs.pr_number != ''
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.inputs.pr_number || github.event.issue.number || github.event.pull_request.number }}
-          COMMENT_BODY: ${{ github.event.comment.body || '' }}
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          CANDIDATE_DIR: candidate
+          WAKE_FROM_NOTARY: ${{ github.event_name == 'workflow_run' && github.event.workflow.name == 'Mergeproof External Notary' && '1' || '0' }}
+          AUTO_MERGE: ${{ vars.MIRQL_COURT_AUTO_MERGE }}
+          MIRQL_COURT_DISABLED: ${{ vars.MIRQL_COURT_DISABLED }}
+          MIRQL_COURT_TOKEN: ${{ secrets.MIRQL_COURT_TOKEN }}
+          MIRQL_LLM_BASE_URL: ${{ vars.MIRQL_LLM_BASE_URL }}
+          MIRQL_CRITIC_MODEL: ${{ vars.MIRQL_CRITIC_MODEL }}
+          MIRQL_ADVOCATE_MODEL: ${{ vars.MIRQL_ADVOCATE_MODEL }}
+          MIRQL_JUDGE_MODEL: ${{ vars.MIRQL_JUDGE_MODEL }}
+          MIRQL_CRITIC_PROVIDER: ${{ vars.MIRQL_CRITIC_PROVIDER }}
+          MIRQL_ADVOCATE_PROVIDER: ${{ vars.MIRQL_ADVOCATE_PROVIDER }}
+          MIRQL_JUDGE_PROVIDER: ${{ vars.MIRQL_JUDGE_PROVIDER }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          pr_json=$(gh api "repos/$REPO/pulls/$PR_NUMBER")
-          head_sha=$(printf '%s' "$pr_json" | jq -r '.head.sha // empty')
-          export AUTHOR_ASSOC=$(printf '%s' "$pr_json" | jq -r '.author_association // empty')
-          if [ -z "$head_sha" ]; then
-            exit 0
-          fi
-
-          if echo "$COMMENT_BODY" | grep -qiE "Review limit reached|Rate limit exceeded" || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            gh api "repos/$REPO/pulls/$PR_NUMBER" -H "Accept: application/vnd.github.v3.diff" > "$RUNNER_TEMP/pr.diff"
-            files_json=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '[.[].filename]')
-            node -e '
-              import("./scripts/ci-review-gate.mjs").then(async (m) => {
-                const fs = await import("node:fs");
-                const { loadPathPolicies } = await import("./packages/core/anti-cheat.mjs");
-                const res = await m.runFallbackReview({
-                  diffText: fs.readFileSync(process.env.RUNNER_TEMP + "/pr.diff", "utf8"),
-                  filesChanged: JSON.parse(process.argv[1] || "[]"),
-                  humanOnlyPatterns: loadPathPolicies(".").humanOnly,
-                  authorAssociation: process.env.AUTHOR_ASSOC,
-                });
-                fs.writeFileSync(process.env.RUNNER_TEMP + "/fb.json", JSON.stringify(res));
-              });
-            ' "$files_json"
-            if [ -f "$RUNNER_TEMP/fb.json" ]; then
-              summary=$(jq -r '.summary // .reason // "completed"' "$RUNNER_TEMP/fb.json")
-              approved=$(jq -r '.approved' "$RUNNER_TEMP/fb.json")
-              gh api "repos/$REPO/issues/$PR_NUMBER/comments" -f body="### 🤖 Mirql Fallback Review (\`$head_sha\`)\n- **Approved (non-humanOnly):** \`$approved\`\n- **Summary:** $summary" >/dev/null || true
-            fi
-          fi
-
-          run_id=$(gh api "repos/$REPO/actions/workflows/mergeproof.yml/runs?head_sha=$head_sha&status=completed&per_page=5" \
-            --jq '.workflow_runs | map(select(.conclusion == "failure" and (.run_attempt // 1) < 5)) | .[0].id // empty')
-          if [ -n "$run_id" ]; then
-            echo "Re-running Mergeproof External Notary run $run_id for PR #$PR_NUMBER at $head_sha"
-            gh run rerun "$run_id" --repo "$REPO" --failed
-          fi
+        run: node base-notary/scripts/pr-court.mjs

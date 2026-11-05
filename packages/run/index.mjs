@@ -143,6 +143,11 @@ function emitError(errObj) {
   process.stderr.write(jcs(errObj) + "\n");
 }
 
+function usageError(reason) {
+  emitError({ error: "USAGE_ERROR", reason });
+  return EXIT_CODES.USAGE_ERROR;
+}
+
 function emitStubContract() {
   process.stdout.write(JSON.stringify({ tool: TOOL, status: "stub" }) + "\n");
   return EXIT_CODES.OK;
@@ -187,11 +192,7 @@ export function runCli(argv = []) {
       const fixture = flags.fixture || flags.f;
       // B1: mirql r verify with no inputs must fail with exit 2 (USAGE_ERROR)
       if (!fixture && positional.length <= 1 && !flags.workspace && !flags.reproducer && !flags.base && !flags.head) {
-        emitError({
-          error: "USAGE_ERROR",
-          reason: "mirql r verify requires --fixture <path> or verification target",
-        });
-        return EXIT_CODES.USAGE_ERROR;
+        return usageError("mirql r verify requires --fixture <path> or verification target");
       }
 
       if (fixture) {
@@ -212,18 +213,13 @@ export function runCli(argv = []) {
             return EXIT_CODES.DOMAIN_NEGATIVE;
           }
         } catch (err) {
-          emitError({
-            error: "USAGE_ERROR",
-            reason: err instanceof Error ? err.message : String(err),
-          });
-          return EXIT_CODES.USAGE_ERROR;
+          return usageError(err instanceof Error ? err.message : String(err));
         }
       }
 
       for (const name of ["workspace", "base", "head", "reproducer", "dir", "warrant-id"]) {
         if (flags[name] !== undefined && (typeof flags[name] !== "string" || !flags[name].trim())) {
-          emitError({ error: "USAGE_ERROR", reason: `--${name} requires a value` });
-          return EXIT_CODES.USAGE_ERROR;
+          return usageError(`--${name} requires a value`);
         }
       }
       // The live command measures Git objects and runs the fixed test pipeline.
@@ -246,11 +242,7 @@ export function runCli(argv = []) {
         // Daemon mode composes queue leasing with the reactive loop; packages
         // must not cross-import, so the wiring lives in bin/mirql.mjs.
         if (flags.daemon !== undefined) {
-          emitError({
-            error: "USAGE_ERROR",
-            reason: "--daemon is composed by the mirql router (it wires the queue); run: mirql r supervisor --daemon",
-          });
-          return EXIT_CODES.USAGE_ERROR;
+          return usageError("--daemon is composed by the mirql router (it wires the queue); run: mirql r supervisor --daemon");
         }
         // H1: `--epoch <int>` threads the leased configuration epoch (Law 5
         // fencing) into the Outcome and the signed attempt.outcome event.
@@ -258,11 +250,7 @@ export function runCli(argv = []) {
         if (flags.epoch !== undefined) {
           epoch = Number.parseInt(String(flags.epoch), 10);
           if (!Number.isSafeInteger(epoch) || epoch < 0) {
-            emitError({
-              error: "USAGE_ERROR",
-              reason: `invalid --epoch value ${JSON.stringify(flags.epoch)}: expected a non-negative safe integer`,
-            });
-            return EXIT_CODES.USAGE_ERROR;
+            return usageError(`invalid --epoch value ${JSON.stringify(flags.epoch)}: expected a non-negative safe integer`);
           }
         }
 
@@ -303,11 +291,7 @@ export function runCli(argv = []) {
         emitLine(jcs(res));
         return res.exitCode;
       } catch (err) {
-        emitError({
-          error: "USAGE_ERROR",
-          reason: err instanceof Error ? err.message : String(err),
-        });
-        return EXIT_CODES.USAGE_ERROR;
+        return usageError(err instanceof Error ? err.message : String(err));
       }
     }
 
@@ -324,11 +308,7 @@ export function runCli(argv = []) {
         emitLine(jcs(res));
         return res.ok ? EXIT_CODES.OK : EXIT_CODES.DOMAIN_NEGATIVE;
       } catch (err) {
-        emitError({
-          error: "USAGE_ERROR",
-          reason: err instanceof Error ? err.message : String(err),
-        });
-        return EXIT_CODES.USAGE_ERROR;
+        return usageError(err instanceof Error ? err.message : String(err));
       }
     }
 
@@ -336,11 +316,7 @@ export function runCli(argv = []) {
     case "bb": {
       const warrant = flags.warrant || flags.w;
       if (!warrant) {
-        emitError({
-          error: "USAGE_ERROR",
-          reason: "missing required --warrant <path|json> argument",
-        });
-        return EXIT_CODES.USAGE_ERROR;
+        return usageError("missing required --warrant <path|json> argument");
       }
 
       const rounds = flags.rounds ? parseInt(flags.rounds, 10) : 3;
@@ -353,11 +329,7 @@ export function runCli(argv = []) {
             const panelData = JSON.parse(readFileSync(panelArg, "utf8"));
             panel = panelData.panel ?? panelData;
           } catch (err) {
-            emitError({
-              error: "USAGE_ERROR",
-              reason: `Corrupt panel file at ${panelArg}: ${err.message}`,
-            });
-            return EXIT_CODES.USAGE_ERROR;
+            return usageError(`Corrupt panel file at ${panelArg}: ${err.message}`);
           }
         } else if (typeof panelArg === "string") {
           panel = panelArg.split(",").map((s) => s.trim());
@@ -392,11 +364,7 @@ export function runCli(argv = []) {
           return EXIT_CODES.NEEDS_HUMAN;
         }
       } catch (err) {
-        emitError({
-          error: "USAGE_ERROR",
-          reason: err instanceof Error ? err.message : String(err),
-        });
-        return EXIT_CODES.USAGE_ERROR;
+        return usageError(err instanceof Error ? err.message : String(err));
       }
     }
 
@@ -417,23 +385,17 @@ export function runCli(argv = []) {
         const sourcePath = flags.source ?? positional[1];
         const testPath = flags.test ?? positional[2];
         if (!sourcePath) {
-          emitError({ error: "USAGE_ERROR", reason: "missing required --source <path>" });
-          return EXIT_CODES.USAGE_ERROR;
+          return usageError("missing required --source <path>");
         }
         if (!testPath) {
-          emitError({ error: "USAGE_ERROR", reason: "missing required --test <path>" });
-          return EXIT_CODES.USAGE_ERROR;
+          return usageError("missing required --test <path>");
         }
 
         let killThresholdBp = 8000;
         if (flags.threshold !== undefined) {
           const th = parseInt(flags.threshold, 10);
           if (!Number.isSafeInteger(th) || th < 8000 || th > 10000) {
-            emitError({
-              error: "USAGE_ERROR",
-              reason: "threshold must be an integer between 8000 and 10000 bp (8000 bp floor)",
-            });
-            return EXIT_CODES.USAGE_ERROR;
+            return usageError("threshold must be an integer between 8000 and 10000 bp (8000 bp floor)");
           }
           killThresholdBp = th;
         }
@@ -442,11 +404,7 @@ export function runCli(argv = []) {
         if (flags["max-mutants"] !== undefined) {
           const mm = parseInt(flags["max-mutants"], 10);
           if (!Number.isSafeInteger(mm) || mm <= 0) {
-            emitError({
-              error: "USAGE_ERROR",
-              reason: "max-mutants must be a positive safe integer (> 0)",
-            });
-            return EXIT_CODES.USAGE_ERROR;
+            return usageError("max-mutants must be a positive safe integer (> 0)");
           }
           maxMutants = mm;
         }
@@ -487,11 +445,7 @@ export function runCli(argv = []) {
         emitLine(jcs(res));
         return res.ok ? EXIT_CODES.OK : EXIT_CODES.DOMAIN_NEGATIVE;
       } catch (err) {
-        emitError({
-          error: "USAGE_ERROR",
-          reason: err instanceof Error ? err.message : String(err),
-        });
-        return EXIT_CODES.USAGE_ERROR;
+        return usageError(err instanceof Error ? err.message : String(err));
       }
     }
 
@@ -499,13 +453,11 @@ export function runCli(argv = []) {
       try {
         const testPath = flags.test ?? positional[1];
         if (!testPath) {
-          emitError({ error: "USAGE_ERROR", reason: "missing required --test <path>" });
-          return EXIT_CODES.USAGE_ERROR;
+          return usageError("missing required --test <path>");
         }
         const iterations = flags.iterations ? parseInt(flags.iterations, 10) : 5;
         if (!Number.isSafeInteger(iterations) || iterations <= 0) {
-          emitError({ error: "USAGE_ERROR", reason: "iterations must be a positive safe integer" });
-          return EXIT_CODES.USAGE_ERROR;
+          return usageError("iterations must be a positive safe integer");
         }
 
         const res = detectFlakes(testPath, { iterations });
@@ -516,11 +468,7 @@ export function runCli(argv = []) {
         emitLine(jcs(res));
         return res.flaky ? EXIT_CODES.DOMAIN_NEGATIVE : EXIT_CODES.OK;
       } catch (err) {
-        emitError({
-          error: "USAGE_ERROR",
-          reason: err instanceof Error ? err.message : String(err),
-        });
-        return EXIT_CODES.USAGE_ERROR;
+        return usageError(err instanceof Error ? err.message : String(err));
       }
     }
 
@@ -541,11 +489,7 @@ export function runCli(argv = []) {
             flags.trip === "all" ||
             flags.trip === "lifeguard"
           ) {
-            emitError({
-              error: "USAGE_ERROR",
-              reason: `invalid subsystem to trip: ${JSON.stringify(flags.trip)}; must be one of: ${SUBSYSTEMS.filter((s) => s !== "all" && s !== "lifeguard").join(", ")}`,
-            });
-            return EXIT_CODES.USAGE_ERROR;
+            return usageError(`invalid subsystem to trip: ${JSON.stringify(flags.trip)}; must be one of: ${SUBSYSTEMS.filter((s) => s !== "all" && s !== "lifeguard").join(", ")}`);
           }
         }
 
@@ -556,11 +500,7 @@ export function runCli(argv = []) {
             (!SUBSYSTEMS.includes(flags.reset) && flags.reset !== "all") ||
             flags.reset === "lifeguard"
           ) {
-            emitError({
-              error: "USAGE_ERROR",
-              reason: `invalid subsystem to reset: ${JSON.stringify(flags.reset)}; must be one of: ${SUBSYSTEMS.filter((s) => s !== "lifeguard").join(", ")}`,
-            });
-            return EXIT_CODES.USAGE_ERROR;
+            return usageError(`invalid subsystem to reset: ${JSON.stringify(flags.reset)}; must be one of: ${SUBSYSTEMS.filter((s) => s !== "lifeguard").join(", ")}`);
           }
         }
 
@@ -568,19 +508,11 @@ export function runCli(argv = []) {
         if (flags.cooldown !== undefined) {
           const rawCd = String(flags.cooldown).trim();
           if (!/^\d+$/.test(rawCd)) {
-            emitError({
-              error: "USAGE_ERROR",
-              reason: `cooldown must be a non-negative integer ms, got ${JSON.stringify(flags.cooldown)}`,
-            });
-            return EXIT_CODES.USAGE_ERROR;
+            return usageError(`cooldown must be a non-negative integer ms, got ${JSON.stringify(flags.cooldown)}`);
           }
           const cd = parseInt(rawCd, 10);
           if (!Number.isSafeInteger(cd) || cd < 0) {
-            emitError({
-              error: "USAGE_ERROR",
-              reason: "cooldown exceeds safe integer range",
-            });
-            return EXIT_CODES.USAGE_ERROR;
+            return usageError("cooldown exceeds safe integer range");
           }
           cooldownMs = cd;
         }
@@ -623,11 +555,7 @@ export function runCli(argv = []) {
 
         return res.healthy ? EXIT_CODES.OK : EXIT_CODES.DOMAIN_NEGATIVE;
       } catch (err) {
-        emitError({
-          error: "USAGE_ERROR",
-          reason: err instanceof Error ? err.message : String(err),
-        });
-        return EXIT_CODES.USAGE_ERROR;
+        return usageError(err instanceof Error ? err.message : String(err));
       }
     }
 
@@ -652,20 +580,12 @@ export function runCli(argv = []) {
 
         return result.ok ? EXIT_CODES.OK : EXIT_CODES.DOMAIN_NEGATIVE;
       } catch (err) {
-        emitError({
-          error: "USAGE_ERROR",
-          reason: err instanceof Error ? err.message : String(err),
-        });
-        return EXIT_CODES.USAGE_ERROR;
+        return usageError(err instanceof Error ? err.message : String(err));
       }
     }
 
     default: {
-      emitError({
-        error: "USAGE_ERROR",
-        reason: `unknown subcommand ${JSON.stringify(sub)}; expected one of ${SUBCOMMANDS.join(", ")}`,
-      });
-      return EXIT_CODES.USAGE_ERROR;
+      return usageError(`unknown subcommand ${JSON.stringify(sub)}; expected one of ${SUBCOMMANDS.join(", ")}`);
     }
   }
 }

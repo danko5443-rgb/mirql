@@ -240,7 +240,7 @@ To eliminate manual review bottlenecks and recover from external bot rate limits
 
 1. **Courthouse Lock (`humanOnly` in [`policy/paths.yaml`](policy/paths.yaml)):**
    - Only the files that define the laws, the CI gate wiring, and the Judge's own instructions remain locked in `humanOnly`: `CONSTITUTION.md`, `NOT-ROADMAP.md`, `policy/**`, `.github/**`, `roles/judge.md`, `.coderabbit.yaml`, `.coderabbit.yml`, and `AGENTS.md`.
-   - Engineering paths (`bin/**`, `scripts/**`, `conformance/**`, `schemas/**`, `packages/**`, `roles/**`) sit in `humanApprove` (`MP-005`), allowing the PR Court and verified AI reviewers to review and clear them without `MP-001` rejection while still enforcing **Law 13** ($\Delta\Phi \le 0$) and anti-cheat rules (`MP-002`, `MP-003`).
+   - Engineering paths (`bin/**`, `scripts/**`, `conformance/**`, `schemas/**`, `roles/**`, and the core `packages/` paths listed in the policy) sit in `humanApprove` (`MP-005`), allowing the PR Court and verified AI reviewers to review and clear them without `MP-001` rejection while still enforcing **Law 13** ($\Delta\Phi \le 0$) and anti-cheat rules (`MP-002`, `MP-003`).
    - PR Court receipts (`mirql-judge[bot]`, `mirql-critic[bot]`) never clear `humanOnly` paths or reviewer configuration files (`AI_REVIEWER_CONFIG_PATTERNS`, including `roles/judge.md`).
 2. **The 3 Court Roles (up to 3 Ping-Pong rounds per PR):**
    - **Critic (`roles/critic.md`):** Independent fallback reviewer when external bots (`coderabbitai[bot]`, `chatgpt-codex-connector[bot]`) are rate-limited or absent. Evaluates nonce-fenced diffs strictly as untrusted data and emits `APPROVE` or `COMMENT` with P1/P2 findings while respecting **Law 13** ($\Delta\Phi \le 0$).

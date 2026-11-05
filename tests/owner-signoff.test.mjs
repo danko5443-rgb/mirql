@@ -107,7 +107,7 @@ describe("owner sign-off: evaluator cap", () => {
   const doc = (overrides = {}) => ({
     schema: "outcome/v1",
     pr: { number: 1, author: "ahmed-3m", kind: "bugfix" },
-    diff_stat: { files_changed: ["scripts/run-tests.mjs"] },
+    diff_stat: { files_changed: ["policy/paths.yaml"] },
     proof: { causal_cycle_completed: true },
     evidence: { forbidden_paths_touched: [], tests_deleted: [] },
     anti_cheat: { violations_count: 0, flags: [] },
@@ -174,10 +174,10 @@ describe("owner sign-off: Phi growth (Law 13)", () => {
   });
 
   it("still reports humanOnly paths when a signed-off PR also touches them", () => {
-    const res = check(grow({ diff_stat: { files_changed: ["scripts/run-tests.mjs"] } }), { ...signed, humanOnlyReviewer: "ahmed-3m" });
+    const res = check(grow({ diff_stat: { files_changed: ["policy/paths.yaml"] } }), { ...signed, humanOnlyReviewer: "ahmed-3m" });
     assert.equal(res.verdict, "needs_human");
     assert.equal(res.rule, "LAW_13");
-    assert.deepEqual(res.forbidden_paths, ["scripts/run-tests.mjs"]);
+    assert.deepEqual(res.forbidden_paths, ["policy/paths.yaml"]);
   });
 
   it("still applies the proof rules", () => {

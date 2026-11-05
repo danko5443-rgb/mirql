@@ -1,96 +1,14 @@
 // packages/inbox/gate.mjs — Intake validation gates: ROADMAP.md, NOT-ROADMAP.md, and proposal quotas.
 import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { EXIT_CODES } from "../core/index.mjs";
+import { FORBIDDEN_RULES, findUp, corpusMatchesRule, collectTextCorpus } from "../core/not-roadmap.mjs";
 
 /** Valid roadmap milestone citations */
 export const VALID_MILESTONES = Object.freeze(["M1", "M2", "M3", "M4", "M5", "M6", "M7"]);
 
 /** Maximum concurrent active proposals permitted */
 export const MAX_ACTIVE_PROPOSALS = 3;
-
-/**
- * Hardcoded negative-space rules from NOT-ROADMAP.md
- */
-const FORBIDDEN_RULES = [
-  {
-    id: "nr-0001",
-    reason: "Never auto-approve HUMAN verdicts on timeout",
-    violates_law: "Law 6 (Cryptographic Human Sovereignty / Silence Is Never Consent)",
-    patterns: [
-      /auto[-_ ]?approve/i,
-      /auto_approve_timeout_s/i,
-      /timeout auto[-_ ]?approval/i,
-      /\bnr-0001\b/i,
-    ],
-  },
-  {
-    id: "nr-0002",
-    reason: "Direct agent git push or branch merge without Notary proof",
-    violates_law: "Law 3 (Roles Propose / Tools Author) and Law 8 (Speechless Sandboxes)",
-    patterns: [
-      /autonomous merge/i,
-      /merge without (?:notary )?proof/i,
-      /git_push/i,
-      /merge_branch/i,
-      /direct agent git push/i,
-      /\bnr-0002\b/i,
-    ],
-  },
-  {
-    id: "nr-0003",
-    reason: "Floating-point currency, budget, or timestamp arithmetic in consensus layers",
-    violates_law: "Law 17 (Per-Product Tenant Isolation & Integer-Only JCS)",
-    patterns: [
-      /floating[- ]point/i,
-      /float_numbers/i,
-      /fractional_cents/i,
-      /float cost/i,
-      /\bnr-0003\b/i,
-    ],
-  },
-  {
-    id: "nr-0004",
-    reason: "Ambient outbound network access inside worker execution sandboxes",
-    violates_law: "Law 1 (Offline Litmus) and Law 8 (Speechless Sandboxes)",
-    patterns: [
-      /ambient (?:outbound )?network/i,
-      /allow_egress/i,
-      /unrestricted_dns/i,
-      /\bnr-0004\b/i,
-    ],
-  },
-  {
-    id: "nr-0005",
-    reason: "Bypassing base-fail reproduction (RED-to-GREEN causality requirement)",
-    violates_law: "Law 16 (GREEN Must Be Causal)",
-    patterns: [
-      /bypass(?:ing)? base[-_ ]?fail/i,
-      /skip_base_fail/i,
-      /trust_unreproduced_green/i,
-      /unreproduced green/i,
-      /\bnr-0005\b/i,
-    ],
-  },
-];
-
-/**
- * Locate a file by walking up from the start directory.
- * @param {string} startDir
- * @param {string} filename
- * @returns {string | null}
- */
-export function findUp(startDir, filename) {
-  let curr = resolve(startDir || process.cwd());
-  while (true) {
-    const candidate = join(curr, filename);
-    if (existsSync(candidate)) return candidate;
-    const parent = resolve(curr, "..");
-    if (parent === curr) break;
-    curr = parent;
-  }
-  return null;
-}
 
 /**
  * Validate that a proposal cites a valid roadmap milestone (M1..M7).
@@ -100,21 +18,14 @@ export function findUp(startDir, filename) {
  * @returns {{ ok: boolean, reason?: string, exitCode?: number }}
  */
 export function validateRoadmapRef(roadmapRef, startDir) {
+  const denied = (reason) => ({ ok: false, reason, exitCode: EXIT_CODES.POLICY_DENIAL });
   if (typeof roadmapRef !== "string" || !roadmapRef.trim()) {
-    return {
-      ok: false,
-      reason: "proposal must include a roadmap_ref citing Milestones M1 through M7",
-      exitCode: EXIT_CODES.POLICY_DENIAL,
-    };
+    return denied("proposal must include a roadmap_ref citing Milestones M1 through M7");
   }
 
   const normalized = roadmapRef.trim().toUpperCase();
   if (!VALID_MILESTONES.includes(normalized)) {
-    return {
-      ok: false,
-      reason: `invalid roadmap_ref ${JSON.stringify(roadmapRef)}; must cite one of ${VALID_MILESTONES.join(", ")} from ROADMAP.md`,
-      exitCode: EXIT_CODES.POLICY_DENIAL,
-    };
+    return denied(`invalid roadmap_ref ${JSON.stringify(roadmapRef)}; must cite one of ${VALID_MILESTONES.join(", ")} from ROADMAP.md`);
   }
 
   const roadmapPath = findUp(startDir, "ROADMAP.md");
@@ -122,11 +33,7 @@ export function validateRoadmapRef(roadmapRef, startDir) {
     try {
       const content = readFileSync(roadmapPath, "utf8");
       if (!content.includes(normalized)) {
-        return {
-          ok: false,
-          reason: `roadmap_ref ${normalized} not found in ROADMAP.md`,
-          exitCode: EXIT_CODES.POLICY_DENIAL,
-        };
+        return denied(`roadmap_ref ${normalized} not found in ROADMAP.md`);
       }
     } catch {}
   }
@@ -142,19 +49,20 @@ export function validateRoadmapRef(roadmapRef, startDir) {
  * @returns {{ ok: boolean, id?: string, reason?: string, violates_law?: string, exitCode?: number }}
  */
 export function checkNotRoadmap(input, startDir) {
-  const corpus = typeof input === "string" ? input : flattenCorpus(input);
+  const corpus = typeof input === "string" ? input : collectTextCorpus(input);
+  const ruleDenial = (rule) => ({
+    ok: false,
+    id: rule.id,
+    reason: rule.reason,
+    violates_law: rule.violates_law,
+    exitCode: EXIT_CODES.POLICY_DENIAL,
+  });
 
   // 1. Static patterns
   for (const rule of FORBIDDEN_RULES) {
     for (const pat of rule.patterns) {
       if (pat.test(corpus)) {
-        return {
-          ok: false,
-          id: rule.id,
-          reason: rule.reason,
-          violates_law: rule.violates_law,
-          exitCode: EXIT_CODES.POLICY_DENIAL,
-        };
+        return ruleDenial(rule);
       }
     }
   }
@@ -169,37 +77,7 @@ export function checkNotRoadmap(input, startDir) {
         const dynamicRules = JSON.parse(jsonMatch[1]);
         if (Array.isArray(dynamicRules)) {
           for (const item of dynamicRules) {
-            if (item.id && corpus.toLowerCase().includes(item.id.toLowerCase())) {
-              return {
-                ok: false,
-                id: item.id,
-                reason: item.reason,
-                violates_law: item.violates_law,
-                exitCode: EXIT_CODES.POLICY_DENIAL,
-              };
-            }
-            if (item.reason && corpus.toLowerCase().includes(item.reason.toLowerCase())) {
-              return {
-                ok: false,
-                id: item.id,
-                reason: item.reason,
-                violates_law: item.violates_law,
-                exitCode: EXIT_CODES.POLICY_DENIAL,
-              };
-            }
-            if (Array.isArray(item.surface_delta)) {
-              for (const delta of item.surface_delta) {
-                if (corpus.includes(delta)) {
-                  return {
-                    ok: false,
-                    id: item.id,
-                    reason: item.reason,
-                    violates_law: item.violates_law,
-                    exitCode: EXIT_CODES.POLICY_DENIAL,
-                  };
-                }
-              }
-            }
+            if (corpusMatchesRule(item, corpus)) return ruleDenial(item);
           }
         }
       }
@@ -240,19 +118,4 @@ export function checkProposalQuota(proposalsDir) {
   }
 
   return { ok: true, count: activeCount };
-}
-
-function flattenCorpus(val) {
-  if (val === null || val === undefined) return "";
-  if (typeof val === "string") return val;
-  if (typeof val === "number" || typeof val === "boolean") return String(val);
-  if (Array.isArray(val)) return val.map(flattenCorpus).join(" ");
-  if (typeof val === "object") {
-    const parts = [];
-    for (const [k, v] of Object.entries(val)) {
-      parts.push(k, flattenCorpus(v));
-    }
-    return parts.join(" ");
-  }
-  return "";
 }

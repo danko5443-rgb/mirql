@@ -326,7 +326,7 @@ function readKeypairFile(filePath, options = {}) {
 }
 
 /** Remove any stale human private key files left inside `.mirql/keys/` (Law 6). */
-function purgeStaleHumanKeys(keysDir) {
+export function purgeStaleHumanKeys(keysDir) {
   for (const name of HUMAN_KEY_FORBIDDEN_FILES) {
     const p = join(keysDir, name);
     if (existsSync(p)) {

@@ -1,11 +1,14 @@
 # Path Access Matrix for mirql
-# humanOnly: Files that autonomous agents are strictly forbidden from touching. Any PR modifying these is rejected (MP-001),
-#   unless an aiReviewers account approved the exact head commit; then every other rule still runs and the
-#   best verdict is needs_human (never auto_merge).
-# humanApprove: Core files that require explicit affirmative human authorization before merging.
+# humanOnly (the Courthouse Lock): the laws, the gate wiring and the Judge's own instructions. Any PR modifying these
+#   is rejected (MP-001), unless the owner signed off or an external aiReviewers bot approved the exact head commit;
+#   then every other rule still runs and the best verdict is needs_human (never auto_merge). A PR Court receipt
+#   (mirql-judge[bot], mirql-critic[bot]) never clears this list.
+# humanApprove: Core files that require a reviewer before merging (MP-005). With a reviewer every other rule still
+#   runs, Law 13 included, and the best verdict is needs_human.
 # aiReviewers: GitHub logins whose Approve review on the PR head commit clears MP-001 in CI. Only the BASE
-#   branch's copy of this list is read, so a PR cannot add its own reviewer. Never cleared by AI approval:
-#   reviewer config and agent instruction files (.coderabbit.yaml, AGENTS.md, CLAUDE.md, ...; see
+#   branch's copy of this list is read, so a PR cannot add its own reviewer. The two mirql-* entries are PR Court
+#   receipts (docs/pr-court.md), not accounts. Never cleared by AI approval:
+#   reviewer config and agent instruction files (.coderabbit.yaml, AGENTS.md, CLAUDE.md, roles/judge.md, ...; see
 #   AI_REVIEWER_CONFIG_PATTERNS in packages/mergeproof/evaluator.mjs) and any PR where someone commanded "@coderabbitai
 #   approve". Residual risks: a reviewer can be prompt-injected by the diff, and a command comment deleted
 #   after it fired is no longer visible to CI. Remove a login from this list to require a human again.
@@ -18,15 +21,16 @@ humanOnly:
   - "CONSTITUTION.md"
   - "NOT-ROADMAP.md"
   - "policy/**"
-  - "conformance/**"
   - ".github/**"
-  - "scripts/**"
-  - "bin/**"
+  - "roles/judge.md"
   - ".coderabbit.yaml"
   - ".coderabbit.yml"
   - "AGENTS.md"
 
 humanApprove:
+  - "bin/**"
+  - "scripts/**"
+  - "conformance/**"
   - "schemas/**"
   - "packages/core/**"
   - "packages/log/**"
@@ -50,3 +54,5 @@ humanApprove:
 aiReviewers:
   - "coderabbitai[bot]"
   - "chatgpt-codex-connector[bot]"
+  - "mirql-judge[bot]"
+  - "mirql-critic[bot]"

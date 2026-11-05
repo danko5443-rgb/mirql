@@ -24,6 +24,35 @@ export const DEFAULT_POLICY = Object.freeze({
  * @param {number} [nowMs=Date.now()]
  * @returns {boolean}
  */
+/**
+ * Warrants and queued jobs eligible for a new lease: not parked for a human,
+ * under the attempt limit, and with no live lease on the warrant (Fix B1, B5).
+ */
+export function selectAvailableWork(state, warrants, maxAttempts, nowMs) {
+  function isWarrantActiveLeased(wId) {
+    return Object.values(state.active_leases || {}).some(
+      (l) => l.warrant_id === wId && isLeaseLive(l, nowMs),
+    );
+  }
+
+  const availableOpenWarrants = warrants.filter(
+    (w) =>
+      (w.status === "active" || w.status === "open") &&
+      w.status !== "needs_human" &&
+      (w.failed_attempts || 0) < maxAttempts &&
+      !isWarrantActiveLeased(w.id),
+  );
+
+  const availableQueuedJobs = Object.values(state.jobs || {}).filter(
+    (j) =>
+      (j.status === "queued" || j.status === "enqueued") &&
+      state.warrants[j.warrant_id]?.status !== "needs_human" &&
+      !isWarrantActiveLeased(j.warrant_id),
+  );
+
+  return { availableOpenWarrants, availableQueuedJobs };
+}
+
 export function isLeaseLive(lease, nowMs = Date.now()) {
   if (!lease) return false;
   const expiry = lease.expires_at_ms ?? (lease.leased_at_ms + (lease.ttl_ms ?? 0));
@@ -145,28 +174,7 @@ export function tick(state, policy = DEFAULT_POLICY, nowMs = Date.now(), options
 
   const currentMode = state.mode || "BUILD";
 
-  // Fix B1: Helper to check if a warrant is currently leased
-  function isWarrantActiveLeased(wId) {
-    return Object.values(state.active_leases || {}).some(
-      (l) => l.warrant_id === wId && isLeaseLive(l, nowMs),
-    );
-  }
-
-  // Filter available warrants that are active, not in needs_human, and not double-leased
-  const availableOpenWarrants = warrants.filter(
-    (w) =>
-      (w.status === "active" || w.status === "open") &&
-      w.status !== "needs_human" &&
-      (w.failed_attempts || 0) < maxAttempts &&
-      !isWarrantActiveLeased(w.id),
-  );
-
-  const availableQueuedJobs = Object.values(state.jobs || {}).filter(
-    (j) =>
-      (j.status === "queued" || j.status === "enqueued") &&
-      state.warrants[j.warrant_id]?.status !== "needs_human" &&
-      !isWarrantActiveLeased(j.warrant_id),
-  );
+  const { availableOpenWarrants, availableQueuedJobs } = selectAvailableWork(state, warrants, maxAttempts, nowMs);
 
   switch (currentMode) {
     case "BUILD": {

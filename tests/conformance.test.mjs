@@ -380,7 +380,7 @@ describe("Work Package W2: Conformance Suite", () => {
     });
   });
 
-  describe("3. Role Roster (11 Shipped Roles)", () => {
+  describe("3. Role Roster (13 Shipped Roles)", () => {
     const expectedRoles = [
       { name: "orchestrator", tier: "max", authority: "A" },
       { name: "builder", tier: "mid", authority: "B" },
@@ -392,14 +392,16 @@ describe("Work Package W2: Conformance Suite", () => {
       { name: "scout-mutants", tier: "mid", authority: "C" },
       { name: "scout-journey", tier: "flash", authority: "C" },
       { name: "consolidator", tier: "mid", authority: "B" },
-      { name: "bing-bong", tier: "max", authority: "A" }
+      { name: "bing-bong", tier: "max", authority: "A" },
+      { name: "advocate", tier: "mid", authority: "C" },
+      { name: "judge", tier: "critic", authority: "C" }
     ];
 
-    it("all 11 role files exist in roles/ directory", () => {
+    it("all 13 role files exist in roles/ directory", () => {
       const rolesDir = join(ROOT, "roles");
       assert.ok(existsSync(rolesDir), "roles/ directory must exist");
       const files = readdirSync(rolesDir).filter((f) => f.endsWith(".md"));
-      assert.equal(files.length, 11, "Exactly 11 role files must exist");
+      assert.equal(files.length, 13, "Exactly 13 role files must exist");
     });
 
     for (const exp of expectedRoles) {

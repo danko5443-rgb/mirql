@@ -11,10 +11,8 @@ export const DEFAULT_HUMAN_ONLY_PATTERNS = Object.freeze([
   "CONSTITUTION.md",
   "NOT-ROADMAP.md",
   "policy/**",
-  "conformance/**",
   ".github/**",
-  "scripts/**",
-  "bin/**",
+  "roles/judge.md",
   ".coderabbit.yaml",
   ".coderabbit.yml",
   "AGENTS.md",
@@ -24,6 +22,9 @@ export const DEFAULT_HUMAN_ONLY_PATTERNS = Object.freeze([
  * Default humanApprove patterns if policy/paths.yaml cannot be loaded.
  */
 export const DEFAULT_HUMAN_APPROVE_PATTERNS = Object.freeze([
+  "bin/**",
+  "scripts/**",
+  "conformance/**",
   "schemas/**",
   "packages/core/**",
   "packages/log/**",
