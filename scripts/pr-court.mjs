@@ -7,10 +7,11 @@ import { randomBytes } from "node:crypto";
 import { lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { signoffLabel } from "./ci-owner-signoff.mjs";
 import { checkSwallowedExceptions, checkTestWeakenings, isHumanOnlyPath, loadPathPolicies } from "../packages/core/anti-cheat.mjs";
 import { isReviewerConfigPath } from "../packages/mergeproof/evaluator.mjs";
 import { computeGitTreePhi, computePhi } from "../packages/run/phi.mjs";
-import { callCourtModel, collectExternalFindings, findAiApproval, inspectReviewStatus, isEntrypoint, parseCourtState, parseReviews, scanDiffHazards } from "./ci-review-gate.mjs";
+import { callCourtModel, collectExternalFindings, findAiApproval, hasApproveCommand, hasLateChanges, inspectReviewStatus, isEntrypoint, parseCourtState, parseReviews, scanDiffHazards } from "./ci-review-gate.mjs";
 
 const MAX_ROUNDS = 3;
 const MAX_TICK_STEPS = 6;
@@ -45,7 +46,7 @@ function loadRolePrompt(baseDir, role) {
 
 /** LLM text is posted under the receipt identity, so it must not be able to forge a marker or command a bot. */
 function sanitizeCourtText(text) {
-  return String(text ?? "").replace(/<!--/g, "&lt;!--").replace(/mirql-court-state/gi, "mirql_court_state").replace(/@/g, "@​");
+  return String(text ?? "").replace(/<!--/g, "&lt;!--").replace(/mirql-court-state/gi, "mirql_court_state").replace(/@/g, "@\u200B");
 }
 
 function formatCourtReceipt({ round, headSha, role, verdict, count = 0, payload = {}, text = "" }) {
@@ -123,6 +124,8 @@ function stagePatches(repoDir, patches, policies) {
   return { files };
 }
 
+const lockedFiles = (files, policies) => files.filter((f) => isHumanOnlyPath(f, policies.humanOnly) || isReviewerConfigPath(f));
+
 async function runCriticRound({ diffText = "", headSha, round = 1, authorAssociation, env, fetchImpl, rolePrompt = "" }) {
   const refused = refusalReason(diffText, authorAssociation);
   if (refused) return { ok: false, refused: true, reason: refused };
@@ -136,7 +139,7 @@ async function runAdvocateRound({ repoDir, diffText = "", authorAssociation, fin
   const escalate = (reason, extra = {}) => ({ ok: true, verdict: "ESCALATE", reason, ...extra });
   if (round > MAX_ROUNDS) return escalate("MAX_ROUNDS");
   const refused = refusalReason(diffText, authorAssociation);
-  if (refused) return escalate(refused);
+  if (refused) return { ok: true, verdict: "RECUSE", reason: refused };
   const contents = {};
   for (const file of new Set(findings.map((f) => f.file))) {
     const abs = resolveRepoFile(repoDir, file);
@@ -166,26 +169,27 @@ async function runAdvocateRound({ repoDir, diffText = "", authorAssociation, fin
 }
 
 async function runJudgeArbitration({ diffText = "", files = [], headSha, authorAssociation, evidence = {}, findings = [], transcript = [], round = 1, policies, env, fetchImpl, rolePrompt = "" }) {
-  const refuse = (reason) => ({ ok: true, refused: true, verdict: "ESCALATE", reason, rationale: reason, rulings: [], unresolved: [] });
+  const refuse = (reason, verdict = "RECUSE") => ({ ok: true, refused: true, verdict, reason, rationale: reason, rulings: [], unresolved: [] });
   const refused = refusalReason(diffText, authorAssociation);
   if (refused) return refuse(refused);
-  const locked = files.filter((f) => isHumanOnlyPath(f, policies.humanOnly) || isReviewerConfigPath(f));
+  const locked = lockedFiles(files, policies);
   if (locked.length > 0) return refuse(`COURTHOUSE_LOCK: ${locked.slice(0, 10).join(", ")}`);
-  if (evidence.suitePassBase !== true || evidence.suitePassHead !== true) return refuse("SUITE_NOT_GREEN");
+  if (evidence.suitePassBase !== true || evidence.suitePassHead !== true) return refuse("SUITE_NOT_GREEN", "WAIT");
   if (!Number.isSafeInteger(evidence.deltaPhi) || evidence.deltaPhi > 0) return refuse(`DELTA_PHI: ${evidence.deltaPhi}`);
-  const user = fenceData({ head_sha: headSha, round, evidence, findings, transcript, diff: diffText });
-  const res = await callCourtModel({ role: "judge", system: rolePrompt, user, env, fetchImpl });
+  const res = await callCourtModel({ role: "judge", system: rolePrompt, user: fenceData({ head_sha: headSha, round, evidence, findings, transcript, diff: diffText }), env, fetchImpl });
   if (!res.ok) return res;
   const ruling = validateJudge(res.data, findings);
   if (!ruling) return { ok: false, reason: "LLM_INVALID_REPLY" };
   return { ok: true, ...ruling, verdict: ruling.verdict === "REMAND" && round >= MAX_ROUNDS ? "ESCALATE" : ruling.verdict };
 }
 
-function decideCourtStep(state, { externalFindings = [], externalReviewed = false, codexPending = false } = {}) {
-  if (state.judgeVerdict === "MERGE") return "merge";
-  if (state.judgeVerdict === "ESCALATE") return "stop";
+function decideCourtStep(state, { externalFindings = [], externalReviewed = false, codexPending = false, locked = false, lateChanges = false } = {}) {
+  if (state.judgeVerdict === "ESCALATE" || state.judgeVerdict === "RECUSE") return "stop";
+  // A late finding reopens a MERGE, and a bare late CHANGES_REQUESTED holds it.
+  if (state.judgeVerdict === "MERGE" && externalFindings.every((f) => state.ruled.includes(f.id))) return lateChanges ? "stop" : "merge";
   if (codexPending) return "wait";
   if (!state.last && !externalReviewed && externalFindings.length === 0) return "critic";
+  if (locked) return "recuse";
   const unanswered = externalFindings.filter((f) => !state.answered.includes(f.id));
   if (state.openFindings.length + unanswered.length > 0) return state.advocateRounds >= MAX_ROUNDS ? "escalate" : "advocate";
   return "judge";
@@ -215,9 +219,11 @@ async function awaitRerun(io, repo, headSha, attempt, { polls = 80, delayMs = 15
 }
 
 /** GitHub enforces nothing on this plan, so the court itself proves a green, current notary before it merges. */
-async function landCourtMerge({ repo, prNumber, headSha, env, io, wait = {} }) {
+async function landCourtMerge({ repo, prNumber, headSha, mergedAt, env, io, wait = {} }) {
   let notary = notaryRun(io, repo, headSha);
   if (notary?.gate !== "success") {
+    // A run that started after the MERGE already saw it, so running it again cannot change the answer.
+    if (notary?.run.run_started_at >= mergedAt) return "NOTARY_NOT_GREEN";
     if (!rerunFailedNotary(io, repo, notary?.run)) return "NOTARY_NOT_RERUNNABLE";
     notary = await awaitRerun(io, repo, headSha, notary.run.run_attempt ?? 1, wait);
   }
@@ -266,20 +272,20 @@ function advocateText(res) {
   return [res.summary, res.reason, ...(res.responses ?? []).map((r) => `- **${r.finding_id}** ${r.action}: ${r.reply}`)].filter(Boolean).join("\n");
 }
 
-const failed = (res) => {
-  console.log(`::error::pr-court: ${res.reason}`);
-  return res.reason === "NO_API_KEY" ? 0 : 1;
-};
+const failed = (res) => { console.log(`::error::pr-court: ${res.reason}`); return res.reason === "NO_API_KEY" ? 0 : 1; };
 
 /** Each step returns an exit code to end the tick, or null to read fresh state and continue. */
 const COURT_STEPS = {
   wait: () => 0,
   stop: () => 0,
+  recuse({ post, judgeRound, snapshot, ctx, prNumber }) {
+    const locked = lockedFiles(snapshot().files, ctx.policies);
+    post({ round: judgeRound, role: "judge", verdict: "RECUSE", text: `COURTHOUSE_LOCK: ${locked.slice(0, 10).join(", ")} - ${locked.some(isReviewerConfigPath) ? "reviewer config: no sign-off clears the gate, so the owner merges by hand." : `run node scripts/owner-signoff.mjs ${prNumber}`}` }); return 0;
+  },
   escalate: ({ post, judgeRound }) => { post({ round: judgeRound, role: "judge", verdict: "ESCALATE", text: "MAX_ROUNDS: findings remain open after the last Advocate round." }); return 0; },
   async critic({ ctx, snapshot, post, state, prompt }) {
-    const { diffText } = snapshot();
-    const res = await runCriticRound({ ...ctx, diffText, round: state.advocateRounds + 1, rolePrompt: prompt("critic") });
-    if (res.refused) { post({ round: state.advocateRounds + 1, role: "judge", verdict: "ESCALATE", text: res.reason }); return 0; }
+    const res = await runCriticRound({ ...ctx, diffText: snapshot().diffText, round: state.advocateRounds + 1, rolePrompt: prompt("critic") });
+    if (res.refused) { post({ round: state.advocateRounds + 1, role: "judge", verdict: "RECUSE", text: res.reason }); return 0; }
     if (!res.ok) return failed(res);
     const list = res.findings.map((f) => `- **${f.severity} ${f.id}** \`${f.file}:${f.line}\` ${f.title}`);
     post({ round: state.advocateRounds + 1, role: "critic", verdict: res.verdict, count: res.findings.length, payload: { findings: res.findings }, text: [res.summary, ...list].join("\n") });
@@ -291,7 +297,7 @@ const COURT_STEPS = {
     const commit = token ? (files) => pushFix(io, ctx.repoDir, files, pr.head.ref, token, round, env) : null;
     const res = await runAdvocateRound({ ...ctx, diffText: snapshot().diffText, findings, basePhi: basePhi(), round, rolePrompt: prompt("advocate"), commit });
     if (!res.ok) return failed(res);
-    if (res.verdict === "ESCALATE") { post({ round, role: "judge", verdict: "ESCALATE", text: advocateText(res) }); return 0; }
+    if (res.verdict === "ESCALATE" || res.verdict === "RECUSE") { post({ round, role: "judge", verdict: res.verdict, text: advocateText(res) }); return 0; }
     const titled = (id) => { const f = findings.find((x) => x.id === id); return `${f.file}:${f.line} ${f.title}`; };
     const responses = res.responses.map(({ finding_id, action, reply }) => ({ finding_id, finding: titled(finding_id), action, reply }));
     post({ round, headSha: res.headSha, role: "advocate", verdict: res.verdict, count: responses.length, payload: { responses }, text: advocateText(res) });
@@ -304,11 +310,12 @@ const COURT_STEPS = {
     const evidence = { suitePassBase: notary.base === "success", suitePassHead: notary.head === "success", deltaPhi: computeGitTreePhi(ctx.repoDir, ctx.headSha).metrics.total - basePhi() };
     const res = await runJudgeArbitration({ ...ctx, diffText, files, evidence, findings, transcript: state.transcript, round: judgeRound, rolePrompt: prompt("judge") });
     if (!res.ok) return failed(res);
+    if (res.verdict === "WAIT") return 0; // A red suite posts nothing, so a green re-run can come back.
     post({ round: judgeRound, role: "judge", verdict: res.verdict, count: res.unresolved.length, payload: { findings: res.unresolved, rulings: res.rulings }, text: res.rationale });
-    return res.verdict === "ESCALATE" ? 0 : null;
+    return res.verdict === "MERGE" || res.verdict === "REMAND" ? null : 0;
   },
-  async merge({ ctx, env, io, repo, prNumber }) {
-    const outcome = await landCourtMerge({ repo, prNumber, headSha: ctx.headSha, env, io });
+  async merge({ ctx, state, env, io, repo, prNumber }) {
+    const outcome = await landCourtMerge({ repo, prNumber, headSha: ctx.headSha, mergedAt: state.judgeAt, env, io });
     log(`landing: ${outcome}`);
     return 0;
   },
@@ -331,9 +338,10 @@ async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl 
     const state = parseCourtState(comments, headSha);
     const externalFindings = collectExternalFindings(inline, headSha);
     const externalReviewed = Boolean(findAiApproval(reviews, { reviewers: external, headSha, author: pr.user?.login, comments, reviewComments: inline }));
-    const name = decideCourtStep(state, { externalFindings, externalReviewed, codexPending: inspectReviewStatus(comments, headSha).codexPending });
-    log(`step ${step}: ${name} at ${headSha}`);
     const baseSha = io.api(`repos/${repo}/commits/${pr.base.ref}`).sha;
+    const snapshot = () => diffSnapshot(io, repoDir, baseSha, headSha);
+    const name = decideCourtStep(state, { externalFindings, externalReviewed, codexPending: inspectReviewStatus(comments, headSha).codexPending, locked: lockedFiles(snapshot().files, policies).length > 0, lateChanges: hasLateChanges(reviews, state, headSha) });
+    log(`step ${step}: ${name} at ${headSha}`);
     const fresh = externalFindings.filter((f) => !state.findings.some((known) => known.id === f.id));
     const findings = name === "advocate" ? [...state.openFindings, ...fresh.filter((f) => !state.answered.includes(f.id))] : [...state.findings, ...fresh];
     let baseTotal = null;
@@ -347,7 +355,7 @@ async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl 
       state, env, io, pr, repo, prNumber, findings, post,
       judgeRound: Math.max(state.advocateRounds, 1),
       prompt: (role) => loadRolePrompt(baseDir, role),
-      snapshot: () => diffSnapshot(io, repoDir, baseSha, headSha),
+      snapshot,
       basePhi: () => { baseTotal ??= computeGitTreePhi(repoDir, baseSha).metrics.total; return baseTotal; },
     });
     if (code !== null) return code;
@@ -355,16 +363,20 @@ async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl 
   return 0;
 }
 
-async function main(env = process.env) {
+function rerunOnApproval(io, repo, prNumber, reviewers = []) {
+  const pr = io.api(`repos/${repo}/pulls/${prNumber}`);
+  const [comments, reviewComments, reviews] = [`issues/${prNumber}/comments`, `pulls/${prNumber}/comments`, `pulls/${prNumber}/reviews`].map((path) => io.list(`repos/${repo}/${path}`));
+  const signed = (pr.labels ?? []).some((l) => l.name === signoffLabel(pr.head.sha));
+  const approved = !hasApproveCommand([...comments, ...reviewComments, ...reviews], reviewers) && findAiApproval(reviews, { reviewers, headSha: pr.head.sha, author: pr.user?.login, comments, reviewComments });
+  if (pr.state === "open" && (signed || approved)) rerunFailedNotary(io, repo, notaryRun(io, repo, pr.head.sha)?.run);
+}
+
+async function main(env = process.env, io = defaultIo(env), baseDir = resolve(dirname(fileURLToPath(import.meta.url)), "..")) {
   const missing = ["REPO", "PR_NUMBER", "CANDIDATE_DIR"].find((name) => !env[name]);
   if (missing || !/^\d+$/.test(env.PR_NUMBER ?? "")) { console.error(`pr-court: ${missing ?? "PR_NUMBER"} is required`); return 1; }
-  const io = defaultIo(env);
-  const code = await runCourtTick({ env, io });
-  // A reviewer signal still re-runs a failed gate, even with the court halted. A notary wake never does: that would loop.
-  if (env.WAKE_FROM_NOTARY !== "1" && code === 0) {
-    const pr = io.api(`repos/${env.REPO}/pulls/${env.PR_NUMBER}`);
-    if (pr.state === "open") rerunFailedNotary(io, env.REPO, notaryRun(io, env.REPO, pr.head.sha)?.run);
-  }
+  const code = await runCourtTick({ env, io, baseDir });
+  // A comment alone cannot turn the gate green, so only an approval or the owner's label re-runs it, and a notary wake never does: that would loop.
+  if (env.WAKE_FROM_NOTARY !== "1" && code === 0) rerunOnApproval(io, env.REPO, env.PR_NUMBER, loadPathPolicies(baseDir).aiReviewers);
   return code;
 }
 
