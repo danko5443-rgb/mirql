@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +12,7 @@ import { isHumanOnlyPath, loadPathPolicies } from "../packages/core/anti-cheat.m
 import { evaluatePullRequest, isReviewerConfigPath } from "../packages/mergeproof/evaluator.mjs";
 import { computePhi } from "../packages/run/phi.mjs";
 import { signoffLabel } from "../scripts/ci-owner-signoff.mjs";
-import { collectExternalFindings, findAiApproval, scanDiffHazards } from "../scripts/ci-review-gate.mjs";
+import { callCourtModel, collectExternalFindings, findAiApproval, scanDiffHazards } from "../scripts/ci-review-gate.mjs";
 import {
   decideCourtStep,
   formatCourtReceipt,
@@ -214,9 +215,79 @@ describe("court critic", () => {
     assert.equal(pinned.reasoning_effort, "max");
     assert.deepEqual(pinned.response_format, { type: "json_object" });
     assert.equal(pinned.max_tokens, 65536);
+    assert.equal(pinned.stream, true);
     const override = await body({ ...ENV, MIRQL_CRITIC_MODEL: "glm-5.1" });
     assert.equal(override.thinking, undefined, "a model override uses its own defaults");
+    assert.equal(override.stream, undefined);
     assert.equal((await body({ OPENAI_API_KEY: "k" })).thinking, undefined);
+  });
+
+  const events = (...list) => list.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
+  const delta = (fields, finish_reason) => ({ choices: [{ delta: fields, ...(finish_reason && { finish_reason }) }] });
+  const streamed = (text, size) => ({
+    raw: {
+      ok: true,
+      headers: new Headers({ "content-type": "text/event-stream" }),
+      body: (async function* chunks() {
+        const bytes = new TextEncoder().encode(text);
+        for (let i = 0; i < bytes.length; i += size) yield bytes.slice(i, i + size);
+      })(),
+    },
+  });
+  const captureErrors = async (fn) => {
+    const logged = [];
+    const original = console.error;
+    console.error = (line) => { logged.push(line); };
+    try { return { res: await fn(), logged: logged.join("\n") }; } finally { console.error = original; }
+  };
+
+  it("reads a streamed reply, whatever the chunk boundaries", async () => {
+    const reply = JSON.stringify({ verdict: "APPROVE", summary: "café ✓", findings: [] });
+    const text = `: keep-alive\n\n${events(delta({ reasoning_content: "thinking" }), delta({ content: reply.slice(0, 20) }), delta({ content: reply.slice(20) }, "stop"))}data: [DONE]\n\n`;
+    for (const size of [1, 7, text.length]) {
+      const res = await runCriticRound({ diffText: trustedDiff, headSha: HEAD, authorAssociation: "OWNER", env: ENV, fetchImpl: mockFetch(streamed(text, size)).fetchImpl });
+      assert.equal(res.verdict, "APPROVE", `chunk size ${size}`);
+      assert.equal(res.summary, "café ✓", `chunk size ${size}`);
+    }
+  });
+
+  it("gives no verdict from a stream that was cut off, even if the JSON looks complete", async () => {
+    const reply = JSON.stringify({ verdict: "APPROVE", summary: "secret", findings: [] });
+    const { res, logged } = await captureErrors(() => runCriticRound({ diffText: trustedDiff, headSha: HEAD, authorAssociation: "OWNER", env: ENV, fetchImpl: mockFetch(streamed(events(delta({ content: reply })), 16)).fetchImpl }));
+    assert.deepEqual(res, { ok: false, reason: "LLM_PARSE_ERROR" });
+    assert.match(logged, /finish=undefined content_chars=\d+/);
+    assert.ok(!logged.includes("secret"));
+  });
+
+  it("reports LLM_TIMEOUT from the real fetch, with no headers yet or part way through a stream", async () => {
+    const server = createServer((req, res) => {
+      if (req.url !== "/stalls") return; // Never answers.
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(events(delta({ reasoning_content: "secret" })));
+    });
+    await new Promise((ready) => { server.listen(0, "127.0.0.1", ready); });
+    const call = (path) => captureErrors(() => callCourtModel({ role: "critic", user: "x", env: { ...ENV, MIRQL_LLM_BASE_URL: `http://127.0.0.1:${server.address().port}${path}` }, timeoutMs: 150 }));
+    try {
+      const silent = await call("/silent");
+      assert.deepEqual(silent.res, { ok: false, reason: "LLM_TIMEOUT" });
+      assert.match(silent.logged, /LLM_TIMEOUT: TimeoutError no reply/);
+      const stalled = await call("/stalls");
+      assert.deepEqual(stalled.res, { ok: false, reason: "LLM_TIMEOUT" });
+      assert.match(stalled.logged, /LLM_TIMEOUT: TimeoutError finish=undefined content_chars=0 reasoning_chars=6/);
+      assert.ok(!stalled.logged.includes("secret"));
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+
+  it("counts Node's own fetch limits as a timeout, and other network errors as before", async () => {
+    const thrown = (code) => async () => { throw Object.assign(new TypeError("fetch failed"), { cause: { code } }); };
+    const headers = await captureErrors(() => callCourtModel({ role: "critic", user: "x", env: ENV, fetchImpl: thrown("UND_ERR_HEADERS_TIMEOUT") }));
+    assert.equal(headers.res.reason, "LLM_TIMEOUT");
+    assert.match(headers.logged, /TypeError UND_ERR_HEADERS_TIMEOUT no reply/);
+    assert.equal((await captureErrors(() => callCourtModel({ role: "critic", user: "x", env: ENV, fetchImpl: thrown("UND_ERR_BODY_TIMEOUT") }))).res.reason, "LLM_TIMEOUT");
+    assert.equal((await captureErrors(() => callCourtModel({ role: "critic", user: "x", env: ENV, fetchImpl: thrown("ECONNRESET") }))).res.reason, "LLM_PARSE_ERROR");
   });
 
   it("logs why a model call failed, and never the reply", async () => {
@@ -826,9 +897,10 @@ describe("court tick end to end", () => {
   const rebut = { summary: "s", responses: [{ finding_id: "f1", action: "REBUT", reply: "false positive" }] };
   const merge = { verdict: "MERGE", rationale: "ok", rulings: [{ finding_id: "f1", status: "FIXED", reason: "done" }] };
   const quiet = async (fn) => {
-    const original = console.log;
+    const original = [console.log, console.error];
     console.log = () => {};
-    try { return await fn(); } finally { console.log = original; }
+    console.error = () => {};
+    try { return await fn(); } finally { [console.log, console.error] = original; }
   };
 
   it("runs critic, fix and push, then a new tick runs the judge and merges", async () => {
@@ -899,6 +971,93 @@ describe("court tick end to end", () => {
       assert.ok(box.comments.at(-1).body.includes("COURTHOUSE_LOCK: CONSTITUTION.md - run node scripts/owner-signoff.mjs 7"));
       const approval = { user: { login: "coderabbitai[bot]", type: "Bot" }, state: "APPROVED", commit_id: box.pr.head.sha, submitted_at: "2026-11-04T11:00:00Z" };
       assert.equal(findAiApproval([approval], { reviewers: REVIEWERS, headSha: box.pr.head.sha, author: "ahmed-3m", comments: box.comments }), "coderabbitai[bot]");
+    });
+  });
+
+  describe("a failed step", () => {
+    const http500 = { raw: { ok: false, status: 500 } };
+    const tick = (box, fetchImpl, extra = {}) => quiet(() => runCourtTick({ env: box.env, io: box.io, fetchImpl, baseDir: ROOT, ...extra }));
+    const notices = (box) => box.comments.filter((c) => c.body.includes("mirql-court-failure:v1"));
+
+    it("leaves one notice per head, role and reason, which approves nothing, and the next wake-up retries", async () => {
+      await withDir(async (dir) => {
+        const box = sandbox(dir);
+        const head = box.pr.head.sha;
+        assert.equal(await tick(box, mockFetch(http500).fetchImpl), 1);
+        assert.equal(await tick(box, mockFetch(http500).fetchImpl), 1, "a repeat stays red");
+        assert.equal(box.comments.length, 1, "a repeat posts nothing new");
+        const [notice] = box.comments;
+        assert.match(notice.body, new RegExp(`The critic step failed at \`${head}\` with \`LLM_HTTP_ERROR\``));
+        assert.ok(!notice.body.includes("mirql-court-state") && !notice.body.includes("@"), "not a receipt, and no mention");
+
+        const state = parseCourtState(box.comments, head);
+        assert.equal(state.last, null);
+        assert.equal(state.judgeVerdict, null);
+        assert.equal(findAiApproval([], { reviewers: REVIEWERS, headSha: head, author: "ahmed-3m", comments: box.comments }), null);
+        assert.equal(decideCourtStep(state, {}), "critic");
+
+        assert.equal(await tick(box, mockFetch("not json").fetchImpl), 1);
+        assert.equal(notices(box).length, 2, "a new reason is new news");
+        assert.match(notices(box)[1].body, /`LLM_PARSE_ERROR`/);
+
+        box.git(box.candidate, "commit", "--allow-empty", "-qm", "next");
+        box.sync();
+        assert.equal(await tick(box, mockFetch(http500).fetchImpl), 1);
+        assert.equal(notices(box).length, 3, "a new head is new news");
+
+        box.jobs.head = null;
+        assert.equal(await tick(box, mockFetch({ verdict: "APPROVE", summary: "clean", findings: [] }).fetchImpl), 0);
+        assert.equal(parseCourtState(box.comments, box.pr.head.sha).criticApproved, true, "a later success still counts");
+      });
+    });
+
+    it("names the role that failed, keeping the receipts before it", async () => {
+      await withDir(async (dir) => {
+        const box = sandbox(dir);
+        assert.equal(await tick(box, mockFetch(critic, http500).fetchImpl), 1);
+        assert.equal(box.comments.length, 2);
+        assert.match(box.comments[0].body, /"role":"critic"/);
+        assert.match(box.comments[1].body, /The advocate step failed/);
+      });
+    });
+
+    it("is not silenced by someone else's comment carrying the marker", async () => {
+      await withDir(async (dir) => {
+        const box = sandbox(dir);
+        box.comments.push(receipt({}, { user: { login: "mallory", type: "User" }, body: `<!-- mirql-court-failure:v1 critic ${box.pr.head.sha} LLM_HTTP_ERROR -->` }));
+        assert.equal(await tick(box, mockFetch(http500).fetchImpl), 1);
+        assert.equal(notices(box).length, 2);
+      });
+    });
+
+    it("stays red when the notice cannot be posted", async () => {
+      await withDir(async (dir) => {
+        const box = sandbox(dir);
+        box.io.post = () => { throw new Error("gh failed"); };
+        assert.equal(await tick(box, mockFetch(http500).fetchImpl), 1);
+      });
+    });
+
+    it("stays silent and green with no API key", async () => {
+      await withDir(async (dir) => {
+        const box = sandbox(dir);
+        const { fetchImpl, calls } = mockFetch();
+        assert.equal(await quiet(() => runCourtTick({ env: { ...box.env, ZAI_API_KEY: "" }, io: box.io, fetchImpl, baseDir: ROOT })), 0);
+        assert.equal(calls.length, 0);
+        assert.equal(box.comments.length, 0);
+      });
+    });
+
+    it("starts no model call that could outlast the tick budget", async () => {
+      await withDir(async (dir) => {
+        const box = sandbox(dir);
+        let clock = 0;
+        const { fetchImpl, calls } = mockFetch(critic, rebut, merge);
+        const slow = async (...args) => { clock += 28 * 60000; return fetchImpl(...args); };
+        assert.equal(await tick(box, slow, { now: () => clock }), 1);
+        assert.equal(calls.length, 2, "28 minutes in, a 12-minute call still fits; 56 minutes in, it does not");
+        assert.match(notices(box)[0].body, /The judge step failed at .* with `TICK_BUDGET`/);
+      });
     });
   });
 
