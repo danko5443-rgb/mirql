@@ -1,0 +1,60 @@
+name: Mergeproof Candidate Suite
+
+# This is the only workflow that runs a PR's code. It uses `pull_request`, not
+# `pull_request_target`, so that code stays out of the base-branch context: no
+# base cache scope, and a first-time fork contributor needs a maintainer's
+# approval first, with no secrets and a read-only token.
+#
+# `pull_request` runs the PR's own copy of this file, so a PR can rewrite it and
+# its result is ADVISORY ONLY. Candidate code can forge a pass here anyway. A PR
+# that edits this file touches `.github/**`, which the notary rejects (MP-001).
+#
+# The notary never trusts this run for more than one bit: its `Candidate Tests
+# (advisory)` job in mergeproof.yml reads this run's conclusion by exact head
+# SHA (scripts/ci-candidate-result.mjs) and records it as suite_pass_head.
+#
+# `labeled` is deliberately absent: a label does not change the code, so the
+# reader reuses the finished result for that head instead of running it again.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mergeproof-candidate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  candidate-suite:
+    name: Candidate Suite (untrusted)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out candidate PR head (no credentials kept)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          path: candidate
+
+      # Law 7: the BASE notary's runner judges the candidate tree, so a PR
+      # cannot swap the runner that judges it. No bootstrap fallback: if the
+      # base branch lacks scripts/run-tests.mjs this job fails closed.
+      - name: Check out base branch (authoritative runner)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          path: base-notary
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # MIRQL_TEST_ROOT points the base-notary runner at the candidate tree.
+      - name: Run candidate suite under the base-notary runner
+        working-directory: candidate
+        run: MIRQL_TEST_ROOT="$PWD" node ../base-notary/scripts/run-tests.mjs
