@@ -20,9 +20,9 @@ const COURT_JUDGE = "mirql-judge[bot]";
 const COURT_CRITIC = "mirql-critic[bot]";
 const COURT_ACTOR = { login: "github-actions[bot]", userId: 41898282, appId: 15368 };
 const COURT_STATE_RE = /^<!-- mirql-court-state:v1 (\{[^\n]*?\}) -->\n(?:```json court-findings\n([^\n]*)\n```(?:\n|$))?/;
-const COURT_VERDICTS = new Map([["critic", ["APPROVE", "COMMENT"]], ["advocate", ["FIXED", "REBUT"]], ["judge", ["MERGE", "REMAND", "ESCALATE"]]]);
+const COURT_VERDICTS = new Map([["critic", ["APPROVE", "COMMENT"]], ["advocate", ["FIXED", "REBUT"]], ["judge", ["MERGE", "REMAND", "ESCALATE", "RECUSE"]]]);
 const COURT_PROVIDERS = [
-  { id: "zai", key: "ZAI_API_KEY", model: "glm-5.1", url: (env) => env.MIRQL_LLM_BASE_URL || "https://open.bigmodel.cn/api/paas/v4/chat/completions" },
+  { id: "zai", key: "ZAI_API_KEY", model: "glm-5.1", extra: { thinking: { type: "disabled" }, response_format: { type: "json_object" } }, url: (env) => env.MIRQL_LLM_BASE_URL || "https://open.bigmodel.cn/api/paas/v4/chat/completions" },
   { id: "anthropic", key: "ANTHROPIC_API_KEY", model: "claude-sonnet-4-20250514", url: () => "https://api.anthropic.com/v1/messages" },
   { id: "openai", key: "OPENAI_API_KEY", model: "gpt-4o-mini", url: () => "https://api.openai.com/v1/chat/completions" },
   { id: "openrouter", key: "OPENROUTER_API_KEY", model: "anthropic/claude-3.5-sonnet", url: () => "https://openrouter.ai/api/v1/chat/completions" },
@@ -83,7 +83,7 @@ function parseCourtReceipt(comment) {
     const counted = state.role === "advocate" || (payload.findings ?? []).length === state.findings_count;
     const valid = /^[0-9a-f]{40}$/.test(state.head_sha) && Number.isSafeInteger(state.round) && state.round >= 0 &&
       Number.isSafeInteger(state.findings_count) && state.findings_count >= 0 && COURT_VERDICTS.get(state.role)?.includes(state.verdict) && counted;
-    return valid ? { ...state, payload } : null;
+    return valid ? { ...state, payload, created_at: comment.created_at } : null;
   } catch { /* mp-003-allow: a malformed receipt counts as no receipt */ return null; }
 }
 
@@ -92,24 +92,20 @@ function parseCourtState(comments = [], headSha = "") {
   const receipts = (comments ?? []).map(parseCourtReceipt).filter(Boolean);
   const atHead = receipts.filter((r) => r.head_sha === headSha);
   const last = atHead.at(-1) ?? null;
-  const critic = atHead.filter((r) => r.role === "critic").at(-1);
   const judge = atHead.filter((r) => r.role === "judge").at(-1);
   const anchor = last ? receipts.findLastIndex((r) => r.role !== "advocate") : -1;
   const findings = anchor >= 0 ? receipts[anchor].payload.findings ?? [] : [];
   const replies = (list) => list.flatMap((r) => (r.payload.responses ?? []).map((x) => x.finding_id));
-  const replied = replies(receipts.slice(anchor + 1));
-  const open = last?.verdict === "COMMENT" || last?.verdict === "REMAND";
   return {
-    round: Math.max(0, ...atHead.map((r) => r.round)),
     judgeApproved: judge?.verdict === "MERGE",
-    criticApproved: critic?.verdict === "APPROVE",
-    unresolvedFindings: open ? last.findings_count : 0,
+    criticApproved: atHead.findLast((r) => r.role === "critic")?.verdict === "APPROVE",
     advocateRounds: receipts.filter((r) => r.role === "advocate").length,
     judgeVerdict: judge?.verdict ?? null,
-    hasCritic: Boolean(critic),
+    judgeAt: judge?.created_at ?? null,
+    ruled: (judge?.payload.rulings ?? []).map((r) => r.finding_id),
     last,
     findings,
-    openFindings: findings.filter((f) => !replied.includes(f.id)),
+    openFindings: findings.filter((f) => !replies(receipts.slice(anchor + 1)).includes(f.id)),
     answered: replies(receipts),
     transcript: receipts.map(({ role, round, verdict, head_sha, payload }) => ({ role, round, verdict, head_sha, ...payload })),
   };
@@ -124,6 +120,13 @@ function collectExternalFindings(reviewComments = [], headSha = "") {
     .map((c) => ({ id: String(c.id), severity: "P2", file: String(c.path ?? ""), line: c.line ?? c.original_line ?? 0, title: String(c.body ?? "").split("\n")[0].slice(0, 200), detail: String(c.body ?? "").slice(0, 2000) }));
 }
 
+const latestDecisive = (stream, allowed, authorLc) => [...new Map(stream.filter((r) => isVerifiedBot(r, allowed, authorLc) && DECISIVE_STATES.has(r.state))
+  .sort((a, b) => String(a?.submitted_at ?? "").localeCompare(String(b?.submitted_at ?? "")))
+  .map((r) => [r.user.login.toLowerCase(), r])).values()];
+
+/** A pinned reviewer's CHANGES_REQUESTED on this head that the Judge's MERGE receipt did not see. */
+const hasLateChanges = (reviews, state, headSha) => latestDecisive(reviews ?? [], new Set(Object.keys(PINNED_BOTS)), "").some((r) => r.state === "CHANGES_REQUESTED" && r.commit_id === headSha && String(r.submitted_at) >= String(state.judgeAt));
+
 function findAiApproval(reviews, { reviewers, headSha, author, comments = [], reviewComments = [] } = {}) {
   if (!Array.isArray(reviews) || !headSha) return null;
   const allowed = new Set((reviewers ?? []).map((r) => r.toLowerCase()));
@@ -131,7 +134,10 @@ function findAiApproval(reviews, { reviewers, headSha, author, comments = [], re
   const judgeEnabled = allowed.delete(COURT_JUDGE);
   const criticEnabled = allowed.delete(COURT_CRITIC);
   const court = judgeEnabled || criticEnabled ? parseCourtState(comments, headSha) : null;
-  if (court?.judgeVerdict && (judgeEnabled || !court.judgeApproved)) return court.judgeApproved ? COURT_JUDGE : null;
+  // A recusal says nothing about the PR, so external reviews still count. REMAND and ESCALATE are rulings against it.
+  if (court?.judgeVerdict && court.judgeVerdict !== "RECUSE" && !court.judgeApproved) return null;
+  // A MERGE covers only what the Judge ruled on, so a later finding or CHANGES_REQUESTED voids it.
+  if (judgeEnabled && court.judgeApproved) return collectExternalFindings(reviewComments, headSha).some((f) => !court.ruled.includes(f.id)) || hasLateChanges(reviews, court, headSha) ? null : COURT_JUDGE;
   const authorLc = String(author ?? "").toLowerCase();
   const stream = [...reviews];
 
@@ -149,11 +155,7 @@ function findAiApproval(reviews, { reviewers, headSha, author, comments = [], re
     if (blocked || clean) stream.push({ user: last.user, state: blocked ? "CHANGES_REQUESTED" : "APPROVED", commit_id: headSha, submitted_at: at });
   }
 
-  const latest = new Map();
-  stream.filter((r) => isVerifiedBot(r, allowed, authorLc) && DECISIVE_STATES.has(r.state))
-    .sort((a, b) => String(a?.submitted_at ?? "").localeCompare(String(b?.submitted_at ?? "")))
-    .forEach((r) => latest.set(r.user.login.toLowerCase(), r));
-  const decisive = [...latest.values()];
+  const decisive = latestDecisive(stream, allowed, authorLc);
   const changesRequested = decisive.some((r) => r.state === "CHANGES_REQUESTED");
   const approval = changesRequested ? null : decisive.find((r) => r.state === "APPROVED" && r.commit_id === headSha);
   if (approval) return approval.user.login;
@@ -165,7 +167,7 @@ function scanDiffHazards(diffText = "") {
   const added = String(diffText).split(/\r?\n/).filter((l) => l.startsWith("+") && !l.startsWith("+++"));
   const reasons = [
     ...(added.length > 4000 || added.some((l) => l.length > 2000) ? ["DIFF_TOO_LARGE"] : []),
-    ...(added.some((l) => /ignore (?:all |any )?(?:previous|prior) instructions|disregard (?:all |any )?(?:previous|prior)|@coderabbit(?:ai)?\b[^\n]*\b(?:approve|resolve)\b|codex-review-state:v1|mirql-court-state:v1/i.test(l)) ? ["PROMPT_INJECTION"] : []),
+    ...(added.some((l) => /ignore (?:all |any )?(?:previous|prior) (?:instructions|rules)|disregard (?:all |any )?(?:previous|prior)/i.test(l)) ? ["PROMPT_INJECTION"] : []),
     ...(added.some((l) => /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/.test(l)) ? ["TROJAN_UNICODE"] : []),
   ];
   return { ok: reasons.length === 0, reasons };
@@ -180,23 +182,28 @@ function courtRequest(provider, model, key, system, user, maxTokens) {
     return { headers: { ...json, "x-goog-api-key": key }, body: { systemInstruction: system ? { parts: [{ text: system }] } : undefined, contents: [{ role: "user", parts: [{ text: user }] }], generationConfig: { maxOutputTokens: maxTokens } }, text: (d) => d?.candidates?.[0]?.content?.parts?.[0]?.text };
   }
   const messages = [...(system ? [{ role: "system", content: system }] : []), { role: "user", content: user }];
-  return { headers: { ...json, authorization: `Bearer ${key}` }, body: { model, max_tokens: maxTokens, messages }, text: (d) => d?.choices?.[0]?.message?.content };
+  return { headers: { ...json, authorization: `Bearer ${key}` }, body: { model, max_tokens: maxTokens, messages, ...(model === provider.model && provider.extra) }, text: (d) => d?.choices?.[0]?.message?.content };
 }
 
 /** Fetch only, and fails closed: returns { ok: true, data } or { ok: false, reason }, never a partial answer. */
-async function callCourtModel({ role, system = "", user, env = process.env, fetchImpl = globalThis.fetch, maxTokens = 4096, timeoutMs = 180000 } = {}) {
+async function callCourtModel({ role, system = "", user, env = process.env, fetchImpl = globalThis.fetch, maxTokens = 8192, timeoutMs = 180000 } = {}) {
   const name = String(role).toUpperCase();
   const wanted = env[`MIRQL_${name}_PROVIDER`];
   const provider = COURT_PROVIDERS.find((p) => env[p.key] && (!wanted || p.id === wanted));
   if (!provider || typeof fetchImpl !== "function") return { ok: false, reason: "NO_API_KEY" };
   const model = env[`MIRQL_${name}_MODEL`] || provider.model;
   const req = courtRequest(provider, model, env[provider.key], system, user, maxTokens);
+  // Counts and names only: a model reply or a JSON.parse message can quote the diff.
+  const fail = (reason, why) => { console.error(`pr-court: ${name} ${provider.id}/${model} ${reason}: ${why}`); return { ok: false, reason }; };
+  let seen = "no reply";
   try {
     const resp = await fetchImpl(provider.url(env, model), { method: "POST", headers: req.headers, body: JSON.stringify(req.body), signal: AbortSignal.timeout(timeoutMs) });
-    if (!resp?.ok) return { ok: false, reason: "LLM_HTTP_ERROR" };
-    const raw = String(req.text(await resp.json()) ?? "");
+    if (!resp?.ok) return fail("LLM_HTTP_ERROR", `status=${resp?.status}`);
+    const data = await resp.json();
+    const raw = String(req.text(data) ?? "");
+    seen = `finish=${data?.choices?.[0]?.finish_reason ?? data?.stop_reason ?? data?.candidates?.[0]?.finishReason} content_chars=${raw.length} reasoning_chars=${data?.choices?.[0]?.message?.reasoning_content?.length ?? 0} completion_tokens=${data?.usage?.completion_tokens}`;
     return { ok: true, data: JSON.parse((raw.match(/\{[\s\S]*\}/) ?? [raw])[0]) };
-  } catch { /* mp-003-allow: network or JSON failure fails closed without a verdict */ return { ok: false, reason: "LLM_PARSE_ERROR" }; }
+  } catch (err) { /* mp-003-allow: network or JSON failure fails closed without a verdict */ return fail("LLM_PARSE_ERROR", `${err?.name} ${seen}`); }
 }
 
 async function runFallbackReview({ diffText = "", authorAssociation = "", env = process.env, fetchImpl = globalThis.fetch } = {}) {
@@ -224,22 +231,11 @@ async function main(env = process.env) {
     console.error(`ci-review-gate: cannot read reviews or comments: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
-  const policies = loadPathPolicies(resolve(BASE_NOTARY_DIR));
-  const reviewers = policies.aiReviewers ?? [];
+  const reviewers = loadPathPolicies(resolve(BASE_NOTARY_DIR)).aiReviewers ?? [];
   const commanded = hasApproveCommand([...issueComments, ...inlineComments, ...reviews], reviewers);
-  let approver = commanded ? null : findAiApproval(reviews, { reviewers, headSha: HEAD_SHA, author: PR_AUTHOR, comments: issueComments, reviewComments: inlineComments });
-  const status = inspectReviewStatus(issueComments, HEAD_SHA);
-  if (!approver && !commanded && env.RUN_FALLBACK_REVIEW === "1" && env.DIFF_PATH) {
-    try {
-      const fb = await runFallbackReview({ diffText: readFileSync(env.DIFF_PATH, "utf8"), authorAssociation: env.AUTHOR_ASSOCIATION ?? "", env });
-      approver = fb.approved ? fb.approver : null;
-    } catch { /* mp-003-allow: unreadable fallback inputs fail closed */ approver = null; }
-  }
-  console.log(JSON.stringify({ tool: "ci-review-gate", reviewers, approver, ...status, approve_command_seen: commanded }));
-  if (env.GITHUB_OUTPUT) {
-    if (approver) appendFileSync(env.GITHUB_OUTPUT, `approver=${approver}\n`);
-    if (env.WRITE_EXTENDED_OUTPUT === "1") appendFileSync(env.GITHUB_OUTPUT, `codex_pending=${status.codexPending}\ncoderabbit_rate_limited=${status.coderabbitRateLimited}\n`);
-  }
+  const approver = commanded ? null : findAiApproval(reviews, { reviewers, headSha: HEAD_SHA, author: PR_AUTHOR, comments: issueComments, reviewComments: inlineComments });
+  console.log(JSON.stringify({ tool: "ci-review-gate", reviewers, approver, ...inspectReviewStatus(issueComments, HEAD_SHA), approve_command_seen: commanded }));
+  if (env.GITHUB_OUTPUT && approver) appendFileSync(env.GITHUB_OUTPUT, `approver=${approver}\n`);
   return 0;
 }
 
@@ -250,4 +246,4 @@ function isEntrypoint(moduleUrl) {
 
 if (isEntrypoint(import.meta.url)) main().then((code) => process.exit(code));
 
-export { callCourtModel, collectExternalFindings, findAiApproval, hasApproveCommand, inspectReviewStatus, isEntrypoint, main, parseCourtState, parseReviews, runFallbackReview, scanDiffHazards };
+export { callCourtModel, collectExternalFindings, findAiApproval, hasApproveCommand, hasLateChanges, inspectReviewStatus, isEntrypoint, main, parseCourtState, parseReviews, runFallbackReview, scanDiffHazards };

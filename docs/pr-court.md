@@ -6,7 +6,7 @@ The PR Court is a three-role LLM review loop run by a deterministic tool from a 
 
 1. **Critic** (`roles/critic.md`) reviews the diff and emits findings (verdict APPROVE or COMMENT, P1/P2 defects only). External reviewers (coderabbitai, codex-connector) supply findings instead when they are available; the Critic is the independent fallback when they are rate limited or absent.
 2. **Advocate** (`roles/advocate.md`) answers each finding: either AGREE_AND_FIX with minimal patches (kept complexity-neutral, `delta_phi <= 0`) or REBUT with evidence. The tool applies valid patches, commits, and pushes them.
-3. **Judge** (`roles/judge.md`) rules on every finding — FIXED, OVERRULED_FALSE_POSITIVE, or UNRESOLVED — and issues the terminal verdict: MERGE, REMAND (another round, up to 3), or ESCALATE (a human takes over).
+3. **Judge** (`roles/judge.md`) rules on every finding — FIXED, OVERRULED_FALSE_POSITIVE, or UNRESOLVED — and issues the terminal verdict: MERGE, REMAND (another round, up to 3), or ESCALATE (a human takes over). A MERGE covers only what the Judge saw: a later reviewer finding reopens the case, and a later CHANGES_REQUESTED holds the merge.
 4. **Notary check:** after the Judge says MERGE, the tool reads the notary run for the final head. If the gate is not green, it re-runs that run's failed jobs (`gh run rerun --failed`, up to 5 attempts) and waits; a job that already passed is not repeated. Only a green gate on that exact head, measured against the current base tip, authorizes the merge (Law 5: Base-Pinned Mortal Verdicts).
 5. **Merge** is executed by the tool, never by an LLM role.
 
@@ -14,13 +14,23 @@ The loop runs at most 3 rounds. Anything still unresolved at round 3 escalates t
 
 ## Courthouse Lock
 
-The Judge refuses to rule (ESCALATE) when the diff touches a locked path: the `humanOnly` list in `policy/paths.yaml` (`CONSTITUTION.md`, `NOT-ROADMAP.md`, `policy/**`, `.github/**`, `roles/judge.md`, `.coderabbit.yaml`, `.coderabbit.yml`, `AGENTS.md`) or any reviewer config file (`AI_REVIEWER_CONFIG_PATTERNS` in `packages/mergeproof/evaluator.mjs`). The reason is self-preservation: a PR must not be able to rewrite the rules of the court that judges it, remove its own reviewers, or amend the constitution to permit itself.
+The Judge does not rule on a diff that touches a locked path: the `humanOnly` list in `policy/paths.yaml` (`CONSTITUTION.md`, `NOT-ROADMAP.md`, `policy/**`, `.github/**`, `roles/judge.md`, `.coderabbit.yaml`, `.coderabbit.yml`, `AGENTS.md`) or any reviewer config file (`AI_REVIEWER_CONFIG_PATTERNS` in `packages/mergeproof/evaluator.mjs`). The reason is self-preservation: a PR must not be able to rewrite the rules of the court that judges it, remove its own reviewers, or amend the constitution to permit itself.
+
+On such a PR the Critic runs once when no external reviewer has reviewed it, and then the court posts a RECUSE receipt that names the files and the next step (`node scripts/owner-signoff.mjs <pr>`). The Advocate does not run, and the Critic's COMMENT is advisory. A reviewer config file gets a different hint, because no sign-off clears those paths and the owner merges by hand.
 
 The evaluator enforces this separately: a court receipt (`mirql-judge[bot]`, `mirql-critic[bot]`) never clears MP-001, so changes to those paths always go to a human.
 
 The Advocate's patches are under the same lock. They also cannot touch `package.json`, `.npmrc`, a symlink, or any path with a segment starting with `.git`.
 
 Note the boundary of the lock in "Known limits" below: `scripts/**` and `packages/mergeproof/**` are not locked by the court itself.
+
+## RECUSE and ESCALATE
+
+RECUSE means the court declines to rule: a locked path, an untrusted author, or a `delta_phi` above 0. It ends the court's work on that head but says nothing about the PR, so an external approval still clears the review gate. ESCALATE and REMAND are rulings against the PR, and they block the gate even over an external approval.
+
+A diff hazard (an injection phrase, Trojan unicode, or an oversized diff) escalates, because text that could fool the court could fool an external reviewer too. An owner sign-off can still clear it.
+
+A red suite posts no receipt at all, so the court comes back when a re-run turns green.
 
 ## Operator settings
 
@@ -32,9 +42,9 @@ Note the boundary of the lock in "Known limits" below: `scripts/**` and `package
 ### Repository variables
 
 - **`MIRQL_COURT_AUTO_MERGE=1`:** enables merging. Default is off; with it unset, the court stops at the Judge's verdict and a human lands the PR.
-- **`MIRQL_COURT_DISABLED=1`:** halts the court (for incidents or maintenance windows): no role runs and nothing merges. A review signal can still re-run a failed notary gate.
+- **`MIRQL_COURT_DISABLED=1`:** halts the court (for incidents or maintenance windows): no role runs and nothing merges. A review signal can still re-run a failed notary gate when the head has an approval or an owner sign-off.
 - **`MIRQL_LLM_BASE_URL`:** overrides the Z.AI API endpoint (self-hosted or proxied gateway).
-- **`MIRQL_CRITIC_MODEL` / `MIRQL_ADVOCATE_MODEL` / `MIRQL_JUDGE_MODEL`:** per-role model overrides — useful for running the Judge on a stronger model than the other roles.
+- **`MIRQL_CRITIC_MODEL` / `MIRQL_ADVOCATE_MODEL` / `MIRQL_JUDGE_MODEL`:** per-role model overrides — useful for running the Judge on a stronger model than the other roles. The court turns off thinking and turns on JSON mode only for the default Z.AI model, so an override runs with that model's own defaults.
 - **`MIRQL_CRITIC_PROVIDER` / `MIRQL_ADVOCATE_PROVIDER` / `MIRQL_JUDGE_PROVIDER`:** per-role provider overrides, one of `zai`, `anthropic`, `openai`, `openrouter`, `gemini` (each requires the matching API key secret).
 
 ### Turning it off
@@ -51,8 +61,9 @@ The court runs as a workflow from `main` (`.github/workflows/mergeproof-retrigge
 - **No branch protection.** The repository has no branch protection on its current plan. The court itself checks the Mergeproof Conscience Gate job result before merging, but a person with write access can still merge anything by hand, bypassing the court entirely.
 - **Forgeable receipts.** Receipts are authenticated by the `github-actions[bot]` identity, so any workflow on any branch of this repository can forge one. A dedicated GitHub App identity is required before the repo is opened to untrusted pushers.
 - **Self-attesting head tests.** `candidate-tests` runs PR code, so `suite_pass_head` can be forged by the PR itself. This is why the court only serves OWNER/MEMBER/COLLABORATOR authors, and why the planned `candidate-tests` move must land before the repository goes public.
-- **The Judge is persuadable.** An LLM Judge can be persuaded by a crafted diff. Hazard scanning (injection phrases, trojan unicode, oversized diffs) is only a filter, not a defense.
+- **The Judge is persuadable.** An LLM Judge can be persuaded by a crafted diff. Hazard scanning (injection phrases, trojan unicode, oversized diffs) is only a filter, not a defense. It does not match the receipt markers or bot commands: those are safe in a diff, because they only count in a comment from the verified bot.
 - **A Critic APPROVE is enough for the gate.** On a `humanApprove` PR, one Critic approval on the exact head turns the Mergeproof check green. It does not make the court merge; only a Judge MERGE does that, but a person may read the green check as a full review.
 - **A court merge starts no workflows.** The merge uses `GITHUB_TOKEN`, so a push-triggered workflow would not run on `main` for that commit. No workflow here uses `push` today, so this only matters if one is added.
 - **The engine is not locked.** `scripts/**` and `packages/mergeproof/**` are not Courthouse Lock paths, so the court can merge changes to its own engine. `roles/critic.md` and `roles/advocate.md` are likewise unlocked; only `roles/judge.md` is locked.
+- **Failed model calls are logged without content.** A failed call logs the provider, model, HTTP status or error name, finish reason and character counts. It never logs the reply, which can quote the diff.
 - **Network-dependent review.** The LLM calls mean the review step depends on the network. The mechanical gates stay offline-measured (Law 1: Offline Litmus) and still fail closed if the LLM step is unreachable.
