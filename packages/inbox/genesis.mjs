@@ -14,7 +14,7 @@
 // with file mode 0o600; `.mirql/keys/` holds factory keys only. When a
 // passphrase is available (options.passphrase / MIRQL_HUMAN_PASSPHRASE) the
 // owner key file is encrypted at rest (scrypt + AES-256-GCM).
-import { mkdirSync, existsSync, statSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, existsSync, statSync, readFileSync } from "node:fs";
 import { join, dirname, resolve as resolvePath } from "node:path";
 import {
   ulid,
@@ -26,7 +26,7 @@ import {
 import {
   generateFactoryKeypairs,
   resolveHumanKeyPath,
-  HUMAN_KEY_FORBIDDEN_FILES,
+  purgeStaleHumanKeys,
   HUMAN_WRITER_NS,
 } from "./keys.mjs";
 import {
@@ -55,22 +55,6 @@ function firstLedgerLine(eventsPath) {
     if (trimmed.length > 0) return trimmed;
   }
   return null;
-}
-
-/**
- * Remove any stale human private key files inside `.mirql/keys/` (Law 6).
- * @param {string} mirqlDir
- */
-function purgeStaleHumanKeys(mirqlDir) {
-  const keysDir = join(mirqlDir, "keys");
-  for (const name of HUMAN_KEY_FORBIDDEN_FILES) {
-    const p = join(keysDir, name);
-    if (existsSync(p)) {
-      try {
-        rmSync(p, { force: true });
-      } catch {}
-    }
-  }
 }
 
 /**
@@ -106,7 +90,7 @@ export function runGenesis(mirqlDir, options = {}) {
       parses = false;
     }
     if (parses && first.type === "mirql.genesis" && first.seq === 1) {
-      purgeStaleHumanKeys(dir);
+      purgeStaleHumanKeys(join(dir, "keys"));
       return {
         status: "already_initialized",
         seq: 1,
@@ -136,7 +120,7 @@ export function runGenesis(mirqlDir, options = {}) {
   //    written under <dir>/keys; the human:owner private key is returned and
   //    persisted OUTSIDE .mirql below (encrypted when a passphrase is given).
   //    keyring.json is rebuilt cleanly (B4).
-  purgeStaleHumanKeys(dir);
+  purgeStaleHumanKeys(join(dir, "keys"));
   const humanKeyOut = resolveHumanKeyPath(dir, options);
   const keypairs = generateFactoryKeypairs(dir, {
     humanKeyPath: humanKeyOut,

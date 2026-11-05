@@ -104,9 +104,8 @@ describe("mergeproof: conformance corpus — bad PRs", () => {
     { file: "02-delete-test.json", rule: "MP-002", violation: "TEST_DELETED", verdict: "reject" },
     { file: "03-swallow-exception.json", rule: "MP-003", violation: "ANTI_CHEAT_VIOLATION", verdict: "reject" },
     { file: "04-stale-base.json", rule: "MP-004", violation: "STALE_BASE", verdict: "reject" },
-    // Phase 0.0a: bin/** is humanOnly, so 05's bin/mirql.mjs edit trips MP-001
-    // before its uncited surface reaches MP-005.
-    { file: "05-uncited-surface.json", rule: "MP-001", violation: "TOUCH_HUMAN_ONLY", verdict: "reject" },
+    // bin/** is humanApprove, so 05's bin/mirql.mjs edit reaches MP-005 and holds for a human.
+    { file: "05-uncited-surface.json", rule: "MP-005", violation: "UNCITED_SURFACE", verdict: "needs_human" },
   ];
 
   for (const c of cases) {
@@ -627,7 +626,7 @@ describe("mergeproof: notary signing & ledger append", () => {
       // A reject verdict signs verdict.rejected just the same.
       const res2 = runMirql([
         "m", "check",
-        "--pr", join("conformance", "bad_prs", "05-uncited-surface.json"),
+        "--pr", join("conformance", "bad_prs", "01-touch-human-only.json"),
         "--sign", "--dir", tmp,
       ]);
       const doc2 = parseJcsStdout(res2, "cli-sign-2");

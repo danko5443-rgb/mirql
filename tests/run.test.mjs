@@ -385,19 +385,20 @@ test("tautological test", () => {
       assert.equal(doc.violation, "STALE_BASE");
     });
 
-    // Phase 0.0a: bin/** is humanOnly, so 05's bin/mirql.mjs edit trips MP-001.
-    it("bad PR 05: rejects TOUCH_HUMAN_ONLY under rule MP-001 (bin/** is humanOnly)", () => {
+    // bin/** is humanApprove, so 05's bin/mirql.mjs edit holds for a human at MP-005.
+    it("bad PR 05: holds UNCITED_SURFACE under rule MP-005 (bin/** is humanApprove)", () => {
       const fixturePath = "conformance/bad_prs/05-uncited-surface.json";
       const programmatic = verifyAttempt({ fixture: join(ROOT, fixturePath) });
       assert.equal(programmatic.verified, false);
-      assert.equal(programmatic.rule, "MP-001");
-      assert.equal(programmatic.violation, "TOUCH_HUMAN_ONLY");
+      assert.equal(programmatic.rule, "MP-005");
+      assert.equal(programmatic.violation, "UNCITED_SURFACE");
+      assert.equal(programmatic.verdict, "needs_human");
 
       const cli = runBin("bin/mirql.mjs", ["r", "verify", "--fixture", fixturePath]);
       assert.equal(cli.status, EXIT_CODES.POLICY_DENIAL); // 4
       const doc = JSON.parse(cli.stderr);
-      assert.equal(doc.rule, "MP-001");
-      assert.equal(doc.violation, "TOUCH_HUMAN_ONLY");
+      assert.equal(doc.rule, "MP-005");
+      assert.equal(doc.violation, "UNCITED_SURFACE");
     });
 
     // Phase 0.2/0.3: a fixture is self-reported and touches packages/**, so it

@@ -58,7 +58,7 @@ function humanOnlyDoc(overrides = {}) {
 describe("ai review gate: policy", () => {
   it("loads aiReviewers from policy/paths.yaml without leaking into humanApprove", () => {
     const p = loadPathPolicies(ROOT);
-    assert.deepEqual(p.aiReviewers, BOTS);
+    assert.deepEqual(p.aiReviewers, [...BOTS, "mirql-judge[bot]", "mirql-critic[bot]"]);
     assert.ok(!p.humanApprove.some((x) => x.includes("[bot]")));
     assert.ok(p.humanOnly.includes(".coderabbit.yaml"), "reviewer config must be humanOnly");
   });

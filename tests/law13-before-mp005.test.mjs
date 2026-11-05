@@ -103,7 +103,7 @@ describe("Law 13 runs before MP-005 on a humanApprove path", () => {
 
 describe("checks.phi says whether Law 13 ran", () => {
   it("is null when an earlier rule stopped the evaluation", () => {
-    const res = evaluate(ciDoc({ delta_phi: 325 }, { diff_stat: { files_changed: ["scripts/x.mjs"] } }));
+    const res = evaluate(ciDoc({ delta_phi: 325 }, { diff_stat: { files_changed: ["policy/x.yaml"] } }));
     assert.equal(res.rule, "MP-001");
     assert.equal(res.verdict, "reject");
     assert.equal(res.checks.phi, null);

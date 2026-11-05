@@ -28,9 +28,9 @@
     "flags": []
   },
   "phi": {
-    "phi_base": 85,
+    "phi_base": 92,
     "phi_head": 92,
-    "delta_phi": 7
+    "delta_phi": 0
   },
   "surface": {
     "uncited_commands": [

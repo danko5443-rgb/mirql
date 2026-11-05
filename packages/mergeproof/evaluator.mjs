@@ -127,6 +127,7 @@ export { isTestFilePath } from '../core/index.mjs';
 const AI_REVIEWER_CONFIG_PATTERNS = Object.freeze([
   ".coderabbit.yaml",
   ".coderabbit.yml",
+  "roles/judge.md",
   "AGENTS.md",
   "AGENTS.override.md",
   "AGENT.md",
@@ -141,8 +142,11 @@ const AI_REVIEWER_CONFIG_PATTERNS = Object.freeze([
   ".github/instructions/**",
 ]);
 
+/** PR Court receipts are LLM verdicts: they may clear humanApprove, never the Courthouse Lock (humanOnly). */
+const COURT_REVIEWERS = Object.freeze(["mirql-judge[bot]", "mirql-critic[bot]"]);
+
 /** True when a path is, or lies under, a reviewer config pattern at any depth. */
-function isReviewerConfigPath(filePath) {
+export function isReviewerConfigPath(filePath) {
   const norm = normalizePath(filePath);
   return AI_REVIEWER_CONFIG_PATTERNS.some((pat) => {
     const normPat = normalizePath(pat);
@@ -305,7 +309,7 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
   if (forbidden.length > 0) {
     checks.human_only = false;
   }
-  if (forbidden.length > 0 && !humanOnlyReviewer) {
+  if (forbidden.length > 0 && (!humanOnlyReviewer || COURT_REVIEWERS.includes(humanOnlyReviewer))) {
     return fail(
       "MP-001",
       "TOUCH_HUMAN_ONLY",
@@ -534,17 +538,20 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     checks.phi = true;
   }
 
-  if (!checks.surface) {
-    const detail = isUncitedSurface
+  const reviewerRecord = humanOnlyReviewer && (forbidden.length > 0 || touchesHumanApprove)
+    ? { human_only_reviewer: humanOnlyReviewer }
+    : {};
+  const surfaceHold = () => fail(
+    "MP-005",
+    "UNCITED_SURFACE",
+    "needs_human",
+    isUncitedSurface
       ? `PR modified public surface without cited roadmap reference: ${uncitedCommands.join(", ")}`
-      : `PR touched humanApprove path(s) [${approvePaths.join(", ")}] ; human review required.`;
-    return fail("MP-005", "UNCITED_SURFACE", "needs_human", detail, {
-      checks,
-      uncited_commands: uncitedCommands,
-      human_approve_paths: approvePaths,
-      delta_phi: deltaPhi,
-    });
-  }
+      : `PR touched humanApprove path(s) [${approvePaths.join(", ")}] ; human review required.`,
+    { checks, uncited_commands: uncitedCommands, human_approve_paths: approvePaths, delta_phi: deltaPhi, ...reviewerRecord },
+  );
+  // A reviewer only clears the hold: the proof rules below still run.
+  if (!checks.surface && !humanOnlyReviewer) return surfaceHold();
 
   // --- MP-000 ------------------------------------------------------------------
   // Fail closed: a doc needs causal_cycle_completed === true or a proven suite
@@ -571,7 +578,7 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
       "needs_human",
       "Suite passes on base and head, but no causal proof (red-green-re-red) was measured; human review required." +
         (phiGrowthSignedOff ? ` Phi also grew by +${deltaPhi} under the owner's sign-off.` : ""),
-      { checks },
+      { checks, ...reviewerRecord },
     );
   }
 
@@ -585,7 +592,8 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
         checks,
         delta_phi: deltaPhi,
         owner_signoff: ownerSignoff,
-        ...(forbidden.length > 0 ? { forbidden_paths: forbidden, human_only_reviewer: humanOnlyReviewer } : {}),
+        ...(forbidden.length > 0 ? { forbidden_paths: forbidden } : {}),
+        ...reviewerRecord,
       },
     );
   }
@@ -599,6 +607,7 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
       { checks, forbidden_paths: forbidden, human_only_reviewer: humanOnlyReviewer },
     );
   }
+  if (!checks.surface) return surfaceHold();
 
   // Phase 0.2: every proof field in a PR doc is self-reported, so the best a
   // doc can earn is conformance_pass. auto_merge comes only from a measured

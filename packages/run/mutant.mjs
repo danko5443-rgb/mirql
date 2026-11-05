@@ -545,6 +545,18 @@ export function runMutationTesting(options = {}) {
   try {
     // Multi-run pre-flight baseline stability verification
     const { env: cleanEnv } = sanitizeAgentEnv(process.env);
+    const baselineFailed = (summary) => ({
+      ok: false,
+      error: "BASELINE_TEST_FAILED",
+      source_path: sourcePath,
+      kill_rate_bp: 0,
+      kill_threshold_bp: killThresholdBp,
+      mutants_total: 0,
+      mutants_killed: 0,
+      mutants_survived: 0,
+      survived_mutants: [],
+      summary,
+    });
     for (let b = 0; b < 2; b++) {
       let baselinePassed = false;
       if (typeof testRunner === "function") {
@@ -556,35 +568,13 @@ export function runMutationTesting(options = {}) {
           env: { ...cleanEnv, NODE_ENV: "test" },
         });
         if (baselineResult.error) {
-          return {
-            ok: false,
-            error: "BASELINE_TEST_FAILED",
-            source_path: sourcePath,
-            kill_rate_bp: 0,
-            kill_threshold_bp: killThresholdBp,
-            mutants_total: 0,
-            mutants_killed: 0,
-            mutants_survived: 0,
-            survived_mutants: [],
-            summary: `Baseline test runner error: ${baselineResult.error.message}`,
-          };
+          return baselineFailed(`Baseline test runner error: ${baselineResult.error.message}`);
         }
         baselinePassed = baselineResult.status === 0;
       }
 
       if (!baselinePassed) {
-        return {
-          ok: false,
-          error: "BASELINE_TEST_FAILED",
-          source_path: sourcePath,
-          kill_rate_bp: 0,
-          kill_threshold_bp: killThresholdBp,
-          mutants_total: 0,
-          mutants_killed: 0,
-          mutants_survived: 0,
-          survived_mutants: [],
-          summary: "Baseline test failed or was non-deterministic on unmutated source; mutation testing aborted",
-        };
+        return baselineFailed("Baseline test failed or was non-deterministic on unmutated source; mutation testing aborted");
       }
     }
 

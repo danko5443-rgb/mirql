@@ -1,0 +1,17 @@
+name: Mergeproof Review Signal
+
+# A wake-up only. pull_request_review runs the PR's own copy of a workflow, so
+# this file holds no secrets and no permissions. Its completion fires
+# workflow_run in mergeproof-retrigger.yml, which runs from main.
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions: {}
+
+jobs:
+  signal:
+    name: Signal Review Submitted
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Review submitted; the court wakes when this run completes."

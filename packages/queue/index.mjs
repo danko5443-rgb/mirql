@@ -27,6 +27,7 @@ import {
   DEFAULT_POLICY,
   isLeaseLive,
   validateConcurrencyLimit,
+  selectAvailableWork,
 } from "./fsm.mjs";
 import {
   CANARY_DEFAULTS,
@@ -72,6 +73,32 @@ export {
 
 /** Tool name reported by this package. */
 export const TOOL = "queue";
+
+function rejected(exit_code, error, extra = {}) {
+  return { ok: false, status: "rejected", exit_code, error, ...extra };
+}
+
+function rejectOrThrow(options, exit_code, error, extra) {
+  if (options.throwOnError) {
+    const err = new Error(error);
+    err.exitCode = exit_code;
+    throw err;
+  }
+  return rejected(exit_code, error, extra);
+}
+
+function emitOk(res) {
+  process.stdout.write(JSON.stringify(res) + "\n");
+  return EXIT_CODES.OK;
+}
+
+function emitResult(res, fallback) {
+  if (!res.ok) {
+    process.stderr.write(JSON.stringify(res) + "\n");
+    return res.exit_code ?? fallback;
+  }
+  return emitOk(res);
+}
 
 /**
  * Load policy configuration from policy/mirql.json if present.
@@ -167,37 +194,14 @@ export function submitWarrant(mirqlDir, warrantInput, options = {}) {
   const gateResult = checkNotRoadmapGate(warrantInput, notRoadmapContent);
   if (!gateResult.allowed) {
     const errorMsg = `Policy denial: warrant proposes forbidden pattern (${gateResult.id}: ${gateResult.reason})`;
-    if (options.throwOnError) {
-      const err = new Error(errorMsg);
-      err.exitCode = EXIT_CODES.POLICY_DENIAL;
-      throw err;
-    }
-    return {
-      ok: false,
-      status: "rejected",
-      exit_code: EXIT_CODES.POLICY_DENIAL,
-      error: errorMsg,
-      id: gateResult.id,
-      reason: gateResult.reason,
-    };
+    return rejectOrThrow(options, EXIT_CODES.POLICY_DENIAL, errorMsg, { id: gateResult.id, reason: gateResult.reason });
   }
 
   // 2. Validate warrant document against canonical schema
   const validation = validateDocument("warrant", warrantInput);
   if (!validation.valid) {
     const errorMsg = `Invalid warrant: ${validation.errors.join("; ")}`;
-    if (options.throwOnError) {
-      const err = new Error(errorMsg);
-      err.exitCode = EXIT_CODES.USAGE_ERROR;
-      throw err;
-    }
-    return {
-      ok: false,
-      status: "rejected",
-      exit_code: EXIT_CODES.USAGE_ERROR,
-      error: errorMsg,
-      errors: validation.errors,
-    };
+    return rejectOrThrow(options, EXIT_CODES.USAGE_ERROR, errorMsg, { errors: validation.errors });
   }
 
   return withLedgerLock(mirqlDir, () => {
@@ -216,17 +220,7 @@ export function submitWarrant(mirqlDir, warrantInput, options = {}) {
     }
     if (existingWarrant && !authorizedOnly) {
       const errorMsg = `Policy denial: warrant ID ${warrantInput.id} already exists in ledger`;
-      if (options.throwOnError) {
-        const err = new Error(errorMsg);
-        err.exitCode = EXIT_CODES.POLICY_DENIAL;
-        throw err;
-      }
-      return {
-        ok: false,
-        status: "rejected",
-        exit_code: EXIT_CODES.POLICY_DENIAL,
-        error: errorMsg,
-      };
+      return rejectOrThrow(options, EXIT_CODES.POLICY_DENIAL, errorMsg);
     }
 
     // 4. Semantic fingerprint deduplication check
@@ -455,28 +449,7 @@ export function leaseNextJob(mirqlDir, options = {}) {
       };
     }
 
-    // Fix B1: Check whether a warrant is already in_progress with an active unexpired lease
-    function isWarrantActiveLeased(wId) {
-      return Object.values(state.active_leases || {}).some(
-        (l) => l.warrant_id === wId && isLeaseLive(l, nowMs),
-      );
-    }
-
-    // Only active/open warrants that do NOT currently have a live unexpired lease can be leased
-    const availableOpenWarrants = allWarrants.filter(
-      (w) =>
-        (w.status === "active" || w.status === "open") &&
-        w.status !== "needs_human" &&
-        (w.failed_attempts || 0) < maxAttempts &&
-        !isWarrantActiveLeased(w.id),
-    );
-
-    const availableQueuedJobs = Object.values(state.jobs || {}).filter(
-      (j) =>
-        (j.status === "queued" || j.status === "enqueued") &&
-        state.warrants[j.warrant_id]?.status !== "needs_human" &&
-        !isWarrantActiveLeased(j.warrant_id),
-    );
+    const { availableOpenWarrants, availableQueuedJobs } = selectAvailableWork(state, allWarrants, maxAttempts, nowMs);
 
     // Law 14 & Milestone M1: Concurrency enforcement for BUILD mode
     const rawLimit =
@@ -486,12 +459,7 @@ export function leaseNextJob(mirqlDir, options = {}) {
       policy.concurrency;
     const limitValidation = validateConcurrencyLimit(rawLimit);
     if (!limitValidation.valid) {
-      return {
-        ok: false,
-        status: "rejected",
-        exit_code: EXIT_CODES.USAGE_ERROR,
-        error: limitValidation.error,
-      };
+      return rejected(EXIT_CODES.USAGE_ERROR, limitValidation.error);
     }
 
     if (state.mode === "BUILD") {
@@ -534,12 +502,7 @@ export function leaseNextJob(mirqlDir, options = {}) {
         ["builder", "doctor", "consolidator"].includes(targetRole) &&
         (!targetWarrantId || !state.warrants[targetWarrantId])
       ) {
-        return {
-          ok: false,
-          status: "rejected",
-          exit_code: EXIT_CODES.POLICY_DENIAL,
-          error: `Law 1 violation: role ${targetRole} must be backed by an open warrant`,
-        };
+        return rejected(EXIT_CODES.POLICY_DENIAL, `Law 1 violation: role ${targetRole} must be backed by an open warrant`);
       }
     } else if (availableOpenWarrants.length > 0) {
       const warrant = availableOpenWarrants[0];
@@ -595,34 +558,7 @@ export function leaseNextJob(mirqlDir, options = {}) {
     const ttlMs = options.ttl_ms ?? policy.lease_ttl_ms ?? 900000;
     const expiresAtMs = nowMs + ttlMs;
 
-    const keypair = getOrCreateQueueKeypair(mirqlDir, options.keyFile);
-
-    appendLedgerEventRaw(
-      mirqlDir,
-      {
-        type: "job.leased",
-        epoch: nextEpoch,
-        nowMs,
-        payload: {
-          job_id: targetJobId,
-          warrant_id: targetWarrantId,
-          role: targetRole,
-          tier: targetTier,
-          epoch: nextEpoch,
-          attempt: targetAttempt,
-          ttl_ms: ttlMs,
-          leased_at_ms: nowMs,
-          expires_at_ms: expiresAtMs,
-          status: "leased",
-        },
-      },
-      keypair,
-      state,
-    );
-
-    return {
-      ok: true,
-      status: "leased",
+    const lease = {
       job_id: targetJobId,
       warrant_id: targetWarrantId,
       role: targetRole,
@@ -633,6 +569,22 @@ export function leaseNextJob(mirqlDir, options = {}) {
       leased_at_ms: nowMs,
       expires_at_ms: expiresAtMs,
     };
+
+    const keypair = getOrCreateQueueKeypair(mirqlDir, options.keyFile);
+
+    appendLedgerEventRaw(
+      mirqlDir,
+      {
+        type: "job.leased",
+        epoch: nextEpoch,
+        nowMs,
+        payload: { ...lease, status: "leased" },
+      },
+      keypair,
+      state,
+    );
+
+    return { ok: true, status: "leased", ...lease };
   });
 }
 
@@ -683,23 +635,13 @@ export function promoteJob(mirqlDir, options = {}) {
   const jobId = options.jobId || options.job_id;
 
   if (!jobId) {
-    return {
-      ok: false,
-      status: "rejected",
-      exit_code: EXIT_CODES.USAGE_ERROR,
-      error: "Missing required jobId parameter",
-    };
+    return rejected(EXIT_CODES.USAGE_ERROR, "Missing required jobId parameter");
   }
 
   // Fix B4: baseSha is strictly required
   const baseSha = options.baseSha || options.base_sha;
   if (!baseSha) {
-    return {
-      ok: false,
-      status: "rejected",
-      exit_code: EXIT_CODES.POLICY_DENIAL,
-      error: "Missing required baseSha parameter",
-    };
+    return rejected(EXIT_CODES.POLICY_DENIAL, "Missing required baseSha parameter");
   }
 
   return withLedgerLock(mirqlDir, () => {
@@ -707,59 +649,29 @@ export function promoteJob(mirqlDir, options = {}) {
 
     const job = state.jobs[jobId];
     if (!job) {
-      return {
-        ok: false,
-        status: "rejected",
-        exit_code: EXIT_CODES.POLICY_DENIAL,
-        error: `Job ${jobId} not found in ledger`,
-      };
+      return rejected(EXIT_CODES.POLICY_DENIAL, `Job ${jobId} not found in ledger`);
     }
 
     const verdict = state.verdicts[jobId];
     if (!verdict) {
-      return {
-        ok: false,
-        status: "rejected",
-        exit_code: EXIT_CODES.POLICY_DENIAL,
-        error: `No verdict found for job ${jobId}`,
-      };
+      return rejected(EXIT_CODES.POLICY_DENIAL, `No verdict found for job ${jobId}`);
     }
 
     if (verdict.writer !== "notary:mergeproof") {
-      return {
-        ok: false,
-        status: "rejected",
-        exit_code: EXIT_CODES.POLICY_DENIAL,
-        error: `Verdict not authored by notary:mergeproof (found: ${verdict.writer})`,
-      };
+      return rejected(EXIT_CODES.POLICY_DENIAL, `Verdict not authored by notary:mergeproof (found: ${verdict.writer})`);
     }
 
     if (verdict.epoch !== job.epoch) {
-      return {
-        ok: false,
-        status: "rejected",
-        exit_code: EXIT_CODES.STALE_EPOCH,
-        error: `Stale epoch: verdict was issued under epoch ${verdict.epoch}, job lease is epoch ${job.epoch}`,
-      };
+      return rejected(EXIT_CODES.STALE_EPOCH, `Stale epoch: verdict was issued under epoch ${verdict.epoch}, job lease is epoch ${job.epoch}`);
     }
 
     // Fix B4: Exact match with verdict base_sha
     if (verdict.base_sha !== baseSha) {
-      return {
-        ok: false,
-        status: "rejected",
-        exit_code: EXIT_CODES.POLICY_DENIAL,
-        error: `Base commit SHA mismatch: expected ${baseSha}, found ${verdict.base_sha}`,
-      };
+      return rejected(EXIT_CODES.POLICY_DENIAL, `Base commit SHA mismatch: expected ${baseSha}, found ${verdict.base_sha}`);
     }
 
     if (verdict.status !== "accepted") {
-      return {
-        ok: false,
-        status: "rejected",
-        exit_code: EXIT_CODES.POLICY_DENIAL,
-        error: `Verdict status is ${verdict.status}, not accepted`,
-      };
+      return rejected(EXIT_CODES.POLICY_DENIAL, `Verdict status is ${verdict.status}, not accepted`);
     }
 
     const nowMs = options.nowMs ?? Date.now();
@@ -767,22 +679,12 @@ export function promoteJob(mirqlDir, options = {}) {
     // Fix B4 / Fix R3: Verify that the job has an active live lease
     const lease = state.active_leases[jobId];
     if (!lease) {
-      return {
-        ok: false,
-        status: "rejected",
-        exit_code: EXIT_CODES.STALE_EPOCH,
-        error: `Job ${jobId} does not have an active live lease`,
-      };
+      return rejected(EXIT_CODES.STALE_EPOCH, `Job ${jobId} does not have an active live lease`);
     }
 
     const expiresAt = lease.expires_at_ms ?? (lease.leased_at_ms + lease.ttl_ms);
     if (nowMs > expiresAt) {
-      return {
-        ok: false,
-        status: "rejected",
-        exit_code: EXIT_CODES.STALE_EPOCH,
-        error: `Lease for job ${jobId} has expired`,
-      };
+      return rejected(EXIT_CODES.STALE_EPOCH, `Lease for job ${jobId} has expired`);
     }
 
     const keypair = getOrCreateQueueKeypair(mirqlDir, options.keyFile);
@@ -1101,13 +1003,7 @@ export function main(argv = []) {
       }
 
       const res = submitWarrant(mirqlDir, warrantInput, options);
-      if (!res.ok) {
-        process.stderr.write(JSON.stringify(res) + "\n");
-        return res.exit_code ?? EXIT_CODES.USAGE_ERROR;
-      }
-
-      process.stdout.write(JSON.stringify(res) + "\n");
-      return EXIT_CODES.OK;
+      return emitResult(res, EXIT_CODES.USAGE_ERROR);
     }
 
     case "tick": {
@@ -1116,18 +1012,12 @@ export function main(argv = []) {
         process.stderr.write(JSON.stringify(res) + "\n");
         return res.exit_code;
       }
-      process.stdout.write(JSON.stringify(res) + "\n");
-      return EXIT_CODES.OK;
+      return emitOk(res);
     }
 
     case "lease": {
       const res = leaseNextJob(mirqlDir, options);
-      if (!res.ok) {
-        process.stderr.write(JSON.stringify(res) + "\n");
-        return res.exit_code ?? EXIT_CODES.USAGE_ERROR;
-      }
-      process.stdout.write(JSON.stringify(res) + "\n");
-      return EXIT_CODES.OK;
+      return emitResult(res, EXIT_CODES.USAGE_ERROR);
     }
 
     case "canary": {
@@ -1145,26 +1035,19 @@ export function main(argv = []) {
       const jobId = flags.jobId || positionals[0];
       const baseSha = flags.baseSha || positionals[1];
       const res = promoteJob(mirqlDir, { ...options, jobId, baseSha });
-      if (!res.ok) {
-        process.stderr.write(JSON.stringify(res) + "\n");
-        return res.exit_code ?? EXIT_CODES.POLICY_DENIAL;
-      }
-      process.stdout.write(JSON.stringify(res) + "\n");
-      return EXIT_CODES.OK;
+      return emitResult(res, EXIT_CODES.POLICY_DENIAL);
     }
 
     case "halt": {
       const reason = flags.reason || positionals.join(" ") || "Manual halt";
       const res = haltQueue(mirqlDir, reason, options);
-      process.stdout.write(JSON.stringify(res) + "\n");
-      return EXIT_CODES.OK;
+      return emitOk(res);
     }
 
     case "resume": {
       const reason = flags.reason || positionals.join(" ") || "Manual resume";
       const res = resumeQueue(mirqlDir, reason, options);
-      process.stdout.write(JSON.stringify(res) + "\n");
-      return EXIT_CODES.OK;
+      return emitOk(res);
     }
 
     default: {

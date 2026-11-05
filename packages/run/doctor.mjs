@@ -457,6 +457,22 @@ export function evaluateCircuitBreakers(systemMetrics = {}, options = {}) {
     return Number.isSafeInteger(userMs) && userMs >= 0 ? userMs : defaultMs;
   };
 
+  const recommend = (target_subsystem, action, cooldown_ms, reason) => ({
+    v: 1,
+    type: "circuit_breaker.recommendation",
+    target_subsystem,
+    action,
+    cooldown_ms,
+    reason,
+    metrics: {
+      budget_spent_micro_usd: budgetSpent,
+      budget_limit_micro_usd: budgetLimit,
+      hung_leases_count: hungLeases,
+      consecutive_failures: tierFailures,
+      total_failures: totalFailures,
+    },
+  });
+
   // Rule 0: Operator manual trip override
   if (options.manual_trip) {
     const rawTarget = options.manual_trip;
@@ -465,155 +481,43 @@ export function evaluateCircuitBreakers(systemMetrics = {}, options = {}) {
     }
     const target = SUBSYSTEMS.includes(rawTarget) && rawTarget !== "all" ? rawTarget : "worker";
     const cooldownMs = resolveCooldown(options.cooldown_ms, 3600000);
-    return {
-      v: 1,
-      type: "circuit_breaker.recommendation",
-      target_subsystem: target,
-      action: "trip",
-      cooldown_ms: cooldownMs,
-      reason: "manual_operator_trip",
-      metrics: {
-        budget_spent_micro_usd: budgetSpent,
-        budget_limit_micro_usd: budgetLimit,
-        hung_leases_count: hungLeases,
-        consecutive_failures: tierFailures,
-        total_failures: totalFailures,
-      },
-    };
+    return recommend(target, "trip", cooldownMs, "manual_operator_trip");
   }
 
   // Rule 1: Daily budget ceiling exhausted (Law 17 micro-USD safe integer check)
   if (budgetLimit > 0 && budgetSpent >= budgetLimit) {
-    return {
-      v: 1,
-      type: "circuit_breaker.recommendation",
-      target_subsystem: "budget",
-      action: "trip",
-      cooldown_ms: resolveCooldown(options.cooldown_ms, 172800000), // 48h cooldown
-      reason: "daily_budget_exhausted",
-      metrics: {
-        budget_spent_micro_usd: budgetSpent,
-        budget_limit_micro_usd: budgetLimit,
-        hung_leases_count: hungLeases,
-        consecutive_failures: tierFailures,
-        total_failures: totalFailures,
-      },
-    };
+    return recommend("budget", "trip", resolveCooldown(options.cooldown_ms, 172800000), "daily_budget_exhausted"); // 48h cooldown
   }
 
   // Rule 2: Budget high watermark warning (>= 90%)
   // Law 17 integer-only math: 9000 basis points (90%) without floating point operations
   const watermark = Math.floor((budgetLimit * 90) / 100);
   if (budgetLimit > 0 && budgetSpent >= watermark) {
-    return {
-      v: 1,
-      type: "circuit_breaker.recommendation",
-      target_subsystem: "budget",
-      action: "throttle",
-      cooldown_ms: resolveCooldown(options.cooldown_ms, 3600000),
-      reason: "daily_budget_near_ceiling",
-      metrics: {
-        budget_spent_micro_usd: budgetSpent,
-        budget_limit_micro_usd: budgetLimit,
-        hung_leases_count: hungLeases,
-        consecutive_failures: tierFailures,
-        total_failures: totalFailures,
-      },
-    };
+    return recommend("budget", "throttle", resolveCooldown(options.cooldown_ms, 3600000), "daily_budget_near_ceiling");
   }
 
   // Rule 3: Max tier (critic/highest model) retry exhaustion -> force macro-state to HARDEN
   if (tierFailures.max >= retriesPerTier) {
-    return {
-      v: 1,
-      type: "circuit_breaker.recommendation",
-      target_subsystem: "worker:max",
-      action: "force_harden",
-      cooldown_ms: resolveCooldown(options.cooldown_ms, 1800000),
-      reason: "max_tier_retry_exhausted_force_harden",
-      metrics: {
-        budget_spent_micro_usd: budgetSpent,
-        budget_limit_micro_usd: budgetLimit,
-        hung_leases_count: hungLeases,
-        consecutive_failures: tierFailures,
-        total_failures: totalFailures,
-      },
-    };
+    return recommend("worker:max", "force_harden", resolveCooldown(options.cooldown_ms, 1800000), "max_tier_retry_exhausted_force_harden");
   }
 
   // Rule 4: Mid tier failure escalation
   if (tierFailures.mid >= retriesPerTier) {
-    return {
-      v: 1,
-      type: "circuit_breaker.recommendation",
-      target_subsystem: "worker:mid",
-      action: "throttle",
-      cooldown_ms: resolveCooldown(options.cooldown_ms, 900000),
-      reason: "mid_tier_failures_escalate_to_max",
-      metrics: {
-        budget_spent_micro_usd: budgetSpent,
-        budget_limit_micro_usd: budgetLimit,
-        hung_leases_count: hungLeases,
-        consecutive_failures: tierFailures,
-        total_failures: totalFailures,
-      },
-    };
+    return recommend("worker:mid", "throttle", resolveCooldown(options.cooldown_ms, 900000), "mid_tier_failures_escalate_to_max");
   }
 
   // Rule 5: Flash tier failure escalation
   if (tierFailures.flash >= retriesPerTier) {
-    return {
-      v: 1,
-      type: "circuit_breaker.recommendation",
-      target_subsystem: "worker:flash",
-      action: "throttle",
-      cooldown_ms: resolveCooldown(options.cooldown_ms, 300000),
-      reason: "flash_tier_failures_escalate_to_mid",
-      metrics: {
-        budget_spent_micro_usd: budgetSpent,
-        budget_limit_micro_usd: budgetLimit,
-        hung_leases_count: hungLeases,
-        consecutive_failures: tierFailures,
-        total_failures: totalFailures,
-      },
-    };
+    return recommend("worker:flash", "throttle", resolveCooldown(options.cooldown_ms, 300000), "flash_tier_failures_escalate_to_mid");
   }
 
   // Rule 6: Hung leases detected
   if (hungLeases > 0) {
-    return {
-      v: 1,
-      type: "circuit_breaker.recommendation",
-      target_subsystem: "queue",
-      action: "throttle",
-      cooldown_ms: resolveCooldown(options.cooldown_ms, 60000),
-      reason: "hung_leases_require_reap",
-      metrics: {
-        budget_spent_micro_usd: budgetSpent,
-        budget_limit_micro_usd: budgetLimit,
-        hung_leases_count: hungLeases,
-        consecutive_failures: tierFailures,
-        total_failures: totalFailures,
-      },
-    };
+    return recommend("queue", "throttle", resolveCooldown(options.cooldown_ms, 60000), "hung_leases_require_reap");
   }
 
   // Rule 7: Reset / Healthy
-  return {
-    v: 1,
-    type: "circuit_breaker.recommendation",
-    target_subsystem: "all",
-    action: "reset",
-    cooldown_ms: 0,
-    reason: "all_subsystems_healthy",
-    metrics: {
-      budget_spent_micro_usd: budgetSpent,
-      budget_limit_micro_usd: budgetLimit,
-      hung_leases_count: hungLeases,
-      consecutive_failures: tierFailures,
-      total_failures: totalFailures,
-    },
-  };
+  return recommend("all", "reset", 0, "all_subsystems_healthy");
 }
 
 /**
@@ -697,6 +601,19 @@ export function evaluateMacroStateTransition(currentState, triageReport, breaker
  * Breaker state manager: authoritative state lives in the durable ledger (Law 4),
  * with an optional local cache file for fast out-of-band inspection.
  */
+function recordBreaker(breakers, status, breaker, expiresAt, nowMs) {
+  const keypair = breakers.keypair || getOrGenerateSupervisorKey(breakers.mirqlDir);
+  appendSupervisorEvent(
+    breakers.mirqlDir,
+    {
+      type: "probe.completed",
+      payload: { probe: "doctor", type: "doctor", status, breaker, expires_at_ms: expiresAt },
+      nowMs,
+    },
+    keypair,
+  );
+}
+
 export class BreakerStore {
   /**
    * @param {string} mirqlDir
@@ -728,27 +645,7 @@ export class BreakerStore {
     const safeCd = Number.isSafeInteger(cooldownMs) && cooldownMs >= 0 ? cooldownMs : 3600000;
     const expiresAt = Math.min(Number.MAX_SAFE_INTEGER, nowMs + safeCd);
 
-    const keypair = this.keypair || getOrGenerateSupervisorKey(this.mirqlDir);
-    appendSupervisorEvent(
-      this.mirqlDir,
-      {
-        type: "probe.completed",
-        payload: {
-          probe: "doctor",
-          type: "doctor",
-          status: "fail",
-          breaker: {
-            action: "trip",
-            target_subsystem: subsystem,
-            cooldown_ms: safeCd,
-            reason,
-          },
-          expires_at_ms: expiresAt,
-        },
-        nowMs,
-      },
-      keypair,
-    );
+    recordBreaker(this, "fail", { action: "trip", target_subsystem: subsystem, cooldown_ms: safeCd, reason }, expiresAt, nowMs);
 
     return this.load(nowMs).subsystems[subsystem];
   }
@@ -761,27 +658,7 @@ export class BreakerStore {
     const safeCd = Number.isSafeInteger(cooldownMs) && cooldownMs >= 0 ? cooldownMs : 3600000;
     const expiresAt = Math.min(Number.MAX_SAFE_INTEGER, nowMs + safeCd);
 
-    const keypair = this.keypair || getOrGenerateSupervisorKey(this.mirqlDir);
-    appendSupervisorEvent(
-      this.mirqlDir,
-      {
-        type: "probe.completed",
-        payload: {
-          probe: "doctor",
-          type: "doctor",
-          status: "pass",
-          breaker: {
-            action: "throttle",
-            target_subsystem: subsystem,
-            cooldown_ms: safeCd,
-            reason: "throttle_rate_limit",
-          },
-          expires_at_ms: expiresAt,
-        },
-        nowMs,
-      },
-      keypair,
-    );
+    recordBreaker(this, "pass", { action: "throttle", target_subsystem: subsystem, cooldown_ms: safeCd, reason: "throttle_rate_limit" }, expiresAt, nowMs);
 
     return this.load(nowMs).subsystems[subsystem];
   }
@@ -791,27 +668,7 @@ export class BreakerStore {
       throw new Error("Lifeguard is not managed by circuit breakers");
     }
 
-    const keypair = this.keypair || getOrGenerateSupervisorKey(this.mirqlDir);
-    appendSupervisorEvent(
-      this.mirqlDir,
-      {
-        type: "probe.completed",
-        payload: {
-          probe: "doctor",
-          type: "doctor",
-          status: "pass",
-          breaker: {
-            action: "reset",
-            target_subsystem: subsystem,
-            cooldown_ms: 0,
-            reason: "manual_reset",
-          },
-          expires_at_ms: 0,
-        },
-        nowMs,
-      },
-      keypair,
-    );
+    recordBreaker(this, "pass", { action: "reset", target_subsystem: subsystem, cooldown_ms: 0, reason: "manual_reset" }, 0, nowMs);
 
     return this.load(nowMs);
   }
