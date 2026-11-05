@@ -22,7 +22,7 @@ const COURT_ACTOR = { login: "github-actions[bot]", userId: 41898282, appId: 153
 const COURT_STATE_RE = /^<!-- mirql-court-state:v1 (\{[^\n]*?\}) -->\n(?:```json court-findings\n([^\n]*)\n```(?:\n|$))?/;
 const COURT_VERDICTS = new Map([["critic", ["APPROVE", "COMMENT"]], ["advocate", ["FIXED", "REBUT"]], ["judge", ["MERGE", "REMAND", "ESCALATE", "RECUSE"]]]);
 const COURT_PROVIDERS = [
-  { id: "zai", key: "ZAI_API_KEY", model: "glm-5.1", extra: { thinking: { type: "disabled" }, response_format: { type: "json_object" } }, url: (env) => env.MIRQL_LLM_BASE_URL || "https://open.bigmodel.cn/api/paas/v4/chat/completions" },
+  { id: "zai", key: "ZAI_API_KEY", model: "glm-5.3", extra: { thinking: { type: "enabled" }, reasoning_effort: "max", response_format: { type: "json_object" } }, url: (env) => env.MIRQL_LLM_BASE_URL || "https://open.bigmodel.cn/api/paas/v4/chat/completions" },
   { id: "anthropic", key: "ANTHROPIC_API_KEY", model: "claude-sonnet-4-20250514", url: () => "https://api.anthropic.com/v1/messages" },
   { id: "openai", key: "OPENAI_API_KEY", model: "gpt-4o-mini", url: () => "https://api.openai.com/v1/chat/completions" },
   { id: "openrouter", key: "OPENROUTER_API_KEY", model: "anthropic/claude-3.5-sonnet", url: () => "https://openrouter.ai/api/v1/chat/completions" },
@@ -186,7 +186,7 @@ function courtRequest(provider, model, key, system, user, maxTokens) {
 }
 
 /** Fetch only, and fails closed: returns { ok: true, data } or { ok: false, reason }, never a partial answer. */
-async function callCourtModel({ role, system = "", user, env = process.env, fetchImpl = globalThis.fetch, maxTokens = 8192, timeoutMs = 180000 } = {}) {
+async function callCourtModel({ role, system = "", user, env = process.env, fetchImpl = globalThis.fetch, maxTokens = 65536, timeoutMs = 180000 } = {}) {
   const name = String(role).toUpperCase();
   const wanted = env[`MIRQL_${name}_PROVIDER`];
   const provider = COURT_PROVIDERS.find((p) => env[p.key] && (!wanted || p.id === wanted));

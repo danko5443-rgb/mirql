@@ -202,18 +202,20 @@ describe("court critic", () => {
     }
   });
 
-  it("Z.AI gets thinking off and JSON mode, but only on its default model", async () => {
+  it("Z.AI defaults to glm-5.3 with max reasoning effort and JSON mode", async () => {
     const body = async (env) => {
       const { fetchImpl, calls } = mockFetch({ verdict: "APPROVE", summary: "clean", findings: [] });
       await runCriticRound({ diffText: trustedDiff, headSha: HEAD, authorAssociation: "OWNER", env, fetchImpl });
       return calls[0].body;
     };
     const pinned = await body(ENV);
-    assert.deepEqual(pinned.thinking, { type: "disabled" });
+    assert.equal(pinned.model, "glm-5.3");
+    assert.deepEqual(pinned.thinking, { type: "enabled" });
+    assert.equal(pinned.reasoning_effort, "max");
     assert.deepEqual(pinned.response_format, { type: "json_object" });
-    assert.equal(pinned.max_tokens, 8192);
-    const override = await body({ ...ENV, MIRQL_CRITIC_MODEL: "glm-5.3" });
-    assert.equal(override.thinking, undefined, "glm-5.3 refuses a disabled thinking setting");
+    assert.equal(pinned.max_tokens, 65536);
+    const override = await body({ ...ENV, MIRQL_CRITIC_MODEL: "glm-5.1" });
+    assert.equal(override.thinking, undefined, "a model override uses its own defaults");
     assert.equal((await body({ OPENAI_API_KEY: "k" })).thinking, undefined);
   });
 
@@ -223,11 +225,11 @@ describe("court critic", () => {
     console.error = (line) => { logged.push(line); };
     const run = (raw) => runCriticRound({ diffText: trustedDiff, headSha: HEAD, authorAssociation: "OWNER", env: ENV, fetchImpl: mockFetch({ raw }).fetchImpl });
     try {
-      const truncated = { choices: [{ finish_reason: "length", message: { content: '{"secret', reasoning_content: "hidden" } }], usage: { completion_tokens: 8192 } };
+      const truncated = { choices: [{ finish_reason: "length", message: { content: '{"secret', reasoning_content: "hidden" } }], usage: { completion_tokens: 65536 } };
       assert.equal((await run({ ok: true, json: async () => truncated })).reason, "LLM_PARSE_ERROR");
       assert.equal((await run({ ok: false, status: 429 })).reason, "LLM_HTTP_ERROR");
     } finally { console.error = original; }
-    assert.match(logged[0], /CRITIC zai\/glm-5\.1 LLM_PARSE_ERROR: SyntaxError finish=length content_chars=8 reasoning_chars=6 completion_tokens=8192/);
+    assert.match(logged[0], /CRITIC zai\/glm-5\.3 LLM_PARSE_ERROR: SyntaxError finish=length content_chars=8 reasoning_chars=6 completion_tokens=65536/);
     assert.match(logged[1], /LLM_HTTP_ERROR: status=429/);
     assert.ok(!logged.join().includes("secret") && !logged.join().includes("hidden"));
   });
