@@ -37,13 +37,15 @@ A red suite posts no receipt at all, so the court comes back when a re-run turns
 ### Repository secrets
 
 - **An LLM key**, one of: `ZAI_API_KEY` (already set), `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`. The court needs at least one to run its roles.
-- **`MIRQL_COURT_TOKEN`:** a fine-grained personal access token with `contents:write` on this repository. It exists only so the Advocate's fix commits trigger the notary: pushes made with the built-in `GITHUB_TOKEN` start no workflows, so without a court token the notary would never run on the Advocate's commits. Without it the Advocate never pushes, and every AGREE_AND_FIX escalates to a human instead.
+- **`MIRQL_COURT_TOKEN`:** a fine-grained personal access token with `contents:write` on this repository, plus `pull-requests:write` for the Issue Builder. It exists so the Advocate's fix commits and the Builder's PRs trigger the notary: pushes and PRs made with the built-in `GITHUB_TOKEN` start no workflows, so without a court token the notary would never run on them. Without it the Advocate never pushes, every AGREE_AND_FIX escalates to a human instead, and the Issue Builder opens nothing.
 
 ### Repository variables
 
 - **`MIRQL_COURT_AUTO_MERGE=1`:** enables merging. Default is off; with it unset, the court stops at the Judge's verdict and a human lands the PR.
 - **`MIRQL_PHI_WARRANT`:** the owner's signed Phi warrant, set by `node scripts/phi-warrant.mjs grant`. It is checked against the key pinned in `policy/phi-warrant-key.json` on `main`. Delete the variable to revoke it.
 - **`MIRQL_COURT_DISABLED=1`:** halts the court (for incidents or maintenance windows): no role runs and nothing merges. A review signal can still re-run a failed notary gate when the head has an approval or an owner sign-off.
+- **`MIRQL_BUILDER_DISABLED=1`:** stops the Issue Builder. New issues then open no PRs.
+- **`MIRQL_BUILDER_MODEL` / `MIRQL_BUILDER_PROVIDER`:** model and provider overrides for the Builder, like the Court's.
 - **`MIRQL_LLM_BASE_URL`:** overrides the Z.AI API endpoint (self-hosted or proxied gateway).
 - **`MIRQL_CRITIC_MODEL` / `MIRQL_ADVOCATE_MODEL` / `MIRQL_JUDGE_MODEL`:** per-role model overrides — useful for running the Judge on a stronger model than the other roles. The court enables `thinking: { type: "enabled" }`, `reasoning_effort: "max"`, JSON mode (`max_tokens: 65536`) and streaming for the default Z.AI `glm-5.3` model, so an override runs with that model's own defaults.
 - **`MIRQL_CRITIC_PROVIDER` / `MIRQL_ADVOCATE_PROVIDER` / `MIRQL_JUDGE_PROVIDER`:** per-role provider overrides, one of `zai`, `anthropic`, `openai`, `openrouter`, `gemini` (each requires the matching API key secret).
@@ -56,6 +58,14 @@ A red suite posts no receipt at all, so the court comes back when a re-run turns
 ## Wake-ups
 
 The court runs as a workflow from `main` (`.github/workflows/mergeproof-retrigger.yml`). A Codex or CodeRabbit comment, a finished notary run, or a manual dispatch wakes it, and each wake-up rereads all state from the API. Review submissions reach it through `.github/workflows/mergeproof-review-signal.yml`. That event runs the PR's own copy of a workflow, so the signal file holds no secrets and `permissions: {}`; its completion fires `workflow_run` in the court workflow.
+
+## Issue Builder
+
+`.github/workflows/mergeproof-issue-builder.yml` starts the factory one step earlier. When an owner, member or collaborator opens an issue, the Builder (`roles/builder.md`) proposes patches or declines, and `scripts/issue-builder.mjs` validates them, pushes `mirql/issue-<n>` and opens a PR that closes the issue. From there it is an ordinary PR: the gate and the Court decide, and the warrant and the Courthouse Lock apply as usual. A refusal or failure is posted on the issue.
+
+To build an issue that is already open: `gh workflow run "Mergeproof Issue Builder" -f issue_number=<n>`. An issue that already has a `mirql/issue-<n>` branch is skipped.
+
+The Builder gets one attempt, and the job can't run the code it writes, since it holds secrets. If the PR's suite comes back red, the Court posts nothing and the Advocate doesn't run, so the PR waits for a person.
 
 ## Known limits
 

@@ -1,0 +1,73 @@
+name: Mergeproof Issue Builder
+
+# Turns a trusted author's new issue into a pull request (docs/pr-court.md). The
+# `issues` event runs this file from main. The Builder role only proposes patches:
+# scripts/issue-builder.mjs validates and pushes them, and never runs them. Issue
+# text reaches the script through the API, never through this file.
+on:
+  issues:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue number to build"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: mergeproof-issue-builder-${{ github.event.inputs.issue_number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Issue Builder
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'issues' &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Check out base branch (authoritative scripts only)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: base-notary
+          persist-credentials: false
+
+      - name: Check out working copy (patches land here, nothing here runs)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: work
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run issue builder
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.inputs.issue_number || github.event.issue.number }}
+          WORK_DIR: work
+          MIRQL_BUILDER_DISABLED: ${{ vars.MIRQL_BUILDER_DISABLED }}
+          MIRQL_COURT_TOKEN: ${{ secrets.MIRQL_COURT_TOKEN }}
+          MIRQL_PHI_WARRANT: ${{ vars.MIRQL_PHI_WARRANT }}
+          MIRQL_LLM_BASE_URL: ${{ vars.MIRQL_LLM_BASE_URL }}
+          MIRQL_BUILDER_MODEL: ${{ vars.MIRQL_BUILDER_MODEL }}
+          MIRQL_BUILDER_PROVIDER: ${{ vars.MIRQL_BUILDER_PROVIDER }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: node base-notary/scripts/issue-builder.mjs

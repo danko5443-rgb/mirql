@@ -267,6 +267,8 @@ To eliminate manual review bottlenecks and recover from external bot rate limits
    - Each role records a tamper-checked state marker (`<!-- mirql-court-state:v1 {...} -->`) in PR comments under the `github-actions[bot]` identity (`scripts/ci-review-gate.mjs`).
    - A verified Judge `MERGE` receipt clears `findAiApproval` as `mirql-judge[bot]` (overruling false-positive reviewer findings adjudicated on that exact `HEAD`), re-runs a failed `Mergeproof External Notary` gate if needed, and—when `MIRQL_COURT_AUTO_MERGE=1` is enabled—lands the PR with `gh pr merge --match-head-commit <head_sha>`.
 
+The [Issue Builder](docs/pr-court.md#issue-builder) feeds the Court: when an owner, member or collaborator opens an issue, the **Builder** (`roles/builder.md`) proposes patches and `scripts/issue-builder.mjs` validates them, pushes `mirql/issue-<n>` and opens the PR. It never runs the code it writes. Set `MIRQL_BUILDER_DISABLED=1` to stop it.
+
 ### Owner Sign-Off (`reviewed:<head sha>`)
 
 For pull requests that touch the **Courthouse Lock** (`humanOnly`) or grow $\Phi$ beyond the signed Phi warrant, the repository owner can sign off directly:
