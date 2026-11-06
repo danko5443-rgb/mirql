@@ -802,7 +802,8 @@ describe("court state machine", () => {
 
 describe("court landing", () => {
   const BASE = "d".repeat(40);
-  function landingIo({ gate = "success", prHead = HEAD, state = "open", tip = BASE, runBase = BASE, run: runOverride = {}, after = null } = {}) {
+  const issueRef = (number, repo = "o/r") => ({ number, url: `https://github.com/${repo}/issues/${number}` });
+  function landingIo({ gate = "success", prHead = HEAD, state = "open", tip = BASE, runBase = BASE, run: runOverride = {}, after = null, linked = [], failOn = null, failIssue = null } = {}) {
     const runs = [];
     let current = { id: 5, head_sha: HEAD, status: "completed", conclusion: gate === "success" ? "success" : "failure", run_attempt: 1, pull_requests: [{ base: { sha: runBase } }], ...runOverride };
     let jobGate = gate;
@@ -810,8 +811,10 @@ describe("court landing", () => {
       runs,
       run: (cmd, args) => {
         runs.push([cmd, ...args]);
+        if (args[1] === failOn) throw new Error(`${failOn} refused`);
+        if (args[1] === "close" && args[2] === failIssue) throw new Error(`close ${failIssue} refused`);
         if (args[1] === "rerun" && after) { current = { ...current, run_attempt: 2, conclusion: after }; jobGate = after; }
-        return "";
+        return args[1] === "view" ? JSON.stringify({ closingIssuesReferences: linked }) : "";
       },
       api: (path) => {
         if (path.includes("/jobs?")) return { jobs: [{ name: "Mergeproof Conscience Gate", conclusion: jobGate }] };
@@ -880,6 +883,65 @@ describe("court landing", () => {
     assert.equal(await land(io), "NOTARY_NOT_GREEN");
     assert.equal(merged(io), false);
   });
+
+  const closes = (io) => io.runs.filter((r) => r[1] === "issue" && r[2] === "close");
+  const capturingLog = async (fn) => {
+    const original = console.log;
+    const lines = [];
+    console.log = (line) => { lines.push(line); };
+    try { await fn(); } finally { console.log = original; }
+    return lines.join("\n");
+  };
+
+  it("closes the issues the merged PR links, as completed, after the merge", async () => {
+    const io = landingIo({ linked: [issueRef(93), issueRef(95)] });
+    assert.equal(await land(io), "MERGED");
+    assert.deepEqual(closes(io).map((r) => r[3]), ["93", "95"]);
+    assert.ok(closes(io).every((r) => r.includes("--repo") && r.includes("o/r") && r.includes("--reason") && r.includes("completed")));
+    assert.ok(closes(io)[0].at(-1).includes("#7"), "the comment names the PR");
+    const mergeAt = io.runs.findIndex((r) => r.includes("merge"));
+    assert.ok(io.runs.findIndex((r) => r[1] === "issue") > mergeAt);
+  });
+
+  it("closes nothing when no issue is linked, or when the link is to another repo", async () => {
+    for (const linked of [[], [issueRef(93, "someone/else")], [issueRef(93, "o/r-fork")]]) {
+      const io = landingIo({ linked });
+      assert.equal(await land(io), "MERGED");
+      assert.equal(closes(io).length, 0);
+    }
+  });
+
+  it("still reports the merge when the issues can't be read or closed, and warns", async () => {
+    for (const failOn of ["view", "close"]) {
+      const io = landingIo({ linked: [issueRef(93)], failOn });
+      let outcome;
+      const said = await capturingLog(async () => { outcome = await land(io); });
+      assert.equal(outcome, "MERGED");
+      assert.match(said, /::warning::.*PR 7 merged.*linked issues/);
+      assert.ok(!said.includes(`${failOn} refused`), "only the error name is logged");
+    }
+  });
+
+  it("keeps closing the other linked issues when one close fails, and names the failed one", async () => {
+    const io = landingIo({ linked: [issueRef(93), issueRef(95)], failIssue: "93" });
+    let outcome;
+    const said = await capturingLog(async () => { outcome = await land(io); });
+    assert.equal(outcome, "MERGED");
+    assert.deepEqual(closes(io).map((r) => r[3]), ["93", "95"]);
+    assert.match(said, /::warning::.*\(#93\): Error/);
+    assert.ok(!said.includes("close 93 refused"), "only the error name is logged");
+  });
+
+  it("closes no issue when the merge fails or never runs", async () => {
+    const failed = landingIo({ linked: [issueRef(93)], failOn: "merge" });
+    await assert.rejects(land(failed), /merge refused/);
+    assert.equal(closes(failed).length, 0);
+    for (const opts of [{ prHead: OLD }, { tip: OLD }, { gate: "failure", run: { status: "in_progress" } }]) {
+      const io = landingIo({ linked: [issueRef(93)], ...opts });
+      assert.notEqual(await land(io), "MERGED");
+      assert.ok(!io.runs.some((r) => r[1] === "view" || r[1] === "issue"));
+    }
+  });
 });
 
 describe("court tick end to end", () => {
@@ -916,7 +978,10 @@ describe("court tick end to end", () => {
     const jobs = { head: "success", base: "success", gate: "success" };
     const io = {
       run(cmd, args, options = {}) {
-        if (cmd !== "git") { gh.push([cmd, ...args]); return ""; }
+        if (cmd !== "git") {
+          gh.push([cmd, ...args]);
+          return args[1] === "view" ? JSON.stringify({ closingIssuesReferences: [{ number: 3, url: "https://github.com/o/r/issues/3" }] }) : "";
+        }
         return execFileSync(cmd, args, { encoding: "utf8", ...options, env: { ...(options.env ?? process.env), ...COURT_GIT } });
       },
       api(path) {
@@ -968,6 +1033,7 @@ describe("court tick end to end", () => {
       const call = box.gh.find((c) => c.includes("merge"));
       assert.ok(call, "the court lands the merge");
       assert.ok(call.includes(pushed));
+      assert.ok(box.gh.some((c) => c[1] === "issue" && c[2] === "close" && c[3] === "3"), "the merge closes the linked issue");
       assert.equal(findAiApproval([], { reviewers: REVIEWERS, headSha: pushed, author: "ahmed-3m", comments: box.comments }), "mirql-judge[bot]");
     });
   });
