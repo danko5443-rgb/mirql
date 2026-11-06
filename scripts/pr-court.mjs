@@ -12,10 +12,13 @@ import { checkSwallowedExceptions, checkTestWeakenings, isHumanOnlyPath, loadPat
 import { isReviewerConfigPath } from "../packages/mergeproof/evaluator.mjs";
 import { computeGitTreePhi, computePhi } from "../packages/run/phi.mjs";
 import { measurePhiWarrant } from "./ci-phi-warrant.mjs";
-import { callCourtModel, collectExternalFindings, findAiApproval, hasApproveCommand, hasLateChanges, inspectReviewStatus, isEntrypoint, parseCourtState, parseReviews, scanDiffHazards } from "./ci-review-gate.mjs";
+import { callCourtModel, COURT_ACTOR, COURT_MODEL_TIMEOUT_MS, collectExternalFindings, findAiApproval, hasApproveCommand, hasLateChanges, inspectReviewStatus, isEntrypoint, parseCourtState, parseReviews, scanDiffHazards } from "./ci-review-gate.mjs";
 
 const MAX_ROUNDS = 3;
 const MAX_TICK_STEPS = 6;
+// The workflow kills the job at 45 minutes, and a killed job leaves no trace on the PR.
+const TICK_BUDGET_MS = 40 * 60000;
+const MODEL_STEPS = new Set(["critic", "advocate", "judge"]);
 const MAX_DIFF_CHARS = 500000;
 const MAX_FILE_CHARS = 20000;
 const MAX_BODY_CHARS = 60000;
@@ -273,7 +276,14 @@ function diffSnapshot(io, repoDir, base, head) {
 
 const advocateText = (res) => [res.summary, res.reason, ...(res.responses ?? []).map((r) => `- **${r.finding_id}** ${r.action}: ${r.reply}`)].filter(Boolean).join("\n");
 
-const failed = (res) => { console.log(`::error::pr-court: ${res.reason}`); return res.reason === "NO_API_KEY" ? 0 : 1; };
+/** Has no receipt marker and no mention, so it can never read as a verdict. The reason is one of the court's own codes, never model text. */
+const formatCourtFailure = ({ mark, role, headSha, reason, prNumber }) => [
+  `<!-- ${mark} -->`,
+  `**PR Court stopped without a verdict.** The ${role} step failed at \`${headSha}\` with \`${reason}\`. This is neither an approval nor a rejection, and the gate is unchanged.`,
+  "",
+  `The Court tries again on its next wake-up. To retry now: \`gh workflow run "Mergeproof Court" -f pr_number=${prNumber}\``,
+  "",
+].join("\n");
 
 /** Each step returns an exit code to end the tick, or null to read fresh state and continue. */
 const COURT_STEPS = {
@@ -286,33 +296,33 @@ const COURT_STEPS = {
     post({ round: judgeRound, role: "judge", verdict: refusalVerdict(refused), text: refused ?? `COURTHOUSE_LOCK: ${locked.slice(0, 10).join(", ")} - ${locked.some(isReviewerConfigPath) ? "reviewer config: no sign-off clears the gate, so the owner merges by hand." : `run node scripts/owner-signoff.mjs ${prNumber}`}` }); return 0;
   },
   escalate: ({ post, judgeRound }) => { post({ round: judgeRound, role: "judge", verdict: "ESCALATE", text: "MAX_ROUNDS: findings remain open after the last Advocate round." }); return 0; },
-  async critic({ ctx, snapshot, post, state, prompt }) {
+  async critic({ ctx, snapshot, post, fail, state, prompt }) {
     const res = await runCriticRound({ ...ctx, diffText: snapshot().diffText, round: state.advocateRounds + 1, rolePrompt: prompt("critic") });
     if (res.refused) { post({ round: state.advocateRounds + 1, role: "judge", verdict: refusalVerdict(res.reason), text: res.reason }); return 0; }
-    if (!res.ok) return failed(res);
+    if (!res.ok) return fail(res);
     const list = res.findings.map((f) => `- **${f.severity} ${f.id}** \`${f.file}:${f.line}\` ${f.title}`);
     post({ round: state.advocateRounds + 1, role: "critic", verdict: res.verdict, count: res.findings.length, payload: { findings: res.findings }, text: [res.summary, ...list].join("\n") });
     return null;
   },
-  async advocate({ ctx, snapshot, post, state, prompt, findings, basePhi, phiAllowance, env, io, pr }) {
+  async advocate({ ctx, snapshot, post, fail, state, prompt, findings, basePhi, phiAllowance, env, io, pr }) {
     const round = state.advocateRounds + 1;
     const token = env.MIRQL_COURT_TOKEN;
     const commit = token ? (files) => pushFix(io, ctx.repoDir, files, pr.head.ref, token, round, env) : null;
     const res = await runAdvocateRound({ ...ctx, diffText: snapshot().diffText, findings, basePhi: basePhi(), phiAllowance: phiAllowance(), round, rolePrompt: prompt("advocate"), commit });
-    if (!res.ok) return failed(res);
+    if (!res.ok) return fail(res);
     if (res.verdict === "ESCALATE" || res.verdict === "RECUSE") { post({ round, role: "judge", verdict: res.verdict, text: advocateText(res) }); return 0; }
     const titled = (id) => { const f = findings.find((x) => x.id === id); return `${f.file}:${f.line} ${f.title}`; };
     const responses = res.responses.map(({ finding_id, action, reply }) => ({ finding_id, finding: titled(finding_id), action, reply }));
     post({ round, headSha: res.headSha, role: "advocate", verdict: res.verdict, count: responses.length, payload: { responses }, text: advocateText(res) });
     return res.verdict === "FIXED" ? 0 : null;
   },
-  async judge({ ctx, snapshot, post, state, prompt, findings, basePhi, phiAllowance, judgeRound, io, repo }) {
+  async judge({ ctx, snapshot, post, fail, state, prompt, findings, basePhi, phiAllowance, judgeRound, io, repo }) {
     const notary = notaryRun(io, repo, ctx.headSha);
     if (!["success", "failure"].includes(notary?.head) || !["success", "failure"].includes(notary?.base)) return 0;
     const { diffText, files } = snapshot();
     const evidence = { suitePassBase: notary.base === "success", suitePassHead: notary.head === "success", deltaPhi: computeGitTreePhi(ctx.repoDir, ctx.headSha).metrics.total - basePhi(), phiAllowance: phiAllowance() };
     const res = await runJudgeArbitration({ ...ctx, diffText, files, evidence, findings, transcript: state.transcript, round: judgeRound, rolePrompt: prompt("judge") });
-    if (!res.ok) return failed(res);
+    if (!res.ok) return fail(res);
     if (res.verdict === "WAIT") return 0; // A red suite posts nothing, so a green re-run can come back.
     post({ round: judgeRound, role: "judge", verdict: res.verdict, count: res.unresolved.length, payload: { findings: res.unresolved, rulings: res.rulings }, text: res.rationale });
     return res.verdict === "MERGE" || res.verdict === "REMAND" ? null : 0;
@@ -323,7 +333,8 @@ const COURT_STEPS = {
   },
 };
 
-async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl = globalThis.fetch, baseDir = resolve(dirname(fileURLToPath(import.meta.url)), "..") } = {}) {
+async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl = globalThis.fetch, baseDir = resolve(dirname(fileURLToPath(import.meta.url)), ".."), now = Date.now } = {}) {
+  const started = now();
   const { REPO: repo, PR_NUMBER: prNumber, CANDIDATE_DIR: repoDir } = env;
   if (env.MIRQL_COURT_DISABLED === "1") return 0;
   const policies = loadPathPolicies(baseDir);
@@ -344,6 +355,18 @@ async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl 
     const snapshot = () => diffSnapshot(io, repoDir, baseSha, headSha);
     const name = decideCourtStep(state, { externalFindings, externalReviewed, codexPending: inspectReviewStatus(comments, headSha).codexPending, locked: lockedFiles(snapshot().files, policies).length > 0, lateChanges: hasLateChanges(reviews, state, headSha) });
     log(`step ${step}: ${name} at ${headSha}`);
+    const fail = (res) => {
+      console.log(`::error::pr-court: ${res.reason}`);
+      if (res.reason === "NO_API_KEY") return 0;
+      const mark = `mirql-court-failure:v1 ${name} ${headSha} ${res.reason}`;
+      try {
+        // One notice per head, role and reason, however many wake-ups fail the same way.
+        const told = comments.some((c) => c.user?.login === COURT_ACTOR.login && String(c.body).includes(mark));
+        if (!told) io.post(repo, prNumber, formatCourtFailure({ mark, role: name, headSha, reason: res.reason, prNumber }));
+      } catch (err) { /* mp-003-allow: the failure is already logged, and the tick stays red */ console.log(`::warning::pr-court: failure notice not posted: ${err?.name}`); }
+      return 1;
+    };
+    if (MODEL_STEPS.has(name) && now() - started > TICK_BUDGET_MS - COURT_MODEL_TIMEOUT_MS) return fail({ reason: "TICK_BUDGET" });
     const fresh = externalFindings.filter((f) => !state.findings.some((known) => known.id === f.id));
     const findings = name === "advocate" ? [...state.openFindings, ...fresh.filter((f) => !state.answered.includes(f.id))] : [...state.findings, ...fresh];
     let baseTotal = null;
@@ -363,7 +386,7 @@ async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl 
     };
     const code = await COURT_STEPS[name]({
       ctx: { repoDir, headSha, authorAssociation: pr.author_association, policies, env, fetchImpl },
-      state, env, io, pr, repo, prNumber, findings, post,
+      state, env, io, pr, repo, prNumber, findings, post, fail,
       judgeRound: Math.max(state.advocateRounds, 1),
       prompt: (role) => loadRolePrompt(baseDir, role),
       snapshot,

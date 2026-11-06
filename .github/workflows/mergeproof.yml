@@ -21,29 +21,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Unprivileged job that runs CANDIDATE code: read-only repository access
-  # (checkout of a private repository fails without contents: read; the token
-  # is not left in .git/config), no secrets, no cache, no artifact upload. Its green result is ADVISORY ONLY —
-  # candidate code in that VM can always forge a pass — and is reported
-  # solely through this job's result, which the notary records as the
-  # measured suite_pass_head evidence bit. Never treat it as proof.
+  # Reads the candidate suite's result and runs no candidate code. This workflow
+  # runs in the base-branch context, so PR code runs only in the `pull_request`
+  # workflow mergeproof-candidate.yml. This job waits for that run on the exact
+  # head commit and passes only if it passed; anything else fails closed. Its
+  # green result is ADVISORY ONLY (candidate code can always forge a pass) and is
+  # reported solely through this job's result, which the notary records as the
+  # suite_pass_head evidence bit. Never treat it as proof. No bootstrap fallback:
+  # if the base branch lacks ci-candidate-result.mjs this job fails closed.
   candidate-tests:
     name: Candidate Tests (advisory)
     permissions:
       contents: read
+      actions: read
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
-      - name: Check out candidate PR head (no credentials kept)
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: false
-          path: candidate
-
-      # Law 7: the BASE notary's runner judges the candidate tree, so a PR
-      # cannot swap the runner that judges it. No bootstrap fallback: if the
-      # base branch lacks scripts/run-tests.mjs this job fails closed.
-      - name: Check out base branch (authoritative runner)
+      - name: Check out base branch (authoritative reader)
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
@@ -55,11 +49,12 @@ jobs:
         with:
           node-version: 22
 
-      # MIRQL_TEST_ROOT points the base-notary runner at the candidate tree.
-      # No timeout here (same as today): the full suite is slow but legitimate.
-      - name: Run candidate suite under the base-notary runner
-        working-directory: candidate
-        run: MIRQL_TEST_ROOT="$PWD" node ../base-notary/scripts/run-tests.mjs
+      - name: Read the candidate suite result for this exact head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node base-notary/scripts/ci-candidate-result.mjs
 
   # Unprivileged measurement of the BASE suite (Laws 7 & 16): its result is
   # the evidence for proof.suite_pass_base. Non-blocking — the notary runs via

@@ -3,8 +3,9 @@
 // The workflow file .github/workflows/mergeproof.yml IS the security
 // boundary: it runs from the base branch via pull_request_target, it is the
 // only thing allowed to hold the token, and it must never execute candidate
-// files. These tests parse the YAML as plain text (zero dependencies) so a
-// regression in any of those invariants fails locally instead of in review.
+// files. Those run in .github/workflows/mergeproof-candidate.yml, on
+// pull_request. These tests parse the YAML as plain text (zero dependencies) so
+// a regression in any of those invariants fails locally instead of in review.
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -14,7 +15,9 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Normalized because Git for Windows checks this file out with CRLF by default.
-const wf = readFileSync(join(ROOT, ".github", "workflows", "mergeproof.yml"), "utf8").replace(/\r\n/g, "\n");
+const readWorkflow = (name) => readFileSync(join(ROOT, ".github", "workflows", name), "utf8").replace(/\r\n/g, "\n");
+const wf = readWorkflow("mergeproof.yml");
+const candidateWf = readWorkflow("mergeproof-candidate.yml");
 
 const JOBS = ["candidate-tests", "base-suite", "notary"];
 
@@ -84,15 +87,15 @@ describe("mergeproof workflow: self-gate-proof structure", () => {
         }
       }
     }
-    assert.ok(checkouts >= 5, `expected at least 5 checkouts, found ${checkouts}`);
+    assert.ok(checkouts >= 4, `expected at least 4 checkouts, found ${checkouts}`);
   });
 
-  it("candidate-tests and base-suite hold contents: read and nothing else", () => {
+  it("the measurement jobs hold only the read permissions they need", () => {
     // contents: read is the minimum: checkout of a private repository fails
     // without it, which would make both suite results permanently false.
-    for (const id of ["candidate-tests", "base-suite"]) {
-      assert.match(jobBlock(id), /^ {4}permissions:\n {6}contents: read\n {4}runs-on:/m, id);
-    }
+    // actions: read is what lets candidate-tests list the candidate suite's runs.
+    assert.match(jobBlock("base-suite"), /^ {4}permissions:\n {6}contents: read\n {4}runs-on:/m);
+    assert.match(jobBlock("candidate-tests"), /^ {4}permissions:\n {6}contents: read\n {6}actions: read\n {4}runs-on:/m);
     assert.match(wf, /^permissions: \{\}$/m, "workflow default must grant nothing");
     assert.doesNotMatch(wf, /:\s*write\s*$/m, "no job may hold a write permission");
     assert.doesNotMatch(wf, /secrets\./, "no job may reference a secret");
@@ -133,6 +136,25 @@ describe("mergeproof workflow: self-gate-proof structure", () => {
     // And no bootstrap fallback to candidate copies anywhere in the file.
     assert.doesNotMatch(wf, /node candidate\//);
     assert.doesNotMatch(wf, /candidate\/scripts/);
+  });
+
+  it("no job in this base-context workflow runs candidate code", () => {
+    assert.doesNotMatch(wf, /^ {8}working-directory:\s*candidate\s*$/m);
+    assert.doesNotMatch(wf, /MIRQL_TEST_ROOT/);
+    // The only checkout of the PR head is the notary's, as data.
+    for (const id of ["candidate-tests", "base-suite"]) {
+      assert.doesNotMatch(jobBlock(id), /pull_request\.head\.sha \}\}\n\s+persist-credentials/, id);
+      assert.doesNotMatch(jobBlock(id), /path: candidate/, id);
+    }
+  });
+
+  it("candidate-tests only reads the candidate suite's result, from the base copy of the script", () => {
+    const block = jobBlock("candidate-tests");
+    assert.deepEqual(runScripts(block).map((s) => s.trim()), ["node base-notary/scripts/ci-candidate-result.mjs"]);
+    assert.match(block, /^ {10}HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}$/m);
+    assert.match(block, /^ {4}timeout-minutes: \d+$/m, "a poller must not run for the 6-hour default");
+    // The job name is what scripts/pr-court.mjs looks the suite result up by.
+    assert.match(block, /^ {4}name: Candidate Tests \(advisory\)$/m);
   });
 
   it("the notary runs after both measurement jobs whatever their result", () => {
@@ -189,5 +211,50 @@ describe("mergeproof workflow: self-gate-proof structure", () => {
     assert.match(evaluate, /PHI_SPENT: \$\{\{ steps\.phi_warrant\.outputs\.spent \}\}/);
     assert.match(evaluate, /if \[ -n "\$PHI_SPENT" \]; then\s+reviewer_args\+=\(--phi-warrant "\$PHI_WARRANT" --phi-spent "\$PHI_SPENT"\)/);
     assert.ok(steps.indexOf(measure) < steps.indexOf(evaluate));
+  });
+});
+
+describe("mergeproof candidate workflow: PR code stays out of the base context", () => {
+  it("triggers only on pull_request, never in the base-branch context", () => {
+    assert.match(candidateWf, /^ {2}pull_request:\n {4}types: \[opened, synchronize, reopened, ready_for_review\]$/m);
+    assert.doesNotMatch(candidateWf, /^\s*pull_request_target:/m);
+    assert.doesNotMatch(candidateWf, /^\s*workflow_run:/m);
+    assert.doesNotMatch(candidateWf, /^\s*issue_comment:/m);
+  });
+
+  it("the file the reader looks up is this one, on this event", () => {
+    const reader = readFileSync(join(ROOT, "scripts", "ci-candidate-result.mjs"), "utf8");
+    assert.match(reader, /const WORKFLOW_FILE = "mergeproof-candidate\.yml";/);
+    assert.match(reader, /r\?\.event === "pull_request"/);
+  });
+
+  it("holds contents: read and nothing else: no write, no secret, no token, no cache", () => {
+    assert.match(candidateWf, /^permissions:\n {2}contents: read\n\n/m);
+    assert.doesNotMatch(candidateWf, /:\s*write\s*$/m);
+    assert.doesNotMatch(candidateWf, /secrets\./);
+    assert.doesNotMatch(candidateWf, /github\.token/);
+    assert.doesNotMatch(candidateWf, /uses:\s*actions\/cache/);
+    assert.doesNotMatch(candidateWf, /^\s*cache:/m);
+    assert.doesNotMatch(candidateWf, /upload-artifact/);
+  });
+
+  it("every checkout keeps persist-credentials: false", () => {
+    const checkouts = candidateWf.split(/^ {6}- /m).filter((s) => /uses:\s*actions\/checkout@/.test(s));
+    assert.equal(checkouts.length, 2);
+    for (const step of checkouts) assert.match(step, /persist-credentials:\s*false/);
+  });
+
+  it("the base notary's runner judges the candidate tree (Law 7)", () => {
+    assert.match(candidateWf, /ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}\n\s+persist-credentials: false\n\s+path: candidate/);
+    assert.match(candidateWf, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}\n\s+persist-credentials: false\n\s+path: base-notary/);
+    assert.match(candidateWf, /working-directory: candidate\n\s+run: MIRQL_TEST_ROOT="\$PWD" node \.\.\/base-notary\/scripts\/run-tests\.mjs/);
+    assert.doesNotMatch(candidateWf, /node candidate\//);
+  });
+
+  it("is bounded, so the reader's wait can outlast it", () => {
+    const [, suite] = candidateWf.match(/^ {4}timeout-minutes: (\d+)$/m) ?? [];
+    assert.equal(Number(suite), 15);
+    const [, reader] = jobBlock("candidate-tests").match(/^ {4}timeout-minutes: (\d+)$/m) ?? [];
+    assert.ok(Number(reader) > 20, "the reader's job must outlast its own 20-minute wait");
   });
 });
