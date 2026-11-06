@@ -168,6 +168,44 @@ describe("issue builder", () => {
     assert.match(r.posts[0], /NEED_FILES_UNREADABLE/);
   });
 
+  it("asks again when the model requests a file it was already sent, then builds", async () => {
+    const r = await build({ replies: [{ verdict: "NEED_FILES", files: ["src.mjs"] }, BUILD] });
+    assert.equal(r.code, 0);
+    assert.equal(r.llm.length, 2);
+    assert.match(r.llm[1].messages.at(-1).content, /export const a = 1;/);
+    assert.equal(r.pushes.length, 1);
+  });
+
+  it("asks again when the model requests no files at all, then builds", async () => {
+    const r = await build({ replies: [{ verdict: "NEED_FILES", files: [] }, BUILD] });
+    assert.equal(r.code, 0);
+    assert.equal(r.llm.length, 2);
+    assert.equal(r.pushes.length, 1);
+  });
+
+  it("ends with TOO_MANY_FILE_REQUESTS when the model keeps re-asking harmlessly", async () => {
+    const r = await build({ replies: [{ verdict: "NEED_FILES", files: ["src.mjs"] }, { verdict: "NEED_FILES", files: [] }, { verdict: "NEED_FILES", files: ["src.mjs"] }] });
+    assert.equal(r.code, 1);
+    assert.equal(r.llm.length, 3);
+    assert.match(r.posts[0], /TOO_MANY_FILE_REQUESTS/);
+    assert.equal(r.pushes.length, 0);
+  });
+
+  it("still stops when a request mixes a sent file with an unreadable one", async () => {
+    const r = await build({ replies: [{ verdict: "NEED_FILES", files: ["src.mjs", "missing.mjs"] }] });
+    assert.equal(r.code, 1);
+    assert.equal(r.llm.length, 1);
+    assert.match(r.posts[0], /NEED_FILES_UNREADABLE/);
+  });
+
+  it("still stops when a new file is refused because the file limit was reached", async () => {
+    const libs = Object.fromEntries("abcdefghijk".split("").map((c) => [`lib/${c}.mjs`, `export const ${c} = 1;\n`]));
+    const r = await build({ issue: { ...ISSUE, body: `Change src.mjs and ${Object.keys(libs).join(" ")}.` }, files: libs, replies: [{ verdict: "NEED_FILES", files: ["lib/z.mjs"] }] });
+    assert.equal(r.code, 1);
+    assert.equal(r.llm.length, 1);
+    assert.match(r.posts[0], /NEED_FILES_UNREADABLE/);
+  });
+
   it("stops before any model call without a push token", async () => {
     const r = await build({ env: { MIRQL_COURT_TOKEN: "" }, replies: [] });
     assert.equal(r.code, 1);
