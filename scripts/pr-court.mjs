@@ -229,7 +229,9 @@ function closeLinkedIssues(io, repo, prNumber) {
   try {
     const { closingIssuesReferences: linked } = JSON.parse(io.run("gh", ["pr", "view", String(prNumber), "--repo", repo, "--json", "closingIssuesReferences"]));
     for (const { number, url } of linked) {
-      if (url.startsWith(`https://github.com/${repo}/issues/`)) io.run("gh", ["issue", "close", String(number), "--repo", repo, "--reason", "completed", "--comment", `Done in #${prNumber}, merged by the PR Court.`]);
+      if (!url.startsWith(`https://github.com/${repo}/issues/`)) continue;
+      // Each close stands alone: one refusal must not doom the remaining issues.
+      try { io.run("gh", ["issue", "close", String(number), "--repo", repo, "--reason", "completed", "--comment", `Done in #${prNumber}, merged by the PR Court.`]); } catch (err) { console.log(`::warning::pr-court: PR ${prNumber} merged, but its linked issues may still be open (#${number}): ${err?.name}`); }
     }
   } catch (err) {
     console.log(`::warning::pr-court: PR ${prNumber} merged, but its linked issues may still be open: ${err?.name}`);

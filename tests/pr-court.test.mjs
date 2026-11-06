@@ -803,7 +803,7 @@ describe("court state machine", () => {
 describe("court landing", () => {
   const BASE = "d".repeat(40);
   const issueRef = (number, repo = "o/r") => ({ number, url: `https://github.com/${repo}/issues/${number}` });
-  function landingIo({ gate = "success", prHead = HEAD, state = "open", tip = BASE, runBase = BASE, run: runOverride = {}, after = null, linked = [], failOn = null } = {}) {
+  function landingIo({ gate = "success", prHead = HEAD, state = "open", tip = BASE, runBase = BASE, run: runOverride = {}, after = null, linked = [], failOn = null, failIssue = null } = {}) {
     const runs = [];
     let current = { id: 5, head_sha: HEAD, status: "completed", conclusion: gate === "success" ? "success" : "failure", run_attempt: 1, pull_requests: [{ base: { sha: runBase } }], ...runOverride };
     let jobGate = gate;
@@ -812,6 +812,7 @@ describe("court landing", () => {
       run: (cmd, args) => {
         runs.push([cmd, ...args]);
         if (args[1] === failOn) throw new Error(`${failOn} refused`);
+        if (args[1] === "close" && args[2] === failIssue) throw new Error(`close ${failIssue} refused`);
         if (args[1] === "rerun" && after) { current = { ...current, run_attempt: 2, conclusion: after }; jobGate = after; }
         return args[1] === "view" ? JSON.stringify({ closingIssuesReferences: linked }) : "";
       },
@@ -919,6 +920,16 @@ describe("court landing", () => {
       assert.match(said, /::warning::.*PR 7 merged.*linked issues/);
       assert.ok(!said.includes(`${failOn} refused`), "only the error name is logged");
     }
+  });
+
+  it("keeps closing the other linked issues when one close fails, and names the failed one", async () => {
+    const io = landingIo({ linked: [issueRef(93), issueRef(95)], failIssue: "93" });
+    let outcome;
+    const said = await capturingLog(async () => { outcome = await land(io); });
+    assert.equal(outcome, "MERGED");
+    assert.deepEqual(closes(io).map((r) => r[3]), ["93", "95"]);
+    assert.match(said, /::warning::.*\(#93\): Error/);
+    assert.ok(!said.includes("close 93 refused"), "only the error name is logged");
   });
 
   it("closes no issue when the merge fails or never runs", async () => {
