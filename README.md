@@ -235,6 +235,7 @@ the `MIRQL_PHI_WARRANT` repository variable. CI verifies the signature against
 `policy/phi-warrant-key.json` from the base branch and adds up spend from merged
 history since the warrant's `base_sha`, as Law 13 requires: every increase counts
 and a decrease refunds nothing. Deleting the variable revokes it at once.
+`node scripts/phi-warrant.mjs status` shows how much is left.
 
 GitHub enforces that only when `main` requires the Mergeproof check and agents
 use an identity without merge rights; otherwise an agent can merge over red.
