@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 // scripts/phi-warrant.mjs — the owner's commands for the standing Phi warrant (Law 13).
 //
+//   node scripts/phi-warrant.mjs init --key <owner key file>
 //   node scripts/phi-warrant.mjs pin --key <owner key file>
 //   node scripts/phi-warrant.mjs grant --budget <n> --key <owner key file>
 //
+// `init` creates a new Ed25519 owner key at that path, encrypted with the
+// passphrase from MIRQL_HUMAN_PASSPHRASE; the private key never lands on disk
+// in plaintext, and an existing key file is never replaced.
 // `pin` writes the owner's public key to policy/phi-warrant-key.json; commit it
 // through a PR. `grant` signs an allowance of <n> Phi, counted from the current
 // default branch tip, and stores it in the MIRQL_PHI_WARRANT repository variable.
@@ -17,7 +21,7 @@
 // `status` shows how much of the warrant is left, as CI counts it. It only reads,
 // so it needs no key and no terminal.
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,12 +29,12 @@ import { parseArgs } from "node:util";
 
 import { signEvent } from "../packages/core/ed25519.mjs";
 import { PHI_WARRANT_DOMAIN, PHI_WARRANT_PIN_PATH, readPhiWarrantPin, verifyPhiWarrant } from "../packages/core/phi-warrant.mjs";
-import { requireHumanKey } from "../packages/inbox/keys.mjs";
+import { createOwnerKey, requireHumanKey } from "../packages/inbox/keys.mjs";
 import { measurePhiWarrant } from "./ci-phi-warrant.mjs";
 import { isEntrypoint } from "./ci-review-gate.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const USAGE = "usage: node scripts/phi-warrant.mjs pin --key <file> | grant --budget <n> --key <file> | status";
+const USAGE = "usage: node scripts/phi-warrant.mjs init --key <file> | pin --key <file> | grant --budget <n> --key <file> | status";
 
 function gh(args) {
   const res = spawnSync("gh", args, { encoding: "utf8" });
@@ -51,6 +55,25 @@ async function askOnTerminal(question) {
 function pin(owner, rootDir, log) {
   writeFileSync(join(rootDir, PHI_WARRANT_PIN_PATH), `${JSON.stringify({ keyId: owner.keyId, publicKey: owner.publicKey })}\n`);
   log(`Wrote ${PHI_WARRANT_PIN_PATH} for ${owner.keyId}. Commit it through a PR; CI reads the pin only from the base branch.`);
+  return 0;
+}
+
+function init(keyPath, { rootDir, log, createKey = createOwnerKey, readKey = requireHumanKey } = {}) {
+  if (!keyPath) {
+    log(USAGE);
+    return 2;
+  }
+  const made = createKey(keyPath);
+  try {
+    const owner = readKey(join(rootDir, ".mirql"), { key: made.key_path });
+    if (owner.keyId !== made.keyId || owner.publicKey !== made.publicKey) {
+      throw new Error(`the new key at ${made.key_path} did not reopen to the same public key`);
+    }
+  } catch (err) {
+    rmSync(made.key_path, { force: true });
+    throw err;
+  }
+  log(`Created owner key ${made.key_path} (${made.keyId})`);
   return 0;
 }
 
@@ -98,7 +121,7 @@ function status({ rootDir, runGh, log }) {
   return 0;
 }
 
-export async function run(argv, { runGh = gh, ask = askOnTerminal, isTty = process.stdin.isTTY, log = console.log, rootDir = ROOT, now = () => new Date() } = {}) {
+export async function run(argv, { runGh = gh, ask = askOnTerminal, isTty = process.stdin.isTTY, log = console.log, rootDir = ROOT, now = () => new Date(), createKey = createOwnerKey, readKey = requireHumanKey } = {}) {
   let parsed;
   try {
     parsed = parseArgs({ args: argv, allowPositionals: true, options: { key: { type: "string" }, budget: { type: "string" } } });
@@ -107,7 +130,7 @@ export async function run(argv, { runGh = gh, ask = askOnTerminal, isTty = proce
     return 2;
   }
   const { positionals: [command], values } = parsed;
-  if (parsed.positionals.length !== 1 || !["pin", "grant", "status"].includes(command)) {
+  if (parsed.positionals.length !== 1 || !["init", "pin", "grant", "status"].includes(command)) {
     log(USAGE);
     return 2;
   }
@@ -116,6 +139,7 @@ export async function run(argv, { runGh = gh, ask = askOnTerminal, isTty = proce
     log("phi-warrant: refusing to run without a terminal; the owner runs this by hand.");
     return 2;
   }
+  if (command === "init") return init(values.key, { rootDir, log, createKey, readKey });
   const owner = requireHumanKey(join(rootDir, ".mirql"), { key: values.key });
   return command === "pin" ? pin(owner, rootDir, log) : grant(owner, values.budget, { rootDir, runGh, ask, log, now });
 }
