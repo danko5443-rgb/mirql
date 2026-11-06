@@ -241,6 +241,28 @@ describe("phi warrant: spend from merged history", () => {
     });
   });
 
+  it("status reports the same spend CI counts, without a key or a terminal", async () => {
+    await withHistory(async ({ dir, base, tip }) => {
+      const warrant = sign(OWNER, { base_sha: base, phi_budget: 100000 });
+      const { phi_spent: spent } = measure(dir, tip, warrant);
+      const calls = [];
+      const logs = [];
+      const runGh = (args) => { calls.push(args); return args[0] === "api" ? `${tip}\n` : `${JSON.stringify(warrant)}\n`; };
+      assert.equal(await run(["status"], { isTty: false, rootDir: dir, log: (line) => logs.push(line), runGh }), 0);
+      assert.match(logs.join("\n"), new RegExp(`${spent} of 100000 spent, ${100000 - spent} left`));
+      assert.equal(calls.some((args) => args.includes("set")), false, "status only reads");
+    });
+  });
+
+  it("status says why there is no allowance, and exits 1", async () => {
+    await withHistory(async ({ dir, tip }) => {
+      const logs = [];
+      const runGh = (args) => (args[0] === "api" ? `${tip}\n` : "\n");
+      assert.equal(await run(["status"], { isTty: false, rootDir: dir, log: (line) => logs.push(line), runGh }), 1);
+      assert.match(logs.join("\n"), /No Phi allowance: NO_WARRANT/);
+    });
+  });
+
   it("the remaining allowance floors at 0", () => {
     withHistory(({ dir, base, tip }) => {
       assert.equal(measure(dir, tip, sign(OWNER, { base_sha: base, phi_budget: 1 })).phi_remaining, 0);

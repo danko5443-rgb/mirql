@@ -11,6 +11,11 @@
 //
 // Run these yourself, in a terminal; they refuse to run without one. An encrypted
 // key reads its passphrase from MIRQL_HUMAN_PASSPHRASE.
+//
+//   node scripts/phi-warrant.mjs status
+//
+// `status` shows how much of the warrant is left, as CI counts it. It only reads,
+// so it needs no key and no terminal.
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
@@ -21,10 +26,11 @@ import { parseArgs } from "node:util";
 import { signEvent } from "../packages/core/ed25519.mjs";
 import { PHI_WARRANT_DOMAIN, PHI_WARRANT_PIN_PATH, readPhiWarrantPin, verifyPhiWarrant } from "../packages/core/phi-warrant.mjs";
 import { requireHumanKey } from "../packages/inbox/keys.mjs";
+import { measurePhiWarrant } from "./ci-phi-warrant.mjs";
 import { isEntrypoint } from "./ci-review-gate.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const USAGE = "usage: node scripts/phi-warrant.mjs pin --key <file> | grant --budget <n> --key <file>";
+const USAGE = "usage: node scripts/phi-warrant.mjs pin --key <file> | grant --budget <n> --key <file> | status";
 
 function gh(args) {
   const res = spawnSync("gh", args, { encoding: "utf8" });
@@ -79,6 +85,19 @@ async function grant(owner, budgetText, { rootDir, runGh, ask, log, now }) {
   return 0;
 }
 
+function status({ rootDir, runGh, log }) {
+  const tipSha = runGh(["api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha"]).trim();
+  // `gh variable get` fails the same way for an unset variable and a network error; a listing tells them apart.
+  const document = runGh(["variable", "list", "--json", "name,value", "--jq", '.[] | select(.name == "MIRQL_PHI_WARRANT") | .value']).trim();
+  const result = measurePhiWarrant({ rootDir, repoDir: rootDir, tipSha, document });
+  if (!result.ok) {
+    log(`No Phi allowance: ${result.reason}. If this names a missing commit or pin, run git fetch and update to the default branch.`);
+    return 1;
+  }
+  log(`Phi warrant: ${result.phi_spent} of ${result.phi_budget} spent, ${result.phi_remaining} left, at default branch commit ${tipSha}.`);
+  return 0;
+}
+
 export async function run(argv, { runGh = gh, ask = askOnTerminal, isTty = process.stdin.isTTY, log = console.log, rootDir = ROOT, now = () => new Date() } = {}) {
   let parsed;
   try {
@@ -88,10 +107,11 @@ export async function run(argv, { runGh = gh, ask = askOnTerminal, isTty = proce
     return 2;
   }
   const { positionals: [command], values } = parsed;
-  if (parsed.positionals.length !== 1 || !["pin", "grant"].includes(command)) {
+  if (parsed.positionals.length !== 1 || !["pin", "grant", "status"].includes(command)) {
     log(USAGE);
     return 2;
   }
+  if (command === "status") return status({ rootDir, runGh, log });
   if (!isTty) {
     log("phi-warrant: refusing to run without a terminal; the owner runs this by hand.");
     return 2;
