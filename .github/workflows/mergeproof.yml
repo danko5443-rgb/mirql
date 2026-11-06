@@ -199,6 +199,19 @@ jobs:
           gh api --paginate "repos/$REPO/issues/$PR_NUMBER/events" --jq '.[]' > "$EVENTS_PATH"
           node base-notary/scripts/ci-owner-signoff.mjs
 
+      # The owner's standing Phi allowance (Law 13): a signed warrant in a
+      # repository variable, spend measured from merged history by the base copy
+      # of the script. Any failure here only means no allowance, so a broken
+      # measurement cannot turn a PR that needs no warrant red.
+      - name: Measure Phi Warrant Spend (Base Copy)
+        id: phi_warrant
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          PHI_WARRANT: ${{ vars.MIRQL_PHI_WARRANT }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: node base-notary/scripts/ci-phi-warrant.mjs
+
       # The evaluator reads policy/paths.yaml and runs its Law 7 git
       # cross-check from its working directory, so it runs from base-notary
       # (BASE policy — never the candidate's copy). This step copies the
@@ -220,6 +233,8 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           AI_APPROVER: ${{ steps.ai_review.outputs.approver }}
           OWNER_SIGNOFF: ${{ steps.owner_signoff.outputs.owner }}
+          PHI_WARRANT: ${{ vars.MIRQL_PHI_WARRANT }}
+          PHI_SPENT: ${{ steps.phi_warrant.outputs.spent }}
           PR_DOC: ${{ github.workspace }}/pr-doc.json
         working-directory: base-notary
         run: |
@@ -233,6 +248,10 @@ jobs:
           # Only the owner's sign-off can clear Phi growth; an AI approval cannot.
           if [ -n "$OWNER_SIGNOFF" ]; then
             reviewer_args+=(--owner-signoff "$OWNER_SIGNOFF")
+          fi
+          # The evaluator verifies the signature itself against the base pin.
+          if [ -n "$PHI_SPENT" ]; then
+            reviewer_args+=(--phi-warrant "$PHI_WARRANT" --phi-spent "$PHI_SPENT")
           fi
           set +e
           node bin/mirql.mjs m check \

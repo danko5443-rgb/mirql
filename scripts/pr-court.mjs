@@ -11,6 +11,7 @@ import { signoffLabel } from "./ci-owner-signoff.mjs";
 import { checkSwallowedExceptions, checkTestWeakenings, isHumanOnlyPath, loadPathPolicies } from "../packages/core/anti-cheat.mjs";
 import { isReviewerConfigPath } from "../packages/mergeproof/evaluator.mjs";
 import { computeGitTreePhi, computePhi } from "../packages/run/phi.mjs";
+import { measurePhiWarrant } from "./ci-phi-warrant.mjs";
 import { callCourtModel, COURT_ACTOR, COURT_MODEL_TIMEOUT_MS, collectExternalFindings, findAiApproval, hasApproveCommand, hasLateChanges, inspectReviewStatus, isEntrypoint, parseCourtState, parseReviews, scanDiffHazards } from "./ci-review-gate.mjs";
 
 const MAX_ROUNDS = 3;
@@ -24,6 +25,9 @@ const MAX_BODY_CHARS = 60000;
 const MAX_NOTARY_ATTEMPTS = 5;
 const TRUSTED_AUTHORS = ["OWNER", "MEMBER", "COLLABORATOR"];
 const NOTARY_JOBS = { head: "Candidate Tests (advisory)", base: "Base Suite (evidence)", gate: "Mergeproof Conscience Gate" };
+// A PR touching roles/judge.md can never clear the gate, so this rule lives with the check it describes.
+const JUDGE_PHI_WARRANT_RULE = "## Phi warrant\n\nFor this run the Phi precondition above reads `delta_phi <= phiAllowance`. The repo owner signed a Phi warrant, and the tool verified it and checked that this growth fits what is left of it (Law 13). Growth inside it is authorized and is not a constitutional hazard by itself.";
+const allowanceOf = (value) => (Number.isSafeInteger(value) && value > 0 ? value : 0);
 const clip = (value, max) => String(value ?? "").slice(0, max);
 const log = (message) => console.log(`pr-court: ${message}`);
 
@@ -136,7 +140,7 @@ async function runCriticRound({ diffText = "", headSha, round = 1, authorAssocia
   return reply ? { ok: true, ...reply } : { ok: false, reason: "LLM_INVALID_REPLY" };
 }
 
-async function runAdvocateRound({ repoDir, diffText = "", authorAssociation, findings = [], basePhi, round = 1, policies, env, fetchImpl, rolePrompt = "", commit = null }) {
+async function runAdvocateRound({ repoDir, diffText = "", authorAssociation, findings = [], basePhi, phiAllowance = 0, round = 1, policies, env, fetchImpl, rolePrompt = "", commit = null }) {
   const escalate = (reason, extra = {}) => ({ ok: true, verdict: "ESCALATE", reason, ...extra });
   if (round > MAX_ROUNDS) return escalate("MAX_ROUNDS");
   const refused = refusalReason(diffText, authorAssociation);
@@ -147,7 +151,7 @@ async function runAdvocateRound({ repoDir, diffText = "", authorAssociation, fin
     if (abs) contents[file] = clip(readFileSync(abs, "utf8"), MAX_FILE_CHARS);
   }
   const headPhi = computePhi(repoDir).total;
-  const user = fenceData({ round, phi_budget: { base_phi: basePhi, head_phi: headPhi, delta_phi: headPhi - basePhi }, findings, diff: diffText, file_contents: contents });
+  const user = fenceData({ round, phi_budget: { base_phi: basePhi, head_phi: headPhi, delta_phi: headPhi - basePhi, phi_allowance: allowanceOf(phiAllowance) }, findings, diff: diffText, file_contents: contents });
   const res = await callCourtModel({ role: "advocate", system: rolePrompt, user, env, fetchImpl });
   if (!res.ok) return res;
   const reply = validateAdvocate(res.data, findings);
@@ -160,7 +164,7 @@ async function runAdvocateRound({ repoDir, diffText = "", authorAssociation, fin
   try {
     for (const { abs, next } of staged.files.values()) writeFileSync(abs, next);
     const phi = computePhi(repoDir).total;
-    if (!Number.isSafeInteger(basePhi) || phi > basePhi) { restore(); return escalate("PHI_INCREASE", reply); }
+    if (!Number.isSafeInteger(basePhi) || phi > basePhi + allowanceOf(phiAllowance)) { restore(); return escalate("PHI_INCREASE", reply); }
     if (!commit) { restore(); return escalate("NO_PUSH_TOKEN", reply); }
     return { ok: true, verdict: "FIXED", headSha: commit([...staged.files.keys()]), ...reply };
   } catch (err) {
@@ -176,8 +180,9 @@ async function runJudgeArbitration({ diffText = "", files = [], headSha, authorA
   const locked = lockedFiles(files, policies);
   if (locked.length > 0) return refuse(`COURTHOUSE_LOCK: ${locked.slice(0, 10).join(", ")}`);
   if (evidence.suitePassBase !== true || evidence.suitePassHead !== true) return refuse("SUITE_NOT_GREEN", "WAIT");
-  if (!Number.isSafeInteger(evidence.deltaPhi) || evidence.deltaPhi > 0) return refuse(`DELTA_PHI: ${evidence.deltaPhi}`);
-  const res = await callCourtModel({ role: "judge", system: rolePrompt, user: fenceData({ head_sha: headSha, round, evidence, findings, transcript, diff: diffText }), env, fetchImpl });
+  if (!Number.isSafeInteger(evidence.deltaPhi) || evidence.deltaPhi > allowanceOf(evidence.phiAllowance)) return refuse(`DELTA_PHI: ${evidence.deltaPhi}`);
+  const system = evidence.deltaPhi > 0 ? `${rolePrompt}\n\n${JUDGE_PHI_WARRANT_RULE}` : rolePrompt;
+  const res = await callCourtModel({ role: "judge", system, user: fenceData({ head_sha: headSha, round, evidence, findings, transcript, diff: diffText }), env, fetchImpl });
   if (!res.ok) return res;
   const ruling = validateJudge(res.data, findings);
   if (!ruling) return { ok: false, reason: "LLM_INVALID_REPLY" };
@@ -299,11 +304,11 @@ const COURT_STEPS = {
     post({ round: state.advocateRounds + 1, role: "critic", verdict: res.verdict, count: res.findings.length, payload: { findings: res.findings }, text: [res.summary, ...list].join("\n") });
     return null;
   },
-  async advocate({ ctx, snapshot, post, fail, state, prompt, findings, basePhi, env, io, pr }) {
+  async advocate({ ctx, snapshot, post, fail, state, prompt, findings, basePhi, phiAllowance, env, io, pr }) {
     const round = state.advocateRounds + 1;
     const token = env.MIRQL_COURT_TOKEN;
     const commit = token ? (files) => pushFix(io, ctx.repoDir, files, pr.head.ref, token, round, env) : null;
-    const res = await runAdvocateRound({ ...ctx, diffText: snapshot().diffText, findings, basePhi: basePhi(), round, rolePrompt: prompt("advocate"), commit });
+    const res = await runAdvocateRound({ ...ctx, diffText: snapshot().diffText, findings, basePhi: basePhi(), phiAllowance: phiAllowance(), round, rolePrompt: prompt("advocate"), commit });
     if (!res.ok) return fail(res);
     if (res.verdict === "ESCALATE" || res.verdict === "RECUSE") { post({ round, role: "judge", verdict: res.verdict, text: advocateText(res) }); return 0; }
     const titled = (id) => { const f = findings.find((x) => x.id === id); return `${f.file}:${f.line} ${f.title}`; };
@@ -311,11 +316,11 @@ const COURT_STEPS = {
     post({ round, headSha: res.headSha, role: "advocate", verdict: res.verdict, count: responses.length, payload: { responses }, text: advocateText(res) });
     return res.verdict === "FIXED" ? 0 : null;
   },
-  async judge({ ctx, snapshot, post, fail, state, prompt, findings, basePhi, judgeRound, io, repo }) {
+  async judge({ ctx, snapshot, post, fail, state, prompt, findings, basePhi, phiAllowance, judgeRound, io, repo }) {
     const notary = notaryRun(io, repo, ctx.headSha);
     if (!["success", "failure"].includes(notary?.head) || !["success", "failure"].includes(notary?.base)) return 0;
     const { diffText, files } = snapshot();
-    const evidence = { suitePassBase: notary.base === "success", suitePassHead: notary.head === "success", deltaPhi: computeGitTreePhi(ctx.repoDir, ctx.headSha).metrics.total - basePhi() };
+    const evidence = { suitePassBase: notary.base === "success", suitePassHead: notary.head === "success", deltaPhi: computeGitTreePhi(ctx.repoDir, ctx.headSha).metrics.total - basePhi(), phiAllowance: phiAllowance() };
     const res = await runJudgeArbitration({ ...ctx, diffText, files, evidence, findings, transcript: state.transcript, round: judgeRound, rolePrompt: prompt("judge") });
     if (!res.ok) return fail(res);
     if (res.verdict === "WAIT") return 0; // A red suite posts nothing, so a green re-run can come back.
@@ -365,6 +370,15 @@ async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl 
     const fresh = externalFindings.filter((f) => !state.findings.some((known) => known.id === f.id));
     const findings = name === "advocate" ? [...state.openFindings, ...fresh.filter((f) => !state.answered.includes(f.id))] : [...state.findings, ...fresh];
     let baseTotal = null;
+    let warrantRemaining = null;
+    const phiAllowance = () => {
+      if (warrantRemaining === null) {
+        const measured = measurePhiWarrant({ rootDir: baseDir, repoDir, tipSha: baseSha, document: env.MIRQL_PHI_WARRANT });
+        log(`phi warrant: ${JSON.stringify(measured)}`);
+        warrantRemaining = measured.ok ? measured.phi_remaining : 0;
+      }
+      return warrantRemaining;
+    };
     const post = (receipt) => {
       // Receipts bind to the head that was reviewed; a push during the LLM call voids this one.
       if (!receipt.headSha && io.api(`repos/${repo}/pulls/${prNumber}`).head.sha !== headSha) throw new Error("HEAD_MOVED during review");
@@ -377,6 +391,7 @@ async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl 
       prompt: (role) => loadRolePrompt(baseDir, role),
       snapshot,
       basePhi: () => { baseTotal ??= computeGitTreePhi(repoDir, baseSha).metrics.total; return baseTotal; },
+      phiAllowance,
     });
     if (code !== null) return code;
   }

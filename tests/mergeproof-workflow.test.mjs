@@ -196,6 +196,22 @@ describe("mergeproof workflow: self-gate-proof structure", () => {
     assert.match(evaluate, /if \[ -n "\$OWNER_SIGNOFF" \]; then\s+reviewer_args\+=\(--owner-signoff "\$OWNER_SIGNOFF"\)/);
     assert.doesNotMatch(evaluate, /--owner-signoff "\$(REVIEWER|AI_APPROVER)"/);
   });
+
+  it("Phi warrant spend comes from the base copy, and a failure there cannot break the gate", () => {
+    const steps = stepsOf(jobBlock("notary"));
+    const measure = steps.find((s) => /Measure Phi Warrant Spend/.test(s));
+    assert.ok(measure, "phi warrant step must exist");
+    assert.match(measure, /run: node base-notary\/scripts\/ci-phi-warrant\.mjs/);
+    assert.match(measure, /continue-on-error: true/);
+    assert.match(measure, /timeout-minutes: \d/);
+    assert.match(measure, /PHI_WARRANT: \$\{\{ vars\.MIRQL_PHI_WARRANT \}\}/);
+    assert.match(measure, /BASE_SHA: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
+    assert.doesNotMatch(measure, /head\.sha/);
+    const evaluate = steps.find((s) => /Evaluate Mergeproof/.test(s));
+    assert.match(evaluate, /PHI_SPENT: \$\{\{ steps\.phi_warrant\.outputs\.spent \}\}/);
+    assert.match(evaluate, /if \[ -n "\$PHI_SPENT" \]; then\s+reviewer_args\+=\(--phi-warrant "\$PHI_WARRANT" --phi-spent "\$PHI_SPENT"\)/);
+    assert.ok(steps.indexOf(measure) < steps.indexOf(evaluate));
+  });
 });
 
 describe("mergeproof candidate workflow: PR code stays out of the base context", () => {

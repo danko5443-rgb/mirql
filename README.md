@@ -225,8 +225,17 @@ residual risk.
 
 The CI notary runs without a ledger, so its default $\Phi$ allowance is 0. A pull
 request that grows $\Phi$ is rejected in CI (`PHI_INCREASE`) before surface-review
-holds (`MP-005`), unless the repository owner explicitly signs off on the exact
-head commit (`reviewed:<head sha>`).
+holds (`MP-005`), unless the growth fits the owner's signed Phi warrant or the
+repository owner explicitly signs off on the exact head commit (`reviewed:<head sha>`).
+
+The Phi warrant is the owner's standing allowance, so ordinary growth needs no
+sign-off per pull request. The owner signs it once with
+`node scripts/phi-warrant.mjs grant --budget <n> --key <file>`, which stores it in
+the `MIRQL_PHI_WARRANT` repository variable. CI verifies the signature against
+`policy/phi-warrant-key.json` from the base branch and adds up spend from merged
+history since the warrant's `base_sha`, as Law 13 requires: every increase counts
+and a decrease refunds nothing. Deleting the variable revokes it at once.
+
 GitHub enforces that only when `main` requires the Mergeproof check and agents
 use an identity without merge rights; otherwise an agent can merge over red.
 
@@ -247,19 +256,19 @@ To eliminate manual review bottlenecks and recover from external bot rate limits
 
 1. **Courthouse Lock (`humanOnly` in [`policy/paths.yaml`](policy/paths.yaml)):**
    - Only the files that define the laws, the CI gate wiring, and the Judge's own instructions remain locked in `humanOnly`: `CONSTITUTION.md`, `NOT-ROADMAP.md`, `policy/**`, `.github/**`, `roles/judge.md`, `.coderabbit.yaml`, `.coderabbit.yml`, and `AGENTS.md`.
-   - Engineering paths (`bin/**`, `scripts/**`, `conformance/**`, `schemas/**`, `roles/**`, and the core `packages/` paths listed in the policy) sit in `humanApprove` (`MP-005`), allowing the PR Court and verified AI reviewers to review and clear them without `MP-001` rejection while still enforcing **Law 13** ($\Delta\Phi \le 0$) and anti-cheat rules (`MP-002`, `MP-003`).
+   - Engineering paths (`bin/**`, `scripts/**`, `conformance/**`, `schemas/**`, `roles/**`, and the core `packages/` paths listed in the policy) sit in `humanApprove` (`MP-005`), allowing the PR Court and verified AI reviewers to review and clear them without `MP-001` rejection while still enforcing **Law 13** ($\Delta\Phi$ within the signed Phi warrant, otherwise $\le 0$) and anti-cheat rules (`MP-002`, `MP-003`).
    - PR Court receipts (`mirql-judge[bot]`, `mirql-critic[bot]`) never clear `humanOnly` paths or reviewer configuration files (`AI_REVIEWER_CONFIG_PATTERNS`, including `roles/judge.md`).
 2. **The 3 Court Roles (up to 3 Ping-Pong rounds per PR):**
-   - **Critic (`roles/critic.md`):** Independent fallback reviewer when external bots (`coderabbitai[bot]`, `chatgpt-codex-connector[bot]`) are rate-limited or absent. Evaluates nonce-fenced diffs strictly as untrusted data and emits `APPROVE` or `COMMENT` with P1/P2 findings while respecting **Law 13** ($\Delta\Phi \le 0$).
-   - **Advocate (`roles/advocate.md`):** Ping-Pong responder that answers every open finding from Codex, CodeRabbit, or Critic with either `AGREE_AND_FIX` (minimal search/replace patches verified in-memory against the Courthouse Lock, `MP-002`, `MP-003`, and $\Delta\Phi \le 0$ before committing and pushing via `MIRQL_COURT_TOKEN`) or `REBUT` (evidence-backed rebuttal citing exact files, line ranges, test pins, or Constitutional laws).
-   - **Judge (`roles/judge.md`):** Final constitutional arbiter invoked only after deterministic preconditions pass (`OWNER`/`MEMBER`/`COLLABORATOR` author, zero diff hazards, no Courthouse Lock path touched, `Candidate Tests` and `Base Suite` green, and $\Delta\Phi \le 0$). Verifies that `AGREE_AND_FIX` patches landed in `HEAD`, adjudicates `REBUT` arguments (`FIXED`, `OVERRULED_FALSE_POSITIVE`, or `UNRESOLVED`), and emits `MERGE`, `REMAND` (when `round < 3`), or `ESCALATE` (when `round >= 3` or uncertain).
+   - **Critic (`roles/critic.md`):** Independent fallback reviewer when external bots (`coderabbitai[bot]`, `chatgpt-codex-connector[bot]`) are rate-limited or absent. Evaluates nonce-fenced diffs strictly as untrusted data and emits `APPROVE` or `COMMENT` with P1/P2 findings while respecting **Law 13**.
+   - **Advocate (`roles/advocate.md`):** Ping-Pong responder that answers every open finding from Codex, CodeRabbit, or Critic with either `AGREE_AND_FIX` (minimal search/replace patches verified in-memory against the Courthouse Lock, `MP-002`, `MP-003`, and the $\Phi$ allowance before committing and pushing via `MIRQL_COURT_TOKEN`) or `REBUT` (evidence-backed rebuttal citing exact files, line ranges, test pins, or Constitutional laws).
+   - **Judge (`roles/judge.md`):** Final constitutional arbiter invoked only after deterministic preconditions pass (`OWNER`/`MEMBER`/`COLLABORATOR` author, zero diff hazards, no Courthouse Lock path touched, `Candidate Tests` and `Base Suite` green, and $\Delta\Phi$ within what is left of the signed Phi warrant, or $\le 0$ without one). Verifies that `AGREE_AND_FIX` patches landed in `HEAD`, adjudicates `REBUT` arguments (`FIXED`, `OVERRULED_FALSE_POSITIVE`, or `UNRESOLVED`), and emits `MERGE`, `REMAND` (when `round < 3`), or `ESCALATE` (when `round >= 3` or uncertain).
 3. **Receipts, Notary Re-Run, and Auto-Merge:**
    - Each role records a tamper-checked state marker (`<!-- mirql-court-state:v1 {...} -->`) in PR comments under the `github-actions[bot]` identity (`scripts/ci-review-gate.mjs`).
    - A verified Judge `MERGE` receipt clears `findAiApproval` as `mirql-judge[bot]` (overruling false-positive reviewer findings adjudicated on that exact `HEAD`), re-runs a failed `Mergeproof External Notary` gate if needed, and—when `MIRQL_COURT_AUTO_MERGE=1` is enabled—lands the PR with `gh pr merge --match-head-commit <head_sha>`.
 
 ### Owner Sign-Off (`reviewed:<head sha>`)
 
-For pull requests that touch the **Courthouse Lock** (`humanOnly`) or intentionally grow $\Phi$, the repository owner can sign off directly:
+For pull requests that touch the **Courthouse Lock** (`humanOnly`) or grow $\Phi$ beyond the signed Phi warrant, the repository owner can sign off directly:
 
 ```bash
 node scripts/owner-signoff.mjs <pr-number>

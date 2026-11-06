@@ -5,7 +5,7 @@ The PR Court is a three-role LLM review loop run by a deterministic tool from a 
 ## The flow
 
 1. **Critic** (`roles/critic.md`) reviews the diff and emits findings (verdict APPROVE or COMMENT, P1/P2 defects only). External reviewers (coderabbitai, codex-connector) supply findings instead when they are available; the Critic is the independent fallback when they are rate limited or absent.
-2. **Advocate** (`roles/advocate.md`) answers each finding: either AGREE_AND_FIX with minimal patches (kept complexity-neutral, `delta_phi <= 0`) or REBUT with evidence. The tool applies valid patches, commits, and pushes them.
+2. **Advocate** (`roles/advocate.md`) answers each finding: either AGREE_AND_FIX with minimal patches (kept within `delta_phi <= phi_allowance`, which is 0 without a signed Phi warrant) or REBUT with evidence. The tool applies valid patches, commits, and pushes them.
 3. **Judge** (`roles/judge.md`) rules on every finding — FIXED, OVERRULED_FALSE_POSITIVE, or UNRESOLVED — and issues the terminal verdict: MERGE, REMAND (another round, up to 3), or ESCALATE (a human takes over). A MERGE covers only what the Judge saw: a later reviewer finding reopens the case, and a later CHANGES_REQUESTED holds the merge.
 4. **Notary check:** after the Judge says MERGE, the tool reads the notary run for the final head. If the gate is not green, it re-runs that run's failed jobs (`gh run rerun --failed`, up to 5 attempts) and waits; a job that already passed is not repeated. Only a green gate on that exact head, measured against the current base tip, authorizes the merge (Law 5: Base-Pinned Mortal Verdicts).
 5. **Merge** is executed by the tool, never by an LLM role.
@@ -26,7 +26,7 @@ Note the boundary of the lock in "Known limits" below: `scripts/**` and `package
 
 ## RECUSE and ESCALATE
 
-RECUSE means the court declines to rule: a locked path, an untrusted author, or a `delta_phi` above 0. It ends the court's work on that head but says nothing about the PR, so an external approval still clears the review gate. ESCALATE and REMAND are rulings against the PR, and they block the gate even over an external approval.
+RECUSE means the court declines to rule: a locked path, an untrusted author, or a `delta_phi` above what is left of the owner's signed Phi warrant (0 when there is none). It ends the court's work on that head but says nothing about the PR, so an external approval still clears the review gate. ESCALATE and REMAND are rulings against the PR, and they block the gate even over an external approval.
 
 A diff hazard (an injection phrase, Trojan unicode, or an oversized diff) escalates, because text that could fool the court could fool an external reviewer too. An owner sign-off can still clear it.
 
@@ -42,6 +42,7 @@ A red suite posts no receipt at all, so the court comes back when a re-run turns
 ### Repository variables
 
 - **`MIRQL_COURT_AUTO_MERGE=1`:** enables merging. Default is off; with it unset, the court stops at the Judge's verdict and a human lands the PR.
+- **`MIRQL_PHI_WARRANT`:** the owner's signed Phi warrant, set by `node scripts/phi-warrant.mjs grant`. It is checked against the key pinned in `policy/phi-warrant-key.json` on `main`. Delete the variable to revoke it.
 - **`MIRQL_COURT_DISABLED=1`:** halts the court (for incidents or maintenance windows): no role runs and nothing merges. A review signal can still re-run a failed notary gate when the head has an approval or an owner sign-off.
 - **`MIRQL_LLM_BASE_URL`:** overrides the Z.AI API endpoint (self-hosted or proxied gateway).
 - **`MIRQL_CRITIC_MODEL` / `MIRQL_ADVOCATE_MODEL` / `MIRQL_JUDGE_MODEL`:** per-role model overrides — useful for running the Judge on a stronger model than the other roles. The court enables `thinking: { type: "enabled" }`, `reasoning_effort: "max"`, JSON mode (`max_tokens: 65536`) and streaming for the default Z.AI `glm-5.3` model, so an override runs with that model's own defaults.
@@ -67,6 +68,7 @@ The court runs as a workflow from `main` (`.github/workflows/mergeproof-retrigge
 - **A court merge starts no workflows.** The merge uses `GITHUB_TOKEN`, so a push-triggered workflow would not run on `main` for that commit. No workflow here uses `push` today, so this only matters if one is added.
 - **The engine is not locked.** `scripts/**` and `packages/mergeproof/**` are not Courthouse Lock paths, so the court can merge changes to its own engine. `roles/critic.md` and `roles/advocate.md` are likewise unlocked; only `roles/judge.md` is locked.
 - **Failed model calls are logged without content.** A failed call logs the provider, model, HTTP status or error name, finish reason and character counts. It never logs the reply, which can quote the diff.
+- **The Phi warrant is counted from merged history.** Two PRs open at once can each fit what is left, so the second can overspend by up to its own growth; the next PR sees that and stops. Growth merged under an owner sign-off counts as spend too. `roles/judge.md` still says `delta_phi <= 0`, and the tool adds the warrant rule to the Judge's prompt on a run with warranted growth, because a PR touching that file cannot clear the gate. Fold it in the next time the owner edits the file.
 - **A failed step leaves a notice, and no verdict.** The Court posts one plain comment per head, role and reason, naming only those three. It carries no receipt marker, so it never counts as approval or as Court state, and it does not wake the Court. The Court retries on its next wake-up, or on `gh workflow run "Mergeproof Court" -f pr_number=<n>`.
 - **Time limits are fixed.** A model call gets 12 minutes, and a tick starts no model call that could run past 40 minutes (reason `TICK_BUDGET`). The job limit is 45. Only the default Z.AI model streams, so a slower provider or a model override also hits Node's 5-minute wait for response headers. A call that runs out of time reports `LLM_TIMEOUT`.
 - **Network-dependent review.** The LLM calls mean the review step depends on the network. The mechanical gates stay offline-measured (Law 1: Offline Litmus) and still fail closed if the LLM step is unreachable.

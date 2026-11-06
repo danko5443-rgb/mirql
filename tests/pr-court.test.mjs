@@ -3,12 +3,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isHumanOnlyPath, loadPathPolicies } from "../packages/core/anti-cheat.mjs";
+import { generateEd25519Keypair, signEvent } from "../packages/core/ed25519.mjs";
+import { PHI_WARRANT_DOMAIN, PHI_WARRANT_PIN_PATH } from "../packages/core/phi-warrant.mjs";
 import { evaluatePullRequest, isReviewerConfigPath } from "../packages/mergeproof/evaluator.mjs";
 import { computePhi } from "../packages/run/phi.mjs";
 import { signoffLabel } from "../scripts/ci-owner-signoff.mjs";
@@ -380,6 +382,33 @@ describe("court advocate", () => {
     });
   });
 
+  it("a patch may spend what is left of the warrant, and no more", async () => {
+    const grow = [{ file: "src.mjs", search: "export const keep = 1;", replace: "export const keep = 1;\nexport const more = 3;\nexport const most = 4;" }];
+    await withDir(async (dir) => {
+      const reset = () => writeFileSync(join(dir, "src.mjs"), SOURCE);
+      reset();
+      const basePhi = computePhi(dir).total;
+      const first = await advocate(dir, answer(grow), { basePhi, phiAllowance: 1000 });
+      assert.equal(first.res.verdict, "FIXED");
+      assert.deepEqual(first.committed, ["src.mjs"]);
+      assert.match(first.calls[0].body.messages.at(-1).content, /"phi_allowance":\s*1000/);
+      const growth = computePhi(dir).total - basePhi;
+      assert.ok(growth > 0);
+
+      reset();
+      assert.equal((await advocate(dir, answer(grow), { basePhi, phiAllowance: growth })).res.verdict, "FIXED");
+
+      reset();
+      const over = await advocate(dir, answer(grow), { basePhi, phiAllowance: growth - 1 });
+      assert.equal(over.res.reason, "PHI_INCREASE");
+      assert.deepEqual(over.committed, []);
+      assert.equal(readFileSync(join(dir, "src.mjs"), "utf8"), SOURCE);
+
+      const junk = await advocate(dir, answer(grow), { basePhi, phiAllowance: "1000" });
+      assert.equal(junk.res.reason, "PHI_INCREASE", "only a real integer allowance counts");
+    });
+  });
+
   it("an invalid Phi budget fails closed", async () => {
     await withDir(async (dir) => {
       writeFileSync(join(dir, "src.mjs"), SOURCE);
@@ -537,6 +566,17 @@ describe("court judge", () => {
     }
   });
 
+  it("rules on growth inside the warrant, and only then adds the warrant rule to its prompt", async () => {
+    const rule = /## Phi warrant/;
+    const systemText = (calls) => calls[0].body.messages.slice(0, -1).map((message) => message.content).join("\n");
+    const warranted = await judge(merge, { rolePrompt: "ROLE", evidence: { ...GREEN, deltaPhi: 5, phiAllowance: 5 } });
+    assert.equal(warranted.res.verdict, "MERGE");
+    assert.match(systemText(warranted.calls), rule);
+    assert.doesNotMatch(warranted.calls[0].body.messages.at(-1).content, rule, "the rule stays out of the fenced data");
+    const flat = await judge(merge, { rolePrompt: "ROLE", evidence: { ...GREEN, phiAllowance: 5 } });
+    assert.doesNotMatch(systemText(flat.calls), rule);
+  });
+
   it("REMAND at the last round becomes ESCALATE", async () => {
     const remand = { verdict: "REMAND", rationale: "no", rulings: [{ finding_id: "f1", status: "UNRESOLVED", reason: "open" }] };
     assert.equal((await judge(remand)).res.verdict, "REMAND");
@@ -549,6 +589,9 @@ describe("court judge", () => {
       [{ evidence: { ...GREEN, suitePassBase: false } }, /^SUITE_NOT_GREEN$/],
       [{ evidence: { suitePassBase: true, suitePassHead: true } }, /^DELTA_PHI/],
       [{ evidence: { ...GREEN, deltaPhi: 1 } }, /^DELTA_PHI: 1$/],
+      [{ evidence: { ...GREEN, deltaPhi: 6, phiAllowance: 5 } }, /^DELTA_PHI: 6$/],
+      [{ evidence: { ...GREEN, deltaPhi: 1, phiAllowance: "100" } }, /^DELTA_PHI: 1$/],
+      [{ evidence: { ...GREEN, deltaPhi: 1, phiAllowance: -1 } }, /^DELTA_PHI: 1$/],
       [{ files: ["roles/judge.md"] }, /^COURTHOUSE_LOCK: roles\/judge\.md/],
       [{ files: [".github/workflows/x.yml"] }, /^COURTHOUSE_LOCK/],
       [{ files: ["policy/paths.yaml"] }, /^COURTHOUSE_LOCK/],
@@ -1157,6 +1200,66 @@ describe("court tick end to end", () => {
       assert.ok(box.comments.at(-1).body.includes("NO_PUSH_TOKEN"));
       assert.equal(box.git(box.origin, "rev-parse", "refs/heads/feature"), before);
       assert.equal(box.git(box.candidate, "status", "--porcelain"), "");
+    });
+  });
+
+  describe("with a signed Phi warrant", () => {
+    const OWNER = generateEd25519Keypair();
+    const GROWN = "export const a = 1;\nexport const b = 2;\nexport const c = 3;\n";
+    const overruled = { ...merge, rulings: [{ finding_id: "f1", status: "OVERRULED_FALSE_POSITIVE", reason: "agreed" }] };
+
+    /** The base copy the court trusts: real roles and policy, plus the owner's pin. */
+    function baseCopy(dir) {
+      const base = join(dir, "base");
+      mkdirSync(base);
+      cpSync(join(ROOT, "roles"), join(base, "roles"), { recursive: true });
+      cpSync(join(ROOT, "policy"), join(base, "policy"), { recursive: true });
+      writeFileSync(join(base, PHI_WARRANT_PIN_PATH), JSON.stringify({ keyId: OWNER.keyId, publicKey: OWNER.publicKey }));
+      return base;
+    }
+    const warrantFor = (box, budget, signer = OWNER) => JSON.stringify(signEvent({
+      domain: PHI_WARRANT_DOMAIN,
+      writer: { ns: "human:owner", key_id: signer.keyId },
+      phi_budget: budget,
+      base_sha: box.git(box.origin, "rev-parse", "refs/heads/main"),
+      issued_at: "2026-11-05T00:00:00Z",
+    }, signer.privateKey, signer.keyId));
+
+    async function tick(dir, warrant) {
+      const box = sandbox(dir, "more.mjs", GROWN);
+      const { fetchImpl, calls } = mockFetch(critic, rebut, overruled);
+      const env = { ...box.env, MIRQL_PHI_WARRANT: warrant?.(box) ?? "" };
+      assert.equal(await quiet(() => runCourtTick({ env, io: box.io, fetchImpl, baseDir: baseCopy(dir) })), 0);
+      return { box, calls };
+    }
+
+    it("without one, growth stops at the judge's recusal", async () => {
+      await withDir(async (dir) => {
+        const { box, calls } = await tick(dir);
+        assert.equal(box.verdicts().at(-1), "judge:RECUSE");
+        assert.match(box.comments.at(-1).body, /DELTA_PHI: \d+/);
+        assert.equal(calls.length, 2, "the judge's model is never called");
+      });
+    });
+
+    it("growth inside it reaches the judge, whose prompt carries the rule", async () => {
+      await withDir(async (dir) => {
+        const { box, calls } = await tick(dir, (b) => warrantFor(b, 100000));
+        assert.deepEqual(box.verdicts(), ["critic:COMMENT", "advocate:REBUT", "judge:MERGE"]);
+        assert.equal(calls.length, 3);
+        assert.ok(calls[2].body.messages.slice(0, -1).some((m) => m.content.includes("## Phi warrant")));
+        assert.ok(!calls[0].body.messages.some((m) => m.content.includes("## Phi warrant")));
+      });
+    });
+
+    it("a budget too small for the growth, or a foreign signature, recuses the same way", async () => {
+      for (const warrant of [(b) => warrantFor(b, 1), (b) => warrantFor(b, 100000, generateEd25519Keypair())]) {
+        await withDir(async (dir) => {
+          const { box } = await tick(dir, warrant);
+          assert.equal(box.verdicts().at(-1), "judge:RECUSE");
+          assert.match(box.comments.at(-1).body, /DELTA_PHI: \d+/);
+        });
+      }
     });
   });
 });

@@ -39,7 +39,7 @@ The PR diff, and where supplied the reproducer test code, execution logs, and re
 
 1. **Security:** command injection, path/symlink traversal, privilege escalation, secret leakage, TOCTOU.
 2. **Functional and cross-platform bugs:** Windows vs Linux file modes and path separators, crashes on edge inputs, broken invariants.
-3. **Constitution and policy violations:** Law 6 (Silence Is Never Consent), Law 7 (Notary Outside Blast Radius), Law 8 (Speechless Sandboxes), Law 13 (Monotone Potential PHI & Thrift Test, `delta_phi <= 0`), MP-002 (test weakening or deletion), MP-003 (swallowed exceptions — every catch must throw, log, return an error, or carry `/* mp-003-allow: reason */`). Law 0 (the Zero-Dependency Law) is enforced by code and the notary but is not an article of CONSTITUTION.md; cite it by name, not by article number.
+3. **Constitution and policy violations:** Law 6 (Silence Is Never Consent), Law 7 (Notary Outside Blast Radius), Law 8 (Speechless Sandboxes), Law 13 (Monotone Potential PHI & Thrift Test; the notary measures Phi, so report only a refactor that does not shrink it), MP-002 (test weakening or deletion), MP-003 (swallowed exceptions — every catch must throw, log, return an error, or carry `/* mp-003-allow: reason */`). Law 0 (the Zero-Dependency Law) is enforced by code and the notary but is not an article of CONSTITUTION.md; cite it by name, not by article number.
 
 ## Critical rule
 
@@ -50,7 +50,7 @@ Never ask for wrappers, verbose comments, or extra exports that raise Phi. Phi c
 Emit exactly one JSON object and nothing else. Any surrounding prose, markdown fences, or malformed JSON is treated by the tool as a hard refusal (Law 6: Silence Is Never Consent).
 
 ```json
-{"verdict":"APPROVE|COMMENT","summary":"1-3 sentences","findings":[{"id":"C-1","severity":"P1|P2","file":"relative/path.mjs","line":42,"title":"short","detail":"the bug and a minimal fix respecting delta_phi <= 0"}]}
+{"verdict":"APPROVE|COMMENT","summary":"1-3 sentences","findings":[{"id":"C-1","severity":"P1|P2","file":"relative/path.mjs","line":42,"title":"short","detail":"the bug and the smallest fix, adding as little Phi as possible"}]}
 ```
 
 Rule: findings empty if and only if verdict APPROVE; findings non-empty if and only if verdict COMMENT.
