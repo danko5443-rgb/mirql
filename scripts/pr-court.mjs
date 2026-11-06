@@ -243,10 +243,10 @@ async function landCourtMerge({ repo, prNumber, headSha, mergedAt, env, io, wait
   return "MERGED";
 }
 
-function pushFix(io, repoDir, files, ref, token, round, env) {
+function pushCommit(io, repoDir, files, ref, token, message, env) {
   const git = (args, options) => io.run("git", ["-C", repoDir, "-c", "core.hooksPath=/dev/null", ...args], options);
   git(["add", "--", ...files]);
-  git(["-c", "user.name=mirql-court[bot]", "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com", "commit", "-m", `fix: PR Court advocate round ${round}`]);
+  git(["-c", "user.name=mirql-court[bot]", "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com", "commit", "-m", message]);
   const auth = Buffer.from(`x-access-token:${token}`).toString("base64");
   console.log(`::add-mask::${auth}`);
   git(["push", "origin", `HEAD:refs/heads/${ref}`], { env: { ...env, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader", GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${auth}` } });
@@ -307,7 +307,7 @@ const COURT_STEPS = {
   async advocate({ ctx, snapshot, post, fail, state, prompt, findings, basePhi, phiAllowance, env, io, pr }) {
     const round = state.advocateRounds + 1;
     const token = env.MIRQL_COURT_TOKEN;
-    const commit = token ? (files) => pushFix(io, ctx.repoDir, files, pr.head.ref, token, round, env) : null;
+    const commit = token ? (files) => pushCommit(io, ctx.repoDir, files, pr.head.ref, token, `fix: PR Court advocate round ${round}`, env) : null;
     const res = await runAdvocateRound({ ...ctx, diffText: snapshot().diffText, findings, basePhi: basePhi(), phiAllowance: phiAllowance(), round, rolePrompt: prompt("advocate"), commit });
     if (!res.ok) return fail(res);
     if (res.verdict === "ESCALATE" || res.verdict === "RECUSE") { post({ round, role: "judge", verdict: res.verdict, text: advocateText(res) }); return 0; }
@@ -422,4 +422,4 @@ if (isEntrypoint(import.meta.url)) {
   });
 }
 
-export { decideCourtStep, formatCourtReceipt, landCourtMerge, loadRolePrompt, main, MAX_ROUNDS, parseCourtState, resolveRepoFile, runAdvocateRound, runCourtTick, runCriticRound, runJudgeArbitration, sanitizeCourtText };
+export { allowanceOf, clip, decideCourtStep, defaultIo, fenceData, formatCourtReceipt, isLockedPatchPath, landCourtMerge, loadRolePrompt, main, MAX_ROUNDS, parseCourtState, pushCommit, resolveRepoFile, runAdvocateRound, runCourtTick, runCriticRound, runJudgeArbitration, sanitizeCourtText, stagePatches, TRUSTED_AUTHORS };
