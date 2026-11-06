@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,7 @@ import { PHI_WARRANT_DOMAIN, PHI_WARRANT_PIN_PATH, phiWarrantAllowance, readPhiW
 import { evaluatePullRequest } from "../packages/mergeproof/evaluator.mjs";
 import { main, measurePhiWarrant } from "../scripts/ci-phi-warrant.mjs";
 import { run } from "../scripts/phi-warrant.mjs";
+import { createOwnerKey } from "../packages/inbox/keys.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OWNER = generateEd25519Keypair();
@@ -417,5 +418,136 @@ describe("phi warrant: owner command", () => {
       const { options } = harness(dir);
       await assert.rejects(run(["pin", "--key", inside], options), /credentials_location_forbidden/);
     }, { pin: null });
+  });
+});
+
+describe("phi warrant: init", () => {
+  const PASSPHRASE = "correct horse battery staple";
+
+  /** A throwaway HOME, so nothing here can reach a real ~/.mirql-trust. */
+  function withThrowawayHome(fn) {
+    const home = mkdtempSync(join(tmpdir(), "phi-warrant-home-"));
+    const saved = { ...process.env };
+    const restore = () => {
+      for (const name of Object.keys(process.env)) {
+        if (!(name in saved)) delete process.env[name];
+      }
+      Object.assign(process.env, saved);
+      rmSync(home, { recursive: true, force: true });
+    };
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    delete process.env.MIRQL_TRUST_ROOT;
+    delete process.env.MIRQL_HUMAN_PASSPHRASE;
+    try {
+      const result = fn(home);
+      if (typeof result?.then === "function") return result.finally(restore);
+      restore();
+      return result;
+    } catch (error) {
+      restore();
+      throw error;
+    }
+  }
+
+  it("creates an encrypted owner key that pin and grant then use", async () => {
+    await withThrowawayHome(async (home) => {
+      process.env.MIRQL_HUMAN_PASSPHRASE = PASSPHRASE;
+      const keyFile = join(home, "owner.key.json");
+      const logs = [];
+      assert.equal(await run(["init", "--key", keyFile], { isTty: true, rootDir: home, log: (line) => logs.push(line) }), 0);
+      const doc = JSON.parse(readFileSync(keyFile, "utf8"));
+      assert.equal(doc.encrypted, true);
+      assert.equal(typeof doc.privateKey, "undefined", "no plaintext private key at rest");
+      assert.equal(doc.keyId, `ed25519:${doc.publicKey}`);
+      const said = logs.join("\n");
+      assert.ok(said.includes(keyFile), `output names the key file: ${said}`);
+      assert.ok(said.includes(doc.keyId), `output names the key id: ${said}`);
+      assert.ok(!said.includes(PASSPHRASE), "the passphrase is never printed");
+      assert.deepEqual(readdirSync(home), ["owner.key.json"], "nothing else appears beside the key");
+      assert.equal(existsSync(join(home, ".mirql-trust")), false, "the trust root is never written");
+      await withCheckout(async (dir) => {
+        assert.equal(await run(["pin", "--key", keyFile], { isTty: true, rootDir: dir, log: () => {} }), 0);
+        assert.equal(readPhiWarrantPin(dir), doc.publicKey);
+        const calls = [];
+        const grantOptions = {
+          isTty: true,
+          rootDir: dir,
+          log: () => {},
+          ask: async () => "yes",
+          now: () => new Date("2026-11-05T00:00:00Z"),
+          runGh: (args) => { calls.push(args); return args[0] === "api" ? `${"c".repeat(40)}\n` : ""; },
+        };
+        assert.equal(await run(["grant", "--budget", "100", "--key", keyFile], grantOptions), 0);
+        const warrant = JSON.parse(calls.find((args) => args[0] === "variable")[4]);
+        assert.equal(verifyPhiWarrant(warrant, doc.publicKey).ok, true);
+      }, { pin: null });
+    });
+  });
+
+  it("refuses to run without a terminal", async () => {
+    await withThrowawayHome(async (home) => {
+      process.env.MIRQL_HUMAN_PASSPHRASE = PASSPHRASE;
+      const keyFile = join(home, "owner.key.json");
+      const logs = [];
+      assert.equal(await run(["init", "--key", keyFile], { isTty: false, rootDir: home, log: (line) => logs.push(line) }), 2);
+      assert.match(logs.join("\n"), /without a terminal/);
+      assert.equal(existsSync(keyFile), false);
+    });
+  });
+
+  it("refuses a missing or too-short passphrase and writes nothing", async () => {
+    await withThrowawayHome(async (home) => {
+      const keyFile = join(home, "owner.key.json");
+      for (const passphrase of [undefined, "short"]) {
+        if (passphrase === undefined) delete process.env.MIRQL_HUMAN_PASSPHRASE;
+        else process.env.MIRQL_HUMAN_PASSPHRASE = passphrase;
+        await assert.rejects(run(["init", "--key", keyFile], { isTty: true, rootDir: home, log: () => {} }), /OWNER_KEY_PASSPHRASE_REQUIRED/);
+        assert.equal(existsSync(keyFile), false, "nothing may be written");
+        assert.deepEqual(readdirSync(home), []);
+      }
+    });
+  });
+
+  it("refuses to replace an existing file, and one that appears mid-run", async () => {
+    await withThrowawayHome(async (home) => {
+      process.env.MIRQL_HUMAN_PASSPHRASE = PASSPHRASE;
+      const keyFile = join(home, "owner.key.json");
+      writeFileSync(keyFile, "hands off");
+      await assert.rejects(run(["init", "--key", keyFile], { isTty: true, rootDir: home, log: () => {} }), /refusing to replace/);
+      assert.equal(readFileSync(keyFile, "utf8"), "hands off");
+      rmSync(keyFile);
+      const raced = (path, options) => {
+        writeFileSync(path, "appeared while running");
+        return createOwnerKey(path, options);
+      };
+      await assert.rejects(run(["init", "--key", keyFile], { isTty: true, rootDir: home, log: () => {}, createKey: raced }), /refusing to replace/);
+      assert.equal(readFileSync(keyFile, "utf8"), "appeared while running");
+    });
+  });
+
+  it("removes the key it just wrote when the saved file does not reopen to it", async () => {
+    await withThrowawayHome(async (home) => {
+      process.env.MIRQL_HUMAN_PASSPHRASE = PASSPHRASE;
+      const keyFile = join(home, "owner.key.json");
+      const wrongKey = () => ({ keyId: "ed25519:not-the-same-key", publicKey: "not-the-same-key" });
+      await assert.rejects(run(["init", "--key", keyFile], { isTty: true, rootDir: home, log: () => {}, readKey: wrongKey }), /did not reopen/);
+      assert.equal(existsSync(keyFile), false, "no partial key file remains");
+      const locked = () => {
+        throw new Error("OWNER_KEY_LOCKED: the encrypted human:owner key could not be unlocked");
+      };
+      await assert.rejects(run(["init", "--key", keyFile], { isTty: true, rootDir: home, log: () => {}, readKey: locked }), /OWNER_KEY_LOCKED/);
+      assert.equal(existsSync(keyFile), false, "no partial key file remains");
+    });
+  });
+
+  it("rejects bad usage", async () => {
+    await withThrowawayHome(async (home) => {
+      const logs = [];
+      assert.equal(await run(["init"], { isTty: true, rootDir: home, log: (line) => logs.push(line) }), 2);
+      assert.ok(logs[0].startsWith("usage: node scripts/phi-warrant.mjs init"), logs[0]);
+      assert.equal(await run(["init", "--nope"], { isTty: true, rootDir: home, log: () => {} }), 2);
+      assert.equal(existsSync(join(home, "owner.key.json")), false);
+    });
   });
 });

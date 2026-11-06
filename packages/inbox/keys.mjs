@@ -759,3 +759,30 @@ export function protectOwnerKey(mirqlDir, options = {}) {
   writePrivateFile(keyPath, JSON.stringify(envelope, null, 2) + "\n");
   return { status: "protected", key_path: keyPath };
 }
+
+/**
+ * Create a brand-new encrypted human:owner key at an external path (Law 6):
+ * generated in memory, encrypted before any write, verified to reopen, then
+ * published with exclusive creation. The private key never rests on disk in
+ * plaintext and an existing file is never replaced.
+ *
+ * @param {string} keyPath path of the key file to create
+ * @param {object} [options] passphrase carrier (options.passphrase / env)
+ * @returns {{ key_path: string, keyId: string, publicKey: string }}
+ */
+export function createOwnerKey(keyPath, options = {}) {
+  const passphrase = resolveOwnerKeyPassphrase(options);
+  assertPassphraseStrength(passphrase);
+  const destination = resolvePath(keyPath);
+  if (existsSync(destination)) {
+    throw credentialsError("credentials_required", `refusing to replace the existing key file ${destination}`, "choose another --key path");
+  }
+  const kp = generateEd25519Keypair();
+  const envelope = encryptOwnerKeyDocument({ privateKey: kp.privateKey }, passphrase);
+  const reopened = decryptOwnerKeyDocument(envelope, passphrase);
+  if (reopened.privateKey !== kp.privateKey) {
+    throw domainError("INTEGRITY_VIOLATION", "the new owner key did not round-trip through its envelope; nothing was written", EXIT_CODES.INTEGRITY_VIOLATION);
+  }
+  writePrivateFile(destination, JSON.stringify(envelope, null, 2) + "\n", { exclusive: true });
+  return { key_path: destination, keyId: envelope.keyId, publicKey: envelope.publicKey };
+}

@@ -229,7 +229,10 @@ holds (`MP-005`), unless the growth fits the owner's signed Phi warrant or the
 repository owner explicitly signs off on the exact head commit (`reviewed:<head sha>`).
 
 The Phi warrant is the owner's standing allowance, so ordinary growth needs no
-sign-off per pull request. The owner signs it once with
+sign-off per pull request. `node scripts/phi-warrant.mjs init --key <file>`
+creates the owner's Ed25519 key at that path, encrypted with
+`MIRQL_HUMAN_PASSPHRASE`; it never writes the private key unencrypted and
+refuses to replace an existing file. The owner signs the allowance once with
 `node scripts/phi-warrant.mjs grant --budget <n> --key <file>`, which stores it in
 the `MIRQL_PHI_WARRANT` repository variable. CI verifies the signature against
 `policy/phi-warrant-key.json` from the base branch and adds up spend from merged

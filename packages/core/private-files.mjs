@@ -174,7 +174,7 @@ export function writePrivateFiles(files, { directories = [], exclusive = false }
     }
     protectPrivatePaths([
       ...protectedDirectories,
-      ...staged.filter(file => file.existing).map(file => file.destination),
+      ...staged.filter(file => file.existing && !exclusive).map(file => file.destination),
     ]);
     if (process.platform === "win32" && staged.length) {
       stageWindowsFiles(staged);
