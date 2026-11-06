@@ -60,11 +60,16 @@ function applyBuild(repoDir, patches, policies) {
   return { files: writes.map((w) => w.file) };
 }
 
+/** Reads wanted files into `known`, skipping ones already sent. Returns the requested new files it could not provide. */
 function readFiles(repoDir, wanted, known) {
+  const refused = [];
   for (const file of wanted) {
-    const abs = known.size < MAX_FILES && !known.has(file) ? resolveRepoFile(repoDir, file) : null;
+    if (known.has(file)) continue;
+    const abs = known.size < MAX_FILES ? resolveRepoFile(repoDir, file) : null;
     if (abs) known.set(file, clip(readFileSync(abs, "utf8"), MAX_FILE_CHARS));
+    else refused.push(file);
   }
+  return refused;
 }
 
 async function askBuilder({ issue, repoDir, tree, basePhi, allowance, env, fetchImpl, baseDir }) {
@@ -77,9 +82,11 @@ async function askBuilder({ issue, repoDir, tree, basePhi, allowance, env, fetch
     const reply = validateBuilder(res.data);
     if (!reply) return { ok: false, reason: "LLM_INVALID_REPLY" };
     if (reply.verdict !== "NEED_FILES") return { ok: true, ...reply };
+    // A no-op request is fatal only when it asked about a file that could not be sent;
+    // asking again about files it already has just spends another bounded model call.
     const before = contents.size;
-    readFiles(repoDir, reply.files, contents);
-    if (contents.size === before) return { ok: false, reason: "NEED_FILES_UNREADABLE" };
+    const refused = readFiles(repoDir, reply.files, contents);
+    if (refused.length > 0 && contents.size === before) return { ok: false, reason: "NEED_FILES_UNREADABLE" };
   }
   return { ok: false, reason: "TOO_MANY_FILE_REQUESTS" };
 }
