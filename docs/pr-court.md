@@ -8,7 +8,7 @@ The PR Court is a three-role LLM review loop run by a deterministic tool from a 
 2. **Advocate** (`roles/advocate.md`) answers each finding: either AGREE_AND_FIX with minimal patches (kept within `delta_phi <= phi_allowance`, which is 0 without a signed Phi warrant) or REBUT with evidence. The tool applies valid patches, commits, and pushes them.
 3. **Judge** (`roles/judge.md`) rules on every finding — FIXED, OVERRULED_FALSE_POSITIVE, or UNRESOLVED — and issues the terminal verdict: MERGE, REMAND (another round, up to 3), or ESCALATE (a human takes over). A MERGE covers only what the Judge saw: a later reviewer finding reopens the case, and a later CHANGES_REQUESTED holds the merge.
 4. **Notary check:** after the Judge says MERGE, the tool reads the notary run for the final head. If the gate is not green, it re-runs that run's failed jobs (`gh run rerun --failed`, up to 5 attempts) and waits; a job that already passed is not repeated. Only a green gate on that exact head, measured against the current base tip, authorizes the merge (Law 5: Base-Pinned Mortal Verdicts).
-5. **Merge** is executed by the tool, never by an LLM role.
+5. **Merge** is executed by the tool, never by an LLM role. The tool then closes the issues the PR links with `Closes #n`, because GitHub left issue 93 open when the court merged PR 94. If that step fails, the merge stands and the run logs a warning.
 
 The loop runs at most 3 rounds. Anything still unresolved at round 3 escalates to a human; silence and malformed output are hard refusals everywhere (Law 6: Silence Is Never Consent).
 

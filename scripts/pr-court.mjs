@@ -224,6 +224,18 @@ async function awaitRerun(io, repo, headSha, attempt, { polls = 80, delayMs = 15
   return null;
 }
 
+/** A `Closes #n` did not close its issue when this job's GITHUB_TOKEN merged PR 94, so the court closes them itself. The merge already stands, so a failure here only warns. */
+function closeLinkedIssues(io, repo, prNumber) {
+  try {
+    const { closingIssuesReferences: linked } = JSON.parse(io.run("gh", ["pr", "view", String(prNumber), "--repo", repo, "--json", "closingIssuesReferences"]));
+    for (const { number, url } of linked) {
+      if (url.startsWith(`https://github.com/${repo}/issues/`)) io.run("gh", ["issue", "close", String(number), "--repo", repo, "--reason", "completed", "--comment", `Done in #${prNumber}, merged by the PR Court.`]);
+    }
+  } catch (err) {
+    console.log(`::warning::pr-court: PR ${prNumber} merged, but its linked issues may still be open: ${err?.name}`);
+  }
+}
+
 /** GitHub enforces nothing on this plan, so the court itself proves a green, current notary before it merges. */
 async function landCourtMerge({ repo, prNumber, headSha, mergedAt, env, io, wait = {} }) {
   let notary = notaryRun(io, repo, headSha);
@@ -240,6 +252,7 @@ async function landCourtMerge({ repo, prNumber, headSha, mergedAt, env, io, wait
   const tip = io.api(`repos/${repo}/commits/${pr.base.ref}`).sha;
   if (notary.run.pull_requests?.[0]?.base?.sha !== tip) return "NOTARY_BASE_STALE";
   io.run("gh", ["pr", "merge", String(prNumber), "--repo", repo, "--merge", "--delete-branch", "--match-head-commit", headSha]);
+  closeLinkedIssues(io, repo, prNumber);
   return "MERGED";
 }
 
