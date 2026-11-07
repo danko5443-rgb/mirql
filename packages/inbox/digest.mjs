@@ -100,7 +100,7 @@ export function renderDigest(mirqlDir, options = {}) {
             created_at: prop.created_at,
           });
         }
-      } catch {}
+      } catch { /* mp-003-allow: an unreadable proposal is left out of the advisory digest; the ledger stays the record */ }
     }
   }
 

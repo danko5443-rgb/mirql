@@ -484,7 +484,7 @@ function resolveImportPath(fromDir, spec) {
   for (const candidate of candidates) {
     try {
       if (statSync(candidate).isFile()) return candidate;
-    } catch {
+    } catch { /* mp-003-allow: a vanished candidate path is simply not a candidate; the search tries the next */
       // not a file — try next candidate
     }
   }

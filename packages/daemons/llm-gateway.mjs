@@ -467,7 +467,7 @@ export function createLlmGateway(options = {}) {
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "INTERNAL_SERVER_ERROR", detail: unhandledErr.message }));
         }
-      } catch {}
+      } catch { /* mp-003-allow: the error response already failed; nothing can be reported to a dead connection */ }
     }
   });
 

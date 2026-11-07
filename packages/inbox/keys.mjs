@@ -332,7 +332,7 @@ export function purgeStaleHumanKeys(keysDir) {
     if (existsSync(p)) {
       try {
         rmSync(p, { force: true });
-      } catch {}
+      } catch { /* mp-003-allow: a stale key file that cannot be removed now is left for the next run; enrollment does not depend on the removal */ }
     }
   }
 }
@@ -371,10 +371,10 @@ export function generateFactoryKeypairs(mirqlDir, options = {}) {
   mkdirSync(ledgerDir, { recursive: true, mode: 0o700 });
   try {
     chmodSync(keysDir, 0o700);
-  } catch {}
+  } catch { /* mp-003-allow: chmod is re-applied best-effort because mkdir mode bits do not hold on every platform; the guard re-checks on use */ }
   try {
     chmodSync(ledgerDir, 0o700);
-  } catch {}
+  } catch { /* mp-003-allow: chmod is re-applied best-effort because mkdir mode bits do not hold on every platform; the guard re-checks on use */ }
   purgeStaleHumanKeys(keysDir);
 
   // B4: fresh genesis rebuilds the keyring — no pre-planted entries survive.
