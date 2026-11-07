@@ -18,7 +18,6 @@ import { callCourtModel, collectExternalFindings, findAiApproval, scanDiffHazard
 import {
   decideCourtStep,
   formatCourtReceipt,
-  formatLandingNotice,
   LANDING_NEXT_STEPS,
   landCourtMerge,
   loadRolePrompt,
@@ -1072,12 +1071,14 @@ describe("court landing", () => {
 
   it("dedupes a landing notice the court already posted, and survives a posting failure", async () => {
     const posted = [];
-    const io = { post: (_repo, _pr, body) => { posted.push(body); } };
-    const already = [{ user: { login: "github-actions[bot]", type: "Bot" }, body: formatLandingNotice({ mark: `mirql-court-landing:v1 NOTARY_NOT_GREEN ${HEAD}`, code: "NOTARY_NOT_GREEN", headSha: HEAD, prNumber: 7 }) }];
-    postLandingNotice(io, "o/r", "7", already, { code: "NOTARY_NOT_GREEN", headSha: HEAD });
-    assert.equal(posted.length, 0, "the mark the court itself posted counts");
-    postLandingNotice(io, "o/r", "7", [{ user: { login: "mallory", type: "User" }, body: `<!-- mirql-court-landing:v1 NOTARY_BASE_STALE ${HEAD} -->` }], { code: "NOTARY_BASE_STALE", headSha: HEAD });
-    assert.equal(posted.length, 1, "someone else's marker is not the court's voice");
+    const comments = [];
+    const io = { post: (_repo, _pr, body) => { posted.push(body); comments.push({ user: { login: "github-actions[bot]", type: "Bot" }, body }); } };
+    postLandingNotice(io, "o/r", "7", [], { code: "NOTARY_NOT_GREEN", headSha: HEAD });
+    postLandingNotice(io, "o/r", "7", comments, { code: "NOTARY_NOT_GREEN", headSha: HEAD });
+    assert.equal(posted.length, 1, "the mark the court itself posted counts");
+    comments.push({ user: { login: "mallory", type: "User" }, body: `<!-- mirql-court-landing:v1 NOTARY_BASE_STALE ${HEAD} -->` });
+    postLandingNotice(io, "o/r", "7", comments, { code: "NOTARY_BASE_STALE", headSha: HEAD });
+    assert.equal(posted.length, 2, "someone else's marker is not the court's voice");
     const broken = { post: () => { throw new Error("gh failed"); } };
     const said = await capturingLog(() => postLandingNotice(broken, "o/r", "7", [], { code: "NOTARY_NOT_GREEN", headSha: HEAD }));
     assert.match(said, /::warning::.*landing notice not posted: Error/);

@@ -368,24 +368,21 @@ const LANDING_NEXT_STEPS = {
   NOTARY_NOT_RERUNNABLE: "The gate has no finished failed run, or used its 5 re-run attempts. Wait for a wake-up, or push to the PR.",
 };
 
-/** Not a verdict: no receipt marker, so it can never read as one. The text is the court's own landing table, never model text. */
-const formatLandingNotice = ({ mark, code, headSha, prNumber }) => [
-  `<!-- ${mark} -->`,
-  `**PR Court could not land this PR** (\`${code}\` at \`${headSha}\`). The Judge's MERGE verdict stands; only the landing stopped.`,
-  "",
-  LANDING_NEXT_STEPS[code] ?? "Read the Court run log for the landing code.",
-  "",
-  `To retry now: \`gh workflow run "Mergeproof Court" -f pr_number=${prNumber}\``,
-  "",
-].join("\n");
-
-/** Landing codes lived only in the run log; a stalled merge must be readable on the PR itself. Deduped per code and head; a failure here only warns. */
+/** Landing codes lived only in the run log; a stalled merge must be readable on the PR itself. Deduped per code and head; a failure here only warns. Never a verdict: no state marker, and the text is the court's own landing table, never model text. */
 function postLandingNotice(io, repo, prNumber, comments, { code, headSha }) {
   if (code === "MERGED" || code === "MERGED_ELSEWHERE") return;
   const mark = `mirql-court-landing:v1 ${code} ${headSha}`;
   try {
     if ((comments ?? []).some((c) => c.user?.login === COURT_ACTOR.login && String(c.body).includes(mark))) return;
-    io.post(repo, prNumber, formatLandingNotice({ mark, code, headSha, prNumber }));
+    io.post(repo, prNumber, [
+      `<!-- ${mark} -->`,
+      `**PR Court could not land this PR** (\`${code}\` at \`${headSha}\`). The Judge's MERGE verdict stands; only the landing stopped.`,
+      "",
+      LANDING_NEXT_STEPS[code] ?? "Read the Court run log for the landing code.",
+      "",
+      `To retry now: \`gh workflow run "Mergeproof Court" -f pr_number=${prNumber}\``,
+      "",
+    ].join("\n"));
   } catch (err) { /* mp-003-allow: the landing code is already in the run log, and the merge verdict already stands */ console.log(`::warning::pr-court: landing notice not posted: ${err?.name}`); }
 }
 
@@ -537,4 +534,4 @@ if (isEntrypoint(import.meta.url)) {
   });
 }
 
-export { allowanceOf, clip, decideCourtStep, defaultIo, fenceData, formatCourtReceipt, formatLandingNotice, isLockedPatchPath, LANDING_NEXT_STEPS, landCourtMerge, loadRolePrompt, main, MAX_ROUNDS, parseCourtState, postLandingNotice, pushCommit, resolveRepoFile, runAdvocateRound, runCourtTick, runCriticRound, runJudgeArbitration, sanitizeCourtText, stagePatches, TRUSTED_AUTHORS };
+export { allowanceOf, clip, decideCourtStep, defaultIo, fenceData, formatCourtReceipt, isLockedPatchPath, LANDING_NEXT_STEPS, landCourtMerge, loadRolePrompt, main, MAX_ROUNDS, parseCourtState, postLandingNotice, pushCommit, resolveRepoFile, runAdvocateRound, runCourtTick, runCriticRound, runJudgeArbitration, sanitizeCourtText, stagePatches, TRUSTED_AUTHORS };
