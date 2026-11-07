@@ -15,9 +15,7 @@ import { computeGitTreePhi } from "../packages/run/phi.mjs";
 import { authorizeTestKey, provisionTestTrust } from "./helpers/keyring.mjs";
 import { appendLedgerEvent, foldQueueState, getQueueStatus } from "../packages/queue/index.mjs";
 
-// `semantic_fingerprint` is a warrant FIELD its author computes as a content hash; there is
-// no shared helper in core, so this computes one the way the queue's own fixtures do.
-const semantic_fingerprint = (intent) => sha256(JSON.stringify(intent));
+// The identity assertions below call the real `sha256` and `ulid` exports from packages/core.
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
 const GIT_ENV = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.test", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.test" };
@@ -93,12 +91,12 @@ describe("Law 15: identity is content, location is machinery", () => {
     assert.ok(Number.isSafeInteger(viaOne) && viaOne > 0, "the tree actually measured something");
   });
 
-  it("a warrant's fingerprint hashes its content, so the same intent under another path is still the same intent", () => {
+  it("core identity primitives (`sha256`, `ulid`) are content-derived, never location-derived", () => {
     const intent = { scope: ["packages/queue/**"], goal: "law15 fingerprint" };
-    const first = semantic_fingerprint(intent);
-    assert.equal(first, semantic_fingerprint({ ...intent }), "identical content is identical identity under any path");
-    assert.ok(!String(first).includes(home), "a fingerprint is a content hash, never a location-derived id");
-    assert.notEqual(first, semantic_fingerprint({ ...intent, scope: ["packages/run/**"] }), "changed content is a different identity");
-    assert.notEqual(ulid(1_700_200_000_000), ulid(1_700_200_000_000), "canonical UUIDs never collide for distinct generations");
+    const first = sha256(JSON.stringify(intent));
+    assert.equal(first, sha256(JSON.stringify({ ...intent })), "identical content is identical identity under any path");
+    assert.ok(!String(first).includes(home), "a content hash never encodes the caller's location");
+    assert.notEqual(first, sha256(JSON.stringify({ ...intent, scope: ["packages/run/**"] })), "changed content is a different identity");
+    assert.notEqual(ulid(1_700_200_000_000), ulid(1_700_200_000_000), "distinct ulid generations never collide at the same timestamp");
   });
 });
