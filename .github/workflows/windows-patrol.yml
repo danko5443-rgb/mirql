@@ -1,0 +1,42 @@
+name: Mergeproof Windows Patrol
+
+# CI suites run on ubuntu, but the factory is also developed and run on Windows
+# (the first factory cycle's genesis bug was win32-only, and ubuntu CI could
+# never witness it). This patrol runs the full suite on windows-latest on a
+# weekly cadence and on demand, so Windows-only rot surfaces within days.
+#
+# It is evidence only: it never gates a PR (the notary reads the ubuntu
+# measurements), and a red patrol is a bug report, not a block. Windows minutes
+# cost 2x on the free plan, which is why the cadence is weekly rather than
+# per-PR; the owner can change it on the schedule line below.
+on:
+  schedule:
+    - cron: "23 4 * * 0" # Sundays 04:23 UTC, off the hour
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mergeproof-windows-patrol
+  cancel-in-progress: false
+
+jobs:
+  windows-suite:
+    name: Windows Suite (patrol)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run the full suite on Windows
+        shell: bash
+        run: node scripts/run-tests.mjs
