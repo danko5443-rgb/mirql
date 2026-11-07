@@ -293,9 +293,26 @@ async function landCourtMerge({ repo, prNumber, headSha, mergedAt, env, io, wait
   if (pr.state !== "open" || pr.head.sha !== headSha) return "HEAD_MOVED";
   const tip = io.api(`repos/${repo}/commits/${pr.base.ref}`).sha;
   if (notary.run.pull_requests?.[0]?.base?.sha !== tip) return "NOTARY_BASE_STALE";
-  io.run("gh", ["pr", "merge", String(prNumber), "--repo", repo, "--merge", "--delete-branch", "--match-head-commit", headSha]);
+  try {
+    io.run("gh", ["pr", "merge", String(prNumber), "--repo", repo, "--merge", "--delete-branch", "--match-head-commit", headSha]);
+  } catch (err) {
+    // A merge by hand can race this one (PR 100: "Merge already in progress"). If the head the Judge ruled on landed anyway, the job is done.
+    if (!(await mergedElsewhere(io, repo, prNumber, headSha, wait))) throw err;
+    closeLinkedIssues(io, repo, prNumber);
+    return "MERGED_ELSEWHERE";
+  }
   closeLinkedIssues(io, repo, prNumber);
   return "MERGED";
+}
+
+/** Waits out a merge that is still in progress; true only once this exact head is merged. */
+async function mergedElsewhere(io, repo, prNumber, headSha, { racePolls = 8, raceDelayMs = 5000 } = {}) {
+  for (let i = 0; i < racePolls; i += 1) {
+    if (i > 0) await new Promise((done) => { setTimeout(done, raceDelayMs); });
+    const pr = io.api(`repos/${repo}/pulls/${prNumber}`);
+    if (pr.state !== "open") return pr.merged === true && pr.head?.sha === headSha;
+  }
+  return false;
 }
 
 function pushCommit(io, repoDir, files, ref, token, message, env) {
