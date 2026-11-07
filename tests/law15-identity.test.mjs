@@ -6,11 +6,12 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { sha256, ulid, generateEd25519Keypair } from "../packages/core/index.mjs";
+import { ulid, generateEd25519Keypair } from "../packages/core/index.mjs";
+import { semantic_fingerprint } from "../packages/core/warrant.mjs";
 import { computeGitTreePhi } from "../packages/run/phi.mjs";
 import { authorizeTestKey, provisionTestTrust } from "./helpers/keyring.mjs";
 import { appendLedgerEvent, foldQueueState, getQueueStatus } from "../packages/queue/index.mjs";
@@ -50,7 +51,10 @@ describe("Law 15: identity is content, location is machinery", () => {
 
     const originalLines = readFileSync(join(original, "ledger", "events.jsonl"), "utf8").trim().split(/\r?\n/);
     const copyLines = readFileSync(join(copy, "ledger", "events.jsonl"), "utf8").trim().split(/\r?\n/);
-    assert.deepEqual(copyLines, originalLines, "byte-identical events: the file's location never enters its content");
+    assert.deepEqual(copyLines, originalLines, "the copy is byte-identical to its source");
+    assert.ok(!originalLines.join("\n").includes(original), "event content never names the ledger's own mechanical location");
+    const head = join(original, "ledger", "head.json");
+    if (existsSync(head)) assert.ok(!readFileSync(head, "utf8").includes(original), "the head sidecar never names the ledger's location either");
 
     const stateOriginal = foldQueueState(original);
     const stateCopy = foldQueueState(copy);
@@ -88,10 +92,10 @@ describe("Law 15: identity is content, location is machinery", () => {
 
   it("a warrant's fingerprint hashes its content, so the same intent under another path is still the same intent", () => {
     const intent = { scope: ["packages/queue/**"], goal: "law15 fingerprint" };
-    const first = sha256(JSON.stringify(intent));
-    const moved = sha256(JSON.stringify({ ...intent }));
-    assert.equal(first, moved, "identical content is identical identity");
-    assert.notEqual(first, sha256(JSON.stringify({ ...intent, scope: ["packages/run/**"] })), "changed content is a different identity");
+    const first = semantic_fingerprint(intent);
+    assert.equal(first, semantic_fingerprint({ ...intent }), "identical content is identical identity under any path");
+    assert.ok(!String(first).includes(home), "a fingerprint is a content hash, never a location-derived id");
+    assert.notEqual(first, semantic_fingerprint({ ...intent, scope: ["packages/run/**"] }), "changed content is a different identity");
     assert.notEqual(ulid(1_700_200_000_000), ulid(1_700_200_000_000), "canonical UUIDs never collide for distinct generations");
   });
 });
