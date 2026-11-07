@@ -1,10 +1,11 @@
 # Reading a Court landing
 
-`gh pr checks` does not list Court runs. Use `gh run list --workflow "Mergeproof Court"`. After a Judge MERGE, the run log has `pr-court: landing: <code>`:
+`gh pr checks` does not list Court runs. Use `gh run list --workflow "Mergeproof Court"`. After a Judge MERGE, the run log has `pr-court: landing: <code>`, and every code except `MERGED` (and `MERGED_ELSEWHERE`) is also posted on the PR itself as a `mirql-court-landing:v1` notice — one per code and head — so a stalled landing never lives only in a run log:
 
 | Code | Meaning | Next step |
 |---|---|---|
 | `MERGED` | The Court merged the PR. | None. |
+| `MERGED_ELSEWHERE` | Someone else merged the same head first; the merge stands and the linked issues still get closed. | None. |
 | `AUTO_MERGE_OFF` | `MIRQL_COURT_AUTO_MERGE` is not `1`. | Owner decides. |
 | `NOTARY_BASE_STALE` | The base moved after the notary ran. A re-run keeps the old base. | Push to the PR. |
 | `HEAD_MOVED` | The PR closed or has a new head. | Check the PR. |

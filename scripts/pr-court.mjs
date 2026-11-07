@@ -222,7 +222,7 @@ async function runJudgeArbitration({ repoDir, diffText = "", files = [], intent 
   const locked = lockedFiles(files, policies);
   if (locked.length > 0) return refuse(`COURTHOUSE_LOCK: ${locked.slice(0, 10).join(", ")}`);
   if (evidence.suitePassBase !== true || evidence.suitePassHead !== true) return refuse("SUITE_NOT_GREEN", "WAIT");
-  if (!Number.isSafeInteger(evidence.deltaPhi) || evidence.deltaPhi > allowanceOf(evidence.phiAllowance)) return refuse(`DELTA_PHI: ${evidence.deltaPhi}`);
+  if (!Number.isSafeInteger(evidence.deltaPhi) || evidence.deltaPhi > allowanceOf(evidence.phiAllowance)) return refuse(`DELTA_PHI: ${evidence.deltaPhi} (Phi allowance: ${allowanceOf(evidence.phiAllowance)}; warrant: ${evidence.phiWarrant ?? "unmeasured"})`);
   const system = evidence.deltaPhi > 0 ? `${rolePrompt}\n\n${JUDGE_PHI_WARRANT_RULE}` : rolePrompt;
   const res = await callCourtModel({ role: "judge", system, user: fenceData({ head_sha: headSha, round, evidence, findings, transcript, ...intent(), diff: diffText, ...readContext(repoDir, files, diffText) }), env, fetchImpl });
   if (!res.ok) return res;
@@ -359,6 +359,36 @@ const formatCourtFailure = ({ mark, role, headSha, reason, prNumber }) => [
   "",
 ].join("\n");
 
+// One row per landing code in docs/court-landing.md, so a stalled landing says on the PR what to do next.
+const LANDING_NEXT_STEPS = {
+  AUTO_MERGE_OFF: "`MIRQL_COURT_AUTO_MERGE` is not `1`, so the owner decides whether to land this PR.",
+  NOTARY_BASE_STALE: "The base moved after the notary ran, and a re-run keeps the old base. Push to the PR to rebase.",
+  HEAD_MOVED: "The PR closed or grew a new head; the Court follows the new head on its next wake-up.",
+  NOTARY_NOT_GREEN: "The gate is not green on this head. Read its log, or re-run its failed jobs: `gh run rerun <run-id> --failed`.",
+  NOTARY_NOT_RERUNNABLE: "The gate has no finished failed run, or used its 5 re-run attempts. Wait for a wake-up, or push to the PR.",
+};
+
+/** One notice per marker, however many wake-ups: only the court's own comment counts as already told. */
+const toldByCourt = (comments, mark) => (comments ?? []).some((c) => c.user?.login === COURT_ACTOR.login && String(c.body).includes(mark));
+
+/** Landing codes lived only in the run log; a stalled merge must be readable on the PR itself. Deduped per code and head; a failure here only warns. Never a verdict: no state marker, and the text is the court's own landing table, never model text. */
+function postLandingNotice(io, repo, prNumber, comments, { code, headSha }) {
+  if (code === "MERGED" || code === "MERGED_ELSEWHERE") return;
+  const mark = `mirql-court-landing:v1 ${code} ${headSha}`;
+  try {
+    if (toldByCourt(comments, mark)) return;
+    io.post(repo, prNumber, [
+      `<!-- ${mark} -->`,
+      `**PR Court could not land this PR** (\`${code}\` at \`${headSha}\`). The Judge's MERGE verdict stands; only the landing stopped.`,
+      "",
+      LANDING_NEXT_STEPS[code] ?? "Read the Court run log for the landing code.",
+      "",
+      `To retry now: \`gh workflow run "Mergeproof Court" -f pr_number=${prNumber}\``,
+      "",
+    ].join("\n"));
+  } catch (err) { /* mp-003-allow: the landing code is already in the run log, and the merge verdict already stands */ console.log(`::warning::pr-court: landing notice not posted: ${err?.name}`); }
+}
+
 /** Each step returns an exit code to end the tick, or null to read fresh state and continue. */
 const COURT_STEPS = {
   wait: () => 0,
@@ -390,19 +420,22 @@ const COURT_STEPS = {
     post({ round, headSha: res.headSha, role: "advocate", verdict: res.verdict, count: responses.length, payload: { responses }, text: advocateText(res) });
     return res.verdict === "FIXED" ? 0 : null;
   },
-  async judge({ ctx, snapshot, post, fail, state, prompt, intent, findings, basePhi, phiAllowance, judgeRound, io, repo }) {
+  async judge({ ctx, snapshot, post, fail, state, prompt, intent, findings, basePhi, phiAllowance, phiWarrant, judgeRound, io, repo }) {
     const notary = notaryRun(io, repo, ctx.headSha);
     if (!["success", "failure"].includes(notary?.head) || !["success", "failure"].includes(notary?.base)) return 0;
     const { diffText, files } = snapshot();
-    const evidence = { suitePassBase: notary.base === "success", suitePassHead: notary.head === "success", deltaPhi: computeGitTreePhi(ctx.repoDir, ctx.headSha).metrics.total - basePhi(), phiAllowance: phiAllowance() };
+    const allowance = phiAllowance();
+    const evidence = { suitePassBase: notary.base === "success", suitePassHead: notary.head === "success", deltaPhi: computeGitTreePhi(ctx.repoDir, ctx.headSha).metrics.total - basePhi(), phiAllowance: allowance, phiWarrant: phiWarrant() };
     const res = await runJudgeArbitration({ ...ctx, diffText, files, intent, evidence, findings, transcript: state.transcript, round: judgeRound, rolePrompt: prompt("judge") });
     if (!res.ok) return fail(res);
     if (res.verdict === "WAIT") return 0; // A red suite posts nothing, so a green re-run can come back.
     post({ round: judgeRound, role: "judge", verdict: res.verdict, count: res.unresolved.length, payload: { findings: res.unresolved, rulings: res.rulings }, text: res.rationale });
     return res.verdict === "MERGE" || res.verdict === "REMAND" ? null : 0;
   },
-  async merge({ ctx, state, env, io, repo, prNumber }) {
-    log(`landing: ${await landCourtMerge({ repo, prNumber, headSha: ctx.headSha, mergedAt: state.judgeAt, env, io })}`);
+  async merge({ ctx, state, env, io, repo, prNumber, comments }) {
+    const landing = await landCourtMerge({ repo, prNumber, headSha: ctx.headSha, mergedAt: state.judgeAt, env, io });
+    log(`landing: ${landing}`);
+    postLandingNotice(io, repo, prNumber, comments, { code: landing, headSha: ctx.headSha });
     return 0;
   },
 };
@@ -434,12 +467,11 @@ async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl 
       // Two PRs lost a tick to one bad reply. The second try goes back through the time budget below.
       if (res.reason === "LLM_INVALID_REPLY" && !retried) { retried = true; log(`${name}: invalid reply, asking again`); return null; }
       console.log(`::error::pr-court: ${res.reason}`);
-      if (res.reason === "NO_API_KEY") return 0;
+      // NO_API_KEY is an outage, not a chosen silence: it gets the same PR-visible notice and red tick as every other failure.
       const mark = `mirql-court-failure:v1 ${name} ${headSha} ${res.reason}`;
       try {
         // One notice per head, role and reason, however many wake-ups fail the same way.
-        const told = comments.some((c) => c.user?.login === COURT_ACTOR.login && String(c.body).includes(mark));
-        if (!told) io.post(repo, prNumber, formatCourtFailure({ mark, role: name, headSha, reason: res.reason, prNumber }));
+        if (!toldByCourt(comments, mark)) io.post(repo, prNumber, formatCourtFailure({ mark, role: name, headSha, reason: res.reason, prNumber }));
       } catch (err) { /* mp-003-allow: the failure is already logged, and the tick stays red */ console.log(`::warning::pr-court: failure notice not posted: ${err?.name}`); }
       return 1;
     };
@@ -448,11 +480,14 @@ async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl 
     const findings = name === "advocate" ? [...state.openFindings, ...fresh.filter((f) => !state.answered.includes(f.id))] : [...state.findings, ...fresh];
     let baseTotal = null;
     let warrantRemaining = null;
+    let warrantState = null;
     const phiAllowance = () => {
       if (warrantRemaining === null) {
         const measured = measurePhiWarrant({ rootDir: baseDir, repoDir, tipSha: baseSha, document: env.MIRQL_PHI_WARRANT });
         log(`phi warrant: ${JSON.stringify(measured)}`);
         warrantRemaining = measured.ok ? measured.phi_remaining : 0;
+        // Why the allowance is what it is: a receipt that says only "DELTA_PHI" hides an expired or exhausted warrant.
+        warrantState = measured.ok ? `${measured.phi_remaining} of ${measured.phi_budget} left` : measured.reason;
       }
       return warrantRemaining;
     };
@@ -463,13 +498,14 @@ async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl 
     };
     const code = await COURT_STEPS[name]({
       ctx: { repoDir, headSha, authorAssociation: pr.author_association, policies, env, fetchImpl },
-      state, env, io, pr, repo, prNumber, findings, post, fail,
+      state, env, io, pr, repo, prNumber, findings, post, fail, comments,
       judgeRound: Math.max(state.advocateRounds, 1),
       prompt: (role) => loadRolePrompt(baseDir, role),
       intent: () => prIntent(io, repo, prNumber, pr),
       snapshot,
       basePhi: () => { baseTotal ??= computeGitTreePhi(repoDir, baseSha).metrics.total; return baseTotal; },
       phiAllowance,
+      phiWarrant: () => { phiAllowance(); return warrantState; },
     });
     if (code !== null) return code;
   }
@@ -500,4 +536,4 @@ if (isEntrypoint(import.meta.url)) {
   });
 }
 
-export { allowanceOf, clip, decideCourtStep, defaultIo, fenceData, formatCourtReceipt, isLockedPatchPath, landCourtMerge, loadRolePrompt, main, MAX_ROUNDS, parseCourtState, pushCommit, resolveRepoFile, runAdvocateRound, runCourtTick, runCriticRound, runJudgeArbitration, sanitizeCourtText, stagePatches, TRUSTED_AUTHORS };
+export { allowanceOf, clip, decideCourtStep, defaultIo, fenceData, formatCourtReceipt, isLockedPatchPath, LANDING_NEXT_STEPS, landCourtMerge, loadRolePrompt, main, MAX_ROUNDS, parseCourtState, postLandingNotice, pushCommit, resolveRepoFile, runAdvocateRound, runCourtTick, runCriticRound, runJudgeArbitration, sanitizeCourtText, stagePatches, TRUSTED_AUTHORS };
