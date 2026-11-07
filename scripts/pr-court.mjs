@@ -20,7 +20,8 @@ const MAX_TICK_STEPS = 6;
 const TICK_BUDGET_MS = 40 * 60000;
 const MODEL_STEPS = new Set(["critic", "advocate", "judge"]);
 const MAX_DIFF_CHARS = 500000;
-const MAX_FILE_CHARS = 20000;
+const MAX_FILE_CHARS = 60000;
+const MAX_INPUT_CHARS = 200000;
 const MAX_BODY_CHARS = 60000;
 const MAX_NOTARY_ATTEMPTS = 5;
 const TRUSTED_AUTHORS = ["OWNER", "MEMBER", "COLLABORATOR"];
@@ -131,31 +132,72 @@ function stagePatches(repoDir, patches, policies) {
 
 const lockedFiles = (files, policies) => files.filter((f) => isHumanOnlyPath(f, policies.humanOnly) || isReviewerConfigPath(f));
 
-async function runCriticRound({ diffText = "", headSha, round = 1, authorAssociation, env, fetchImpl, rolePrompt = "" }) {
-  const refused = refusalReason(diffText, authorAssociation);
-  if (refused) return { ok: false, refused: true, reason: refused };
-  const res = await callCourtModel({ role: "critic", system: rolePrompt, user: fenceData({ head_sha: headSha, round, diff: diffText }), env, fetchImpl });
-  if (!res.ok) return res;
-  const reply = validateCritic(res.data);
-  return reply ? { ok: true, ...reply } : { ok: false, reason: "LLM_INVALID_REPLY" };
+/** A rejected reply can quote the diff, so this logs its shape and none of its text. */
+function invalidReply(role, data) {
+  const list = (value) => (Array.isArray(value) ? value : []);
+  const count = (value) => (Array.isArray(value) ? value.length : "?");
+  const word = (value) => (/^[A-Z0-9_]{1,24}$/.test(value) ? value : "?");
+  const labels = [...list(data?.findings), ...list(data?.responses), ...list(data?.rulings)].map((item) => word(item?.severity ?? item?.action ?? item?.status));
+  log(`${role} reply rejected: verdict=${word(data?.verdict)} findings=${count(data?.findings)} responses=${count(data?.responses)} rulings=${count(data?.rulings)} labels=${labels.join(",")}`);
+  return { ok: false, reason: "LLM_INVALID_REPLY" };
 }
 
-async function runAdvocateRound({ repoDir, diffText = "", authorAssociation, findings = [], basePhi, phiAllowance = 0, round = 1, policies, env, fetchImpl, rolePrompt = "", commit = null }) {
+/** Repo files as text data, in the room the diff leaves. `partial_files` names what was clipped, refused, deleted or left out, so a gap never reads as absent code. */
+function readContext(repoDir, files, diffText) {
+  const contents = {};
+  const partial = [];
+  let left = Math.max(0, MAX_INPUT_CHARS - diffText.length);
+  for (const file of new Set(files.filter(Boolean))) {
+    const abs = resolveRepoFile(repoDir, file);
+    if (!abs) { partial.push(file); continue; }
+    const text = readFileSync(abs, "utf8");
+    const kept = text.includes("\0") ? "" : clip(text, Math.min(MAX_FILE_CHARS, left));
+    if (kept.length < text.length) partial.push(file);
+    if (kept || !text) contents[file] = kept;
+    left -= kept.length;
+  }
+  return { file_contents: contents, partial_files: partial };
+}
+
+function linkedIssues(io, repo, prNumber) {
+  const { closingIssuesReferences: linked } = JSON.parse(io.run("gh", ["pr", "view", String(prNumber), "--repo", repo, "--json", "closingIssuesReferences"]));
+  return linked.filter(({ url }) => url.startsWith(`https://github.com/${repo}/issues/`));
+}
+
+/** What the PR must deliver. Only a trusted author's issue counts: an outsider's text must not set the bar or argue the case. */
+function prIntent(io, repo, prNumber, pr) {
+  const intent = { pr_intent: { title: clip(pr.title, 300), body: clip(pr.body, MAX_FILE_CHARS) } };
+  let issues;
+  try {
+    issues = linkedIssues(io, repo, prNumber).map(({ number }) => io.api(`repos/${repo}/issues/${number}`)).filter((i) => TRUSTED_AUTHORS.includes(i.author_association));
+  } catch (err) {
+    // A flaky gh call costs the linked issues, not the tick, and the role is told they are missing rather than absent.
+    console.log(`::warning::pr-court: PR ${prNumber}: linked issues unavailable: ${err?.name}`);
+    return { ...intent, linked_issues: [], linked_issues_unavailable: true };
+  }
+  return { ...intent, linked_issues: issues.map((i) => ({ number: i.number, title: clip(i.title, 300), body: clip(i.body, MAX_FILE_CHARS) })) };
+}
+
+async function runCriticRound({ repoDir, diffText = "", files = [], intent = () => ({}), headSha, round = 1, authorAssociation, env, fetchImpl, rolePrompt = "" }) {
+  const refused = refusalReason(diffText, authorAssociation);
+  if (refused) return { ok: false, refused: true, reason: refused };
+  const res = await callCourtModel({ role: "critic", system: rolePrompt, user: fenceData({ head_sha: headSha, round, ...intent(), diff: diffText, ...readContext(repoDir, files, diffText) }), env, fetchImpl });
+  if (!res.ok) return res;
+  const reply = validateCritic(res.data);
+  return reply ? { ok: true, ...reply } : invalidReply("critic", res.data);
+}
+
+async function runAdvocateRound({ repoDir, diffText = "", files = [], intent = () => ({}), authorAssociation, findings = [], basePhi, phiAllowance = 0, round = 1, policies, env, fetchImpl, rolePrompt = "", commit = null }) {
   const escalate = (reason, extra = {}) => ({ ok: true, verdict: "ESCALATE", reason, ...extra });
   if (round > MAX_ROUNDS) return escalate("MAX_ROUNDS");
   const refused = refusalReason(diffText, authorAssociation);
   if (refused) return { ok: true, verdict: refusalVerdict(refused), reason: refused };
-  const contents = {};
-  for (const file of new Set(findings.map((f) => f.file))) {
-    const abs = resolveRepoFile(repoDir, file);
-    if (abs) contents[file] = clip(readFileSync(abs, "utf8"), MAX_FILE_CHARS);
-  }
   const headPhi = computePhi(repoDir).total;
-  const user = fenceData({ round, phi_budget: { base_phi: basePhi, head_phi: headPhi, delta_phi: headPhi - basePhi, phi_allowance: allowanceOf(phiAllowance) }, findings, diff: diffText, file_contents: contents });
+  const user = fenceData({ round, phi_budget: { base_phi: basePhi, head_phi: headPhi, delta_phi: headPhi - basePhi, phi_allowance: allowanceOf(phiAllowance) }, findings, ...intent(), diff: diffText, ...readContext(repoDir, [...findings.map((f) => f.file), ...files], diffText) });
   const res = await callCourtModel({ role: "advocate", system: rolePrompt, user, env, fetchImpl });
   if (!res.ok) return res;
   const reply = validateAdvocate(res.data, findings);
-  if (!reply) return { ok: false, reason: "LLM_INVALID_REPLY" };
+  if (!reply) return invalidReply("advocate", res.data);
   const patches = reply.responses.flatMap((r) => r.patches);
   if (patches.length === 0) return { ok: true, verdict: "REBUT", ...reply };
   const staged = stagePatches(repoDir, patches, policies);
@@ -173,7 +215,7 @@ async function runAdvocateRound({ repoDir, diffText = "", authorAssociation, fin
   }
 }
 
-async function runJudgeArbitration({ diffText = "", files = [], headSha, authorAssociation, evidence = {}, findings = [], transcript = [], round = 1, policies, env, fetchImpl, rolePrompt = "" }) {
+async function runJudgeArbitration({ repoDir, diffText = "", files = [], intent = () => ({}), headSha, authorAssociation, evidence = {}, findings = [], transcript = [], round = 1, policies, env, fetchImpl, rolePrompt = "" }) {
   const refuse = (reason, verdict = "RECUSE") => ({ ok: true, refused: true, verdict, reason, rationale: reason, rulings: [], unresolved: [] });
   const refused = refusalReason(diffText, authorAssociation);
   if (refused) return refuse(refused, refusalVerdict(refused));
@@ -182,10 +224,10 @@ async function runJudgeArbitration({ diffText = "", files = [], headSha, authorA
   if (evidence.suitePassBase !== true || evidence.suitePassHead !== true) return refuse("SUITE_NOT_GREEN", "WAIT");
   if (!Number.isSafeInteger(evidence.deltaPhi) || evidence.deltaPhi > allowanceOf(evidence.phiAllowance)) return refuse(`DELTA_PHI: ${evidence.deltaPhi}`);
   const system = evidence.deltaPhi > 0 ? `${rolePrompt}\n\n${JUDGE_PHI_WARRANT_RULE}` : rolePrompt;
-  const res = await callCourtModel({ role: "judge", system, user: fenceData({ head_sha: headSha, round, evidence, findings, transcript, diff: diffText }), env, fetchImpl });
+  const res = await callCourtModel({ role: "judge", system, user: fenceData({ head_sha: headSha, round, evidence, findings, transcript, ...intent(), diff: diffText, ...readContext(repoDir, files, diffText) }), env, fetchImpl });
   if (!res.ok) return res;
   const ruling = validateJudge(res.data, findings);
-  if (!ruling) return { ok: false, reason: "LLM_INVALID_REPLY" };
+  if (!ruling) return invalidReply("judge", res.data);
   return { ok: true, ...ruling, verdict: ruling.verdict === "REMAND" && round >= MAX_ROUNDS ? "ESCALATE" : ruling.verdict };
 }
 
@@ -227,9 +269,7 @@ async function awaitRerun(io, repo, headSha, attempt, { polls = 80, delayMs = 15
 /** A `Closes #n` did not close its issue when this job's GITHUB_TOKEN merged PR 94, so the court closes them itself. The merge already stands, so a failure here only warns. */
 function closeLinkedIssues(io, repo, prNumber) {
   try {
-    const { closingIssuesReferences: linked } = JSON.parse(io.run("gh", ["pr", "view", String(prNumber), "--repo", repo, "--json", "closingIssuesReferences"]));
-    for (const { number, url } of linked) {
-      if (!url.startsWith(`https://github.com/${repo}/issues/`)) continue;
+    for (const { number } of linkedIssues(io, repo, prNumber)) {
       // Each close stands alone: one refusal must not doom the remaining issues.
       try { io.run("gh", ["issue", "close", String(number), "--repo", repo, "--reason", "completed", "--comment", `Done in #${prNumber}, merged by the PR Court.`]); } catch (err) { console.log(`::warning::pr-court: PR ${prNumber} merged, but its linked issues may still be open (#${number}): ${err?.name}`); }
     }
@@ -285,7 +325,9 @@ function defaultIo(env) {
 }
 
 function diffSnapshot(io, repoDir, base, head) {
-  const git = (...args) => io.run("git", ["-C", repoDir, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", ...args, `${base}...${head}`]);
+  // --text: a candidate's .gitattributes must not turn a change into "Binary files differ", which hides it from the hazard scan
+  // while file_contents still hands its full text to the model.
+  const git = (...args) => io.run("git", ["-C", repoDir, "diff", "--no-ext-diff", "--no-textconv", "--text", "--no-renames", ...args, `${base}...${head}`]);
   return { diffText: git(), files: git("--name-only", "-z").split("\0").filter(Boolean) };
 }
 
@@ -311,19 +353,19 @@ const COURT_STEPS = {
     post({ round: judgeRound, role: "judge", verdict: refusalVerdict(refused), text: refused ?? `COURTHOUSE_LOCK: ${locked.slice(0, 10).join(", ")} - ${locked.some(isReviewerConfigPath) ? "reviewer config: no sign-off clears the gate, so the owner merges by hand." : `run node scripts/owner-signoff.mjs ${prNumber}`}` }); return 0;
   },
   escalate: ({ post, judgeRound }) => { post({ round: judgeRound, role: "judge", verdict: "ESCALATE", text: "MAX_ROUNDS: findings remain open after the last Advocate round." }); return 0; },
-  async critic({ ctx, snapshot, post, fail, state, prompt }) {
-    const res = await runCriticRound({ ...ctx, diffText: snapshot().diffText, round: state.advocateRounds + 1, rolePrompt: prompt("critic") });
+  async critic({ ctx, snapshot, post, fail, state, prompt, intent }) {
+    const res = await runCriticRound({ ...ctx, ...snapshot(), intent, round: state.advocateRounds + 1, rolePrompt: prompt("critic") });
     if (res.refused) { post({ round: state.advocateRounds + 1, role: "judge", verdict: refusalVerdict(res.reason), text: res.reason }); return 0; }
     if (!res.ok) return fail(res);
     const list = res.findings.map((f) => `- **${f.severity} ${f.id}** \`${f.file}:${f.line}\` ${f.title}`);
     post({ round: state.advocateRounds + 1, role: "critic", verdict: res.verdict, count: res.findings.length, payload: { findings: res.findings }, text: [res.summary, ...list].join("\n") });
     return null;
   },
-  async advocate({ ctx, snapshot, post, fail, state, prompt, findings, basePhi, phiAllowance, env, io, pr }) {
+  async advocate({ ctx, snapshot, post, fail, state, prompt, intent, findings, basePhi, phiAllowance, env, io, pr }) {
     const round = state.advocateRounds + 1;
     const token = env.MIRQL_COURT_TOKEN;
     const commit = token ? (files) => pushCommit(io, ctx.repoDir, files, pr.head.ref, token, `fix: PR Court advocate round ${round}`, env) : null;
-    const res = await runAdvocateRound({ ...ctx, diffText: snapshot().diffText, findings, basePhi: basePhi(), phiAllowance: phiAllowance(), round, rolePrompt: prompt("advocate"), commit });
+    const res = await runAdvocateRound({ ...ctx, ...snapshot(), intent, findings, basePhi: basePhi(), phiAllowance: phiAllowance(), round, rolePrompt: prompt("advocate"), commit });
     if (!res.ok) return fail(res);
     if (res.verdict === "ESCALATE" || res.verdict === "RECUSE") { post({ round, role: "judge", verdict: res.verdict, text: advocateText(res) }); return 0; }
     const titled = (id) => { const f = findings.find((x) => x.id === id); return `${f.file}:${f.line} ${f.title}`; };
@@ -331,12 +373,12 @@ const COURT_STEPS = {
     post({ round, headSha: res.headSha, role: "advocate", verdict: res.verdict, count: responses.length, payload: { responses }, text: advocateText(res) });
     return res.verdict === "FIXED" ? 0 : null;
   },
-  async judge({ ctx, snapshot, post, fail, state, prompt, findings, basePhi, phiAllowance, judgeRound, io, repo }) {
+  async judge({ ctx, snapshot, post, fail, state, prompt, intent, findings, basePhi, phiAllowance, judgeRound, io, repo }) {
     const notary = notaryRun(io, repo, ctx.headSha);
     if (!["success", "failure"].includes(notary?.head) || !["success", "failure"].includes(notary?.base)) return 0;
     const { diffText, files } = snapshot();
     const evidence = { suitePassBase: notary.base === "success", suitePassHead: notary.head === "success", deltaPhi: computeGitTreePhi(ctx.repoDir, ctx.headSha).metrics.total - basePhi(), phiAllowance: phiAllowance() };
-    const res = await runJudgeArbitration({ ...ctx, diffText, files, evidence, findings, transcript: state.transcript, round: judgeRound, rolePrompt: prompt("judge") });
+    const res = await runJudgeArbitration({ ...ctx, diffText, files, intent, evidence, findings, transcript: state.transcript, round: judgeRound, rolePrompt: prompt("judge") });
     if (!res.ok) return fail(res);
     if (res.verdict === "WAIT") return 0; // A red suite posts nothing, so a green re-run can come back.
     post({ round: judgeRound, role: "judge", verdict: res.verdict, count: res.unresolved.length, payload: { findings: res.unresolved, rulings: res.rulings }, text: res.rationale });
@@ -354,6 +396,7 @@ async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl 
   if (env.MIRQL_COURT_DISABLED === "1") return 0;
   const policies = loadPathPolicies(baseDir);
   const external = (policies.aiReviewers ?? []).filter((r) => !r.startsWith("mirql-"));
+  let retried = false;
   for (let step = 0; step < MAX_TICK_STEPS; step += 1) {
     const pr = io.api(`repos/${repo}/pulls/${prNumber}`);
     const skip = courtSkipReason(pr, repo);
@@ -371,6 +414,8 @@ async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl 
     const name = decideCourtStep(state, { externalFindings, externalReviewed, codexPending: inspectReviewStatus(comments, headSha).codexPending, locked: lockedFiles(snapshot().files, policies).length > 0, lateChanges: hasLateChanges(reviews, state, headSha) });
     log(`step ${step}: ${name} at ${headSha}`);
     const fail = (res) => {
+      // Two PRs lost a tick to one bad reply. The second try goes back through the time budget below.
+      if (res.reason === "LLM_INVALID_REPLY" && !retried) { retried = true; log(`${name}: invalid reply, asking again`); return null; }
       console.log(`::error::pr-court: ${res.reason}`);
       if (res.reason === "NO_API_KEY") return 0;
       const mark = `mirql-court-failure:v1 ${name} ${headSha} ${res.reason}`;
@@ -404,6 +449,7 @@ async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl 
       state, env, io, pr, repo, prNumber, findings, post, fail,
       judgeRound: Math.max(state.advocateRounds, 1),
       prompt: (role) => loadRolePrompt(baseDir, role),
+      intent: () => prIntent(io, repo, prNumber, pr),
       snapshot,
       basePhi: () => { baseTotal ??= computeGitTreePhi(repoDir, baseSha).metrics.total; return baseTotal; },
       phiAllowance,
