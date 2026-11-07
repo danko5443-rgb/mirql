@@ -1127,6 +1127,20 @@ describe("court tick end to end", () => {
     }
   });
 
+  it("still reviews when the linked issues cannot be read, and says they are missing", async () => {
+    await withDir(async (dir) => {
+      const box = sandbox(dir);
+      const run = box.io.run;
+      box.io.run = (cmd, args, options) => { if (cmd === "gh" && args[1] === "view") throw new Error("rate limited"); return run(cmd, args, options); };
+      const { fetchImpl, calls } = mockFetch(critic, fix);
+      await quiet(() => runCourtTick({ env: box.env, io: box.io, fetchImpl, baseDir: ROOT }));
+      assert.ok(calls.length > 0);
+      assert.deepEqual(JSON.parse(fenced(calls[0], "linked_issues")), []);
+      assert.equal(fenced(calls[0], "linked_issues_unavailable"), "true");
+      assert.equal(JSON.parse(fenced(calls[0], "pr_intent")).title, box.pr.title ?? "");
+    });
+  });
+
   it("leaves out a linked issue from an untrusted author", async () => {
     await withDir(async (dir) => {
       const box = sandbox(dir);

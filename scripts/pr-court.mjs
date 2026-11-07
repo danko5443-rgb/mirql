@@ -166,8 +166,16 @@ function linkedIssues(io, repo, prNumber) {
 
 /** What the PR must deliver. Only a trusted author's issue counts: an outsider's text must not set the bar or argue the case. */
 function prIntent(io, repo, prNumber, pr) {
-  const issues = linkedIssues(io, repo, prNumber).map(({ number }) => io.api(`repos/${repo}/issues/${number}`)).filter((i) => TRUSTED_AUTHORS.includes(i.author_association));
-  return { pr_intent: { title: clip(pr.title, 300), body: clip(pr.body, MAX_FILE_CHARS) }, linked_issues: issues.map((i) => ({ number: i.number, title: clip(i.title, 300), body: clip(i.body, MAX_FILE_CHARS) })) };
+  const intent = { pr_intent: { title: clip(pr.title, 300), body: clip(pr.body, MAX_FILE_CHARS) } };
+  let issues;
+  try {
+    issues = linkedIssues(io, repo, prNumber).map(({ number }) => io.api(`repos/${repo}/issues/${number}`)).filter((i) => TRUSTED_AUTHORS.includes(i.author_association));
+  } catch (err) {
+    // A flaky gh call costs the linked issues, not the tick, and the role is told they are missing rather than absent.
+    console.log(`::warning::pr-court: PR ${prNumber}: linked issues unavailable: ${err?.name}`);
+    return { ...intent, linked_issues: [], linked_issues_unavailable: true };
+  }
+  return { ...intent, linked_issues: issues.map((i) => ({ number: i.number, title: clip(i.title, 300), body: clip(i.body, MAX_FILE_CHARS) })) };
 }
 
 async function runCriticRound({ repoDir, diffText = "", files = [], intent = () => ({}), headSha, round = 1, authorAssociation, env, fetchImpl, rolePrompt = "" }) {
