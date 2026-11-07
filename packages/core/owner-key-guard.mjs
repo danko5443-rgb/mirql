@@ -49,7 +49,7 @@ export function findUnprotectedOwnerKey(mirqlDir, options = {}) {
   const candidates = [];
   try {
     candidates.push(resolveHumanKeyPath(mirqlDir, options));
-  } catch {
+  } catch { /* mp-003-allow: an unresolvable key path exposes no file to guard, which is the guarded answer */
     // An unresolvable key path (e.g. unsafe trust root) exposes no file here.
   }
   const base = process.env.MIRQL_TRUST_ROOT ?? join(homedir(), ".mirql-trust");

@@ -67,7 +67,7 @@ export function loadDoctorPolicy(mirqlDir, workspaceDir) {
   if (existsSync(candidate)) {
     try {
       return JSON.parse(readFileSync(candidate, "utf8"));
-    } catch {}
+    } catch { /* mp-003-allow: an unreadable probe config falls back to the built-in probe defaults */ }
   }
   return {
     daily_budget_micro_usd: 25000000,
@@ -633,7 +633,7 @@ export class BreakerStore {
       const stateDir = join(this.mirqlDir, "state");
       mkdirSync(stateDir, { recursive: true });
       writeFileSync(this.stateFile, jcs(folded) + "\n", "utf8");
-    } catch {}
+    } catch { /* mp-003-allow: the doctor's state snapshot is advisory; the ledger fold remains the record */ }
     return folded;
   }
 

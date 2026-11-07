@@ -113,7 +113,7 @@ export function loadPolicy(mirqlDir, repoRoot) {
     try {
       const parsed = JSON.parse(readFileSync(candidate, "utf8"));
       return { ...DEFAULT_POLICY, ...parsed };
-    } catch {
+    } catch { /* mp-003-allow: an unreadable policy file falls back to DEFAULT_POLICY, the operator-audited defaults */
       // Fall through to default
     }
   }
@@ -186,7 +186,7 @@ export function submitWarrant(mirqlDir, warrantInput, options = {}) {
   if (notRoadmapFile && existsSync(notRoadmapFile)) {
     try {
       notRoadmapContent = readFileSync(notRoadmapFile, "utf8");
-    } catch {
+    } catch { /* mp-003-allow: an unreadable NOT-ROADMAP.md is treated as absent; the warrant schema and gate checks still refuse forbidden patterns */
       // ignore
     }
   }

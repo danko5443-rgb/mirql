@@ -359,7 +359,7 @@ export class LifeguardWatchdog {
         if (text && targetSha && text !== targetSha) {
           unlinkSync(this.disarmFile);
         }
-      } catch {}
+      } catch { /* mp-003-allow: an unreadable disarm file reads as armed, the safe default for the kill daemon */ }
     }
   }
 
@@ -384,7 +384,7 @@ export class LifeguardWatchdog {
       try {
         const text = readFileSync(this.baseShaFile, "utf8").trim();
         if (text.length > 0) return text;
-      } catch {}
+      } catch { /* mp-003-allow: an unreadable base-sha file means no pinned target, and the lifeguard refuses without one */ }
     }
     return null;
   }
@@ -403,7 +403,7 @@ export class LifeguardWatchdog {
           this.disarm();
           return { ok: true, disarmed: true, tripped: false, reason: "DISARMED_FOR_TARGET_SHA", targetSha };
         }
-      } catch {}
+      } catch { /* mp-003-allow: an unreadable disarm file cannot prove disarm, so the kill authority stays armed (fail-closed) */ }
     }
 
     // Check heartbeat file mtime if configured
@@ -413,7 +413,7 @@ export class LifeguardWatchdog {
         if (stats.mtimeMs > this.lastHeartbeatMs) {
           this.lastHeartbeatMs = stats.mtimeMs;
         }
-      } catch {}
+      } catch { /* mp-003-allow: a missing heartbeat file keeps the last known mtime; staleness is judged by the heartbeat check, not here */ }
     }
 
     const status = checkProbationStatus({
@@ -441,7 +441,7 @@ export class LifeguardWatchdog {
             if (Number.isSafeInteger(rawPid) && rawPid > 0 && !allPids.includes(rawPid)) {
               allPids.push(rawPid);
             }
-          } catch {}
+          } catch { /* mp-003-allow: an unreadable pid file contributes no pid; the kill sweep proceeds with the pids it did find */ }
         }
       }
 

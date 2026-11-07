@@ -395,7 +395,7 @@ export function runProbe(options = {}) {
               if (diffRes.status === 0 && diffRes.stdout) {
                 changedLines = extractChangedLines(diffRes.stdout);
               }
-            } catch {}
+            } catch { /* mp-003-allow: an unreadable diff contributes no changed lines, so the probe runs untargeted instead of skipping */ }
 
             const res = runMutationTesting({
               sourcePath: sourceAbs,

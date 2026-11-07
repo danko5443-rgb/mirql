@@ -617,7 +617,7 @@ export async function startFactoryDaemon(options = {}) {
   mkdirSync(join(mirqlDir, "ledger"), { recursive: true });
   const heartbeatPath = join(stateDir, "heartbeat");
   const pidPath = join(stateDir, "launcher.pid");
-  const touch = (file, body) => { try { writeFileSync(file, body, "utf8"); } catch {} };
+  const touch = (file, body) => { try { writeFileSync(file, body, "utf8"); } catch { /* mp-003-allow: a heartbeat or pid write failure is caught by the lifeguard's staleness check, not by crashing the launcher */ } };
   touch(heartbeatPath, `${Date.now()}\n`);
   touch(pidPath, `${process.pid}\n`);
   const ticker = setInterval(() => touch(heartbeatPath, `${Date.now()}\n`), options.heartbeatMs ?? 2000);
@@ -641,14 +641,14 @@ export async function startFactoryDaemon(options = {}) {
     clearInterval(ticker);
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
-    try { daemon.close(); } catch {}
-    try { if (existsSync(pidPath)) unlinkSync(pidPath); } catch {}
+    try { daemon.close(); } catch { /* mp-003-allow: the launcher is already stopping; a failed close leaves the socket to the OS */ }
+    try { if (existsSync(pidPath)) unlinkSync(pidPath); } catch { /* mp-003-allow: a pid file that cannot be unlinked during stop reads as stale at next launch, which rewrites it */ }
     resolveDone();
   };
 
   // Drain mode resolves the reactive loop's own done promise; mirror it here
   // so the launcher lifecycle (pid + heartbeat ticker) shuts down with it.
-  daemon.done.then(stop).catch(() => {});
+  daemon.done.then(stop).catch(() => { /* mp-003-allow: stop is idempotent; a rejected done only means the reactive loop already stopped itself */ });
   if (options.handleSignals !== false) {
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);

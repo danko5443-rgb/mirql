@@ -35,7 +35,10 @@ export function validateRoadmapRef(roadmapRef, startDir) {
       if (!content.includes(normalized)) {
         return denied(`roadmap_ref ${normalized} not found in ROADMAP.md`);
       }
-    } catch {}
+    } catch {
+      // Law 6: a roadmap that exists but cannot be read proves nothing, so the ref stays unconfirmed.
+      return denied(`roadmap_ref ${normalized} could not be confirmed against ROADMAP.md`);
+    }
   }
 
   return { ok: true };
@@ -81,7 +84,7 @@ export function checkNotRoadmap(input, startDir) {
           }
         }
       }
-    } catch {}
+    } catch { /* mp-003-allow: an unreadable rules file contributes no dynamic rules; the static NOT-ROADMAP rules still deny their patterns */ }
   }
 
   return { ok: true };
@@ -105,7 +108,7 @@ export function checkProposalQuota(proposalsDir) {
       if (status === "pending" || status === "open" || status === "active") {
         activeCount += 1;
       }
-    } catch {}
+    } catch { /* mp-003-allow: an unreadable status entry counts as not active; admission is decided by the signed warrant, not the digest count */ }
   }
 
   if (activeCount >= MAX_ACTIVE_PROPOSALS) {

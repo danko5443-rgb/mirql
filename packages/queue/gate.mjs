@@ -38,7 +38,7 @@ export function checkNotRoadmapGate(warrantInput, notRoadmapContent) {
             dynamicRules.push(item);
           }
         }
-      } catch {
+      } catch { /* mp-003-allow: a malformed rules block in advisory markdown contributes no dynamic rule; the static rules still deny their patterns */
         // ignore JSON parse error in markdown
       }
     }

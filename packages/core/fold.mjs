@@ -103,7 +103,7 @@ export function readLedgerEvents(mirqlDir) {
     try {
       const event = JSON.parse(line);
       events.push({ event, raw: line });
-    } catch {}
+    } catch { /* mp-003-allow: a malformed line is corruption this advisory fold skips; the signature-verifying readers refuse the whole ledger instead */ }
   }
 
   return events;
