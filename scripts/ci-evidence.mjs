@@ -6,6 +6,8 @@
 //   - files / deleted tests come from the authoritative git diff (fail-closed)
 //   - proof.suite_pass_base / proof.suite_pass_head mirror the real outcomes of
 //     the base-notary and candidate suite steps (Law 7: base-authored evidence)
+//   - sourceCode carries the HEAD-committed content of every changed .mjs file
+//     so the notary's MP-002/MP-003 diff-gate scans run on measured evidence
 //   - phi.delta_phi is computed by the base-notary's own computePhi (Law 13)
 //   - proof.causal_cycle_completed is ALWAYS false in CI: the exit codes of a
 //     candidate-supplied script are attestation, not measurement (a script
@@ -54,14 +56,16 @@ export function isTestFilePath(p) {
  * Authoritative git diff (Law 7): `git diff --name-status base...head`.
  * Fail-closed: any git failure returns { ok: false } — never an empty guess.
  *
- * @returns {{ ok: boolean, error?: string, files: string[], deletedTests: string[] }}
+ * @returns {{ ok: boolean, error?: string, files: string[], deletedTests: string[], deletedFiles: string[] }}
+ *   deletedFiles lists EVERY deleted or renamed-away path (not just tests) so
+ *   source collection knows which changed paths have no content at head.
  */
 export function collectDiff(baseSha, headSha, repoDir) {
   if (!baseSha || !headSha || !repoDir) {
-    return { ok: false, error: "collectDiff requires baseSha, headSha, repoDir", files: [], deletedTests: [] };
+    return { ok: false, error: "collectDiff requires baseSha, headSha, repoDir", files: [], deletedTests: [], deletedFiles: [] };
   }
   if (!existsSync(join(repoDir, ".git"))) {
-    return { ok: false, error: `Directory ${repoDir} is not a git repository`, files: [], deletedTests: [] };
+    return { ok: false, error: `Directory ${repoDir} is not a git repository`, files: [], deletedTests: [], deletedFiles: [] };
   }
   const res = spawnSync(
     "git",
@@ -74,6 +78,7 @@ export function collectDiff(baseSha, headSha, repoDir) {
   }
   const files = [];
   const deletedTests = [];
+  const deletedFiles = [];
   for (const line of String(res.stdout || "").split(/\r?\n/)) {
     if (!line.trim()) continue;
     const parts = line.split("\t");
@@ -82,18 +87,58 @@ export function collectDiff(baseSha, headSha, repoDir) {
       const oldFile = parts[1];
       const newFile = parts[2];
       files.push(newFile);
+      deletedFiles.push(oldFile);
       if (isTestFilePath(oldFile) && !isTestFilePath(newFile)) {
         deletedTests.push(oldFile);
       }
     } else if (parts.length >= 2) {
       const file = parts[1];
       files.push(file);
-      if (status.startsWith("D") && isTestFilePath(file)) {
-        deletedTests.push(file);
+      if (status.startsWith("D")) {
+        deletedFiles.push(file);
+        if (isTestFilePath(file)) {
+          deletedTests.push(file);
+        }
       }
     }
   }
-  return { ok: true, files, deletedTests };
+  return { ok: true, files, deletedTests, deletedFiles };
+}
+
+/**
+ * HEAD-committed content of every changed .mjs file, so the base notary's
+ * MP-002/MP-003 diff-gate scans run on measured evidence instead of silently
+ * skipping (Laws 6 & 7: the scanner is base-authored; this content is data).
+ * Content comes from `git show <head>:<path>` — the committed bytes, never the
+ * working tree. Deleted paths have no content at head and are skipped; any
+ * other read failure fails closed rather than leaving a file unscanned.
+ *
+ * @param {string[]} files - changed paths (from collectDiff)
+ * @param {string[]} deletedFiles - paths with no content at head (from collectDiff)
+ * @param {string} headSha
+ * @param {string} repoDir - candidate git repository
+ * @returns {{ ok: boolean, error?: string, sourceCode: Record<string, string> }}
+ */
+export function collectSourceCode(files, deletedFiles, headSha, repoDir) {
+  if (!headSha || !repoDir) {
+    return { ok: false, error: "collectSourceCode requires headSha, repoDir", sourceCode: {} };
+  }
+  const deleted = new Set(deletedFiles);
+  const sourceCode = {};
+  for (const file of Array.isArray(files) ? files : []) {
+    if (deleted.has(file) || !String(file).endsWith(".mjs")) continue;
+    const res = spawnSync("git", ["-C", repoDir, "show", `${headSha}:${file}`], {
+      encoding: "utf8",
+      timeout: 15000,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    if (res.status !== 0) {
+      const err = (res.stderr || res.stdout || `git exit code ${res.status}`).trim();
+      return { ok: false, error: `reading ${file} at ${headSha.slice(0, 10)}: ${err}`, sourceCode: {} };
+    }
+    sourceCode[file] = res.stdout;
+  }
+  return { ok: true, sourceCode };
 }
 
 /**
@@ -110,11 +155,14 @@ export function collectDiff(baseSha, headSha, repoDir) {
  * @param {{ passed: boolean, evidence?: object, reasons?: string[] }} [input.thrift]
  *        - MEASURED thrift test verdict (issue #13). Only ever true when a
  *          real thrift test ran; absent for non-consolidation PRs.
+ * @param {Record<string, string>} [input.sourceCode] - HEAD-committed content of
+ *        every changed .mjs file (see collectSourceCode); consumed by the base
+ *        notary's MP-002/MP-003 diff-gate scans
  * @param {object} [input.reproducer] - DATA-ONLY manifest record (see
  *        loadReproducerManifest); never a source of causal proof
  * @returns {object} pr-doc consumable by `mirql m check`
  */
-export function buildPrDoc({ pr, diff, suite, phi, causalCompleted = false, thrift, reproducer }) {
+export function buildPrDoc({ pr, diff, suite, phi, causalCompleted = false, thrift, sourceCode, reproducer }) {
   const phiBlock = { delta_phi: phi.delta_phi };
   if (thrift) {
     phiBlock.thrift_test_passed = thrift.passed === true;
@@ -144,6 +192,9 @@ export function buildPrDoc({ pr, diff, suite, phi, causalCompleted = false, thri
     },
     phi: phiBlock,
   };
+  if (sourceCode && Object.keys(sourceCode).length > 0) {
+    doc.sourceCode = sourceCode;
+  }
   if (reproducer) {
     doc.proof.reproducer = reproducer;
   }
@@ -370,6 +421,17 @@ export async function main(env = process.env) {
     }
   }
 
+  // 2c. Law 6: the HEAD-committed content of every changed .mjs file, so the
+  // base notary's MP-002/MP-003 diff-gate scans run on measured evidence
+  // instead of silently skipping. Read from the candidate's git objects —
+  // never its working tree — and fail-closed: an unreadable file must stop
+  // the evidence build, not slip past the scan.
+  const sourceInfo = collectSourceCode(diff.files, diff.deletedFiles, headSha, candidateDir);
+  if (!sourceInfo.ok) {
+    process.stderr.write(`ci-evidence: source collection failed: ${sourceInfo.error}\n`);
+    process.exit(1);
+  }
+
   // 3. Law 16: causal proof is NEVER produced in CI. A candidate-supplied
   // reproducer script runs with this job's environment on both checkouts and
   // can inspect which tree it is in before picking its exit code — that is
@@ -400,13 +462,14 @@ export async function main(env = process.env) {
     },
     phi: { delta_phi: deltaPhi },
     thrift,
+    sourceCode: sourceInfo.sourceCode,
     ...(reproducer.present ? { reproducer } : {}),
   });
 
   const outPath = resolve(env.PR_DOC_PATH ?? join(candidateDir, "pr-doc.json"));
   writeFileSync(outPath, JSON.stringify(prDoc), "utf8");
   process.stdout.write(
-    `ci-evidence: wrote ${outPath} (suite base=${prDoc.proof.suite_pass_base} head=${prDoc.proof.suite_pass_head} delta_phi=${deltaPhi} causal=${prDoc.proof.causal_cycle_completed}${reproducer.present ? ` reproducer=present-data-only` : ""}${thrift ? ` thrift=${prDoc.phi.thrift_test_passed}` : ""})\n`,
+    `ci-evidence: wrote ${outPath} (suite base=${prDoc.proof.suite_pass_base} head=${prDoc.proof.suite_pass_head} delta_phi=${deltaPhi} causal=${prDoc.proof.causal_cycle_completed} source_files=${Object.keys(prDoc.sourceCode ?? {}).length}${reproducer.present ? ` reproducer=present-data-only` : ""}${thrift ? ` thrift=${prDoc.phi.thrift_test_passed}` : ""})\n`,
   );
 }
 

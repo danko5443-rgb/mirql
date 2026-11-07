@@ -4,7 +4,7 @@ import { git } from "./helpers/git.mjs";
 // facts: suite outcomes mirror CI step conclusions, the diff is authoritative,
 // and causal_cycle_completed is never assumed true.
 
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,6 +15,7 @@ import {
   parseBoolEnv,
   isTestFilePath,
   collectDiff,
+  collectSourceCode,
   buildPrDoc,
   measureThrift,
   loadReproducerManifest,
@@ -92,6 +93,17 @@ describe("ci-evidence: honest notary evidence builder", () => {
       assert.deepEqual(doc.evidence.tests_deleted, ["tests/old.test.mjs"]);
       assert.equal(doc.phi.delta_phi, 0);
       assert.equal(doc.pr.kind, "pr");
+    });
+
+    it("carries measured sourceCode for the diff-gate scans, and omits it when empty", () => {
+      const withSrc = buildPrDoc({
+        ...baseInput,
+        sourceCode: { "src/a.mjs": "export const a = 1;\n" },
+      });
+      assert.equal(withSrc.sourceCode["src/a.mjs"], "export const a = 1;\n");
+
+      assert.equal(buildPrDoc(baseInput).sourceCode, undefined);
+      assert.equal(buildPrDoc({ ...baseInput, sourceCode: {} }).sourceCode, undefined);
     });
   });
 
@@ -234,6 +246,103 @@ describe("ci-evidence: honest notary evidence builder", () => {
         rmSync(repo, { recursive: true, force: true });
       }
     });
+
+    it("lists every deleted or renamed-away path in deletedFiles (not just tests)", () => {
+      const repo2 = mkdtempSync(join(tmpdir(), "mirql-ciev-repo2-"));
+      try {
+        git(repo2, "init", "-q");
+        git(repo2, "config", "user.email", "test@mirql.local");
+        git(repo2, "config", "user.name", "mirql-test");
+        mkdirSync(join(repo2, "src"), { recursive: true });
+        writeFileSync(join(repo2, "src", "gone.mjs"), "export {};\n");
+        writeFileSync(join(repo2, "src", "moved.mjs"), "export {};\n");
+        writeFileSync(join(repo2, "note.txt"), "x\n");
+        git(repo2, "add", "-A");
+        git(repo2, "commit", "-q", "-m", "base");
+        git(repo2, "rm", "-q", "src/gone.mjs");
+        git(repo2, "mv", "src/moved.mjs", "src/renamed.mjs");
+        git(repo2, "add", "-A");
+        git(repo2, "commit", "-q", "-m", "head");
+
+        const res = collectDiff(
+          git(repo2, "rev-parse", "HEAD~1").trim(),
+          git(repo2, "rev-parse", "HEAD").trim(),
+          repo2,
+        );
+        assert.equal(res.ok, true, `diff should succeed: ${res.error}`);
+        assert.ok(res.deletedFiles.includes("src/gone.mjs"), `deletedFiles: ${res.deletedFiles.join(",")}`);
+        assert.ok(res.deletedFiles.includes("src/moved.mjs"), "a renamed-away path counts as deleted");
+        assert.ok(res.files.includes("src/renamed.mjs"));
+      } finally {
+        rmSync(repo2, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("4b. collectSourceCode (HEAD-committed evidence for the MP-003 diff-gate)", () => {
+    /**
+     * Law 6 pin: the evaluator's MP-002/MP-003 diff-gate scans only run when
+     * the pr-doc carries sourceCode — so this must carry the HEAD-COMMITTED
+     * bytes of every changed .mjs file (never working-tree drift), skip only
+     * deleted paths, and fail closed on anything unreadable. A silent skip
+     * would leave a changed file unscanned by the per-PR gate.
+     */
+    let repo;
+    let baseSha;
+    let headSha;
+
+    before(() => {
+      repo = mkdtempSync(join(tmpdir(), "mirql-ciev-src-"));
+      git(repo, "init", "-q");
+      git(repo, "config", "user.email", "test@mirql.local");
+      git(repo, "config", "user.name", "mirql-test");
+      mkdirSync(join(repo, "src"), { recursive: true });
+      writeFileSync(join(repo, "src", "kept.mjs"), "export const kept = 1;\n");
+      writeFileSync(join(repo, "src", "gone.mjs"), "export const gone = 1;\n");
+      writeFileSync(join(repo, "note.txt"), "base\n");
+      git(repo, "add", "-A");
+      git(repo, "commit", "-q", "-m", "base");
+      writeFileSync(join(repo, "src", "kept.mjs"), "export const kept = 2;\n");
+      git(repo, "rm", "-q", "src/gone.mjs");
+      writeFileSync(join(repo, "note.txt"), "head\n");
+      git(repo, "add", "-A");
+      git(repo, "commit", "-q", "-m", "head");
+      // Working-tree drift AFTER the head commit must never leak into evidence
+      writeFileSync(join(repo, "src", "kept.mjs"), "export const kept = 999; // uncommitted drift\n");
+      baseSha = git(repo, "rev-parse", "HEAD~1").trim();
+      headSha = git(repo, "rev-parse", "HEAD").trim();
+    });
+
+    after(() => {
+      rmSync(repo, { recursive: true, force: true });
+    });
+
+    it("carries HEAD-committed content of changed .mjs files, skipping deleted and non-.mjs", () => {
+      const diff = collectDiff(baseSha, headSha, repo);
+      assert.equal(diff.ok, true);
+      const res = collectSourceCode(diff.files, diff.deletedFiles, headSha, repo);
+      assert.equal(res.ok, true, `source collection failed: ${res.error}`);
+      assert.deepEqual(Object.keys(res.sourceCode).sort(), ["src/kept.mjs"]);
+      assert.equal(res.sourceCode["src/kept.mjs"], "export const kept = 2;\n");
+    });
+
+    it("fails closed on missing SHAs and non-repository directories", () => {
+      assert.equal(collectSourceCode(["a.mjs"], [], "", repo).ok, false);
+      const notARepo = mkdtempSync(join(tmpdir(), "mirql-ciev-srcnorepo-"));
+      try {
+        const res = collectSourceCode(["a.mjs"], [], headSha, notARepo);
+        assert.equal(res.ok, false);
+        assert.deepEqual(res.sourceCode, {});
+      } finally {
+        rmSync(notARepo, { recursive: true, force: true });
+      }
+    });
+
+    it("fails closed when a changed .mjs file is unreadable at head (never silently skipped)", () => {
+      const res = collectSourceCode(["src/never-existed.mjs"], [], headSha, repo);
+      assert.equal(res.ok, false);
+      assert.match(res.error, /src\/never-existed\.mjs/);
+    });
   });
 
   describe("5. main entrypoint fail-closed contracts (H2 hardening)", () => {
@@ -271,10 +380,13 @@ describe("ci-evidence: honest notary evidence builder", () => {
         git(tempDir, "config", "user.email", "test@mirql.local");
         git(tempDir, "config", "user.name", "mirql-test");
         writeFileSync(join(tempDir, "sample.txt"), "hello\n");
+        mkdirSync(join(tempDir, "src"), { recursive: true });
+        writeFileSync(join(tempDir, "src", "thing.mjs"), "export const thing = 1;\n");
         git(tempDir, "add", "-A");
         git(tempDir, "commit", "-q", "-m", "init");
 
         writeFileSync(join(tempDir, "sample.txt"), "hello world\n");
+        writeFileSync(join(tempDir, "src", "thing.mjs"), "export const thing = 2;\n");
         git(tempDir, "add", "-A");
         git(tempDir, "commit", "-q", "-m", "update");
 
@@ -307,6 +419,10 @@ describe("ci-evidence: honest notary evidence builder", () => {
         assert.equal(parsed.proof.causal_cycle_completed, false);
         assert.ok(Array.isArray(parsed.diff_stat.files_changed));
         assert.ok(Number.isSafeInteger(parsed.phi.delta_phi));
+        // The changed .mjs file's HEAD content rides along for the notary's
+        // MP-002/MP-003 diff-gate scans (the .txt change must not).
+        assert.equal(parsed.sourceCode["src/thing.mjs"], "export const thing = 2;\n");
+        assert.equal("sample.txt" in (parsed.sourceCode ?? {}), false);
       } finally {
         rmSync(tempDir, { recursive: true, force: true });
       }
