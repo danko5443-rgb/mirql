@@ -26,7 +26,7 @@ function mockFetch(...replies) {
 }
 
 /** A real working copy with fake GitHub calls. `gh` and `git push` are recorded and never leave the machine. */
-async function build({ issue = ISSUE, replies = [BUILD], refs = [], env = {}, failPr = false, failPush = false, files = {} } = {}) {
+async function build({ issue = ISSUE, replies = [BUILD], refs = [], env = {}, failPr = false, failPush = false, files = {}, untracked = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "mirql-builder-"));
   try {
     const git = (...args) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: GIT_ENV, stdio: ["ignore", "pipe", "pipe"] });
@@ -38,6 +38,11 @@ async function build({ issue = ISSUE, replies = [BUILD], refs = [], env = {}, fa
     }
     git("add", ".");
     git("commit", "-qm", "base");
+    // Written after the commit, so it is on disk but git does not track it.
+    for (const [file, text] of Object.entries(untracked)) {
+      mkdirSync(join(dir, file, ".."), { recursive: true });
+      writeFileSync(join(dir, file), text);
+    }
     const seen = { posts: [], pushes: [], gh: [] };
     const io = {
       run(cmd, args, options = {}) {
@@ -198,12 +203,22 @@ describe("issue builder", () => {
     assert.match(r.posts[0], /NEED_FILES_UNREADABLE/);
   });
 
-  it("still stops when a new file is refused because the file limit was reached", async () => {
+  it("refuses a file that exists on disk but is not tracked by git", async () => {
+    const r = await build({ untracked: { "leak.mjs": "export const leaked = 1;\n" }, replies: [{ verdict: "NEED_FILES", files: ["leak.mjs"] }] });
+    assert.equal(r.code, 1);
+    assert.equal(r.llm.length, 1);
+    assert.equal(r.pushes.length, 0);
+    assert.match(r.posts[0], /NEED_FILES_UNREADABLE/);
+    assert.doesNotMatch(r.llm[0].messages.at(-1).content, /export const leaked/);
+  });
+
+  it("still stops when a tracked new file is refused because the file limit was reached", async () => {
     const libs = Object.fromEntries("abcdefghijk".split("").map((c) => [`lib/${c}.mjs`, `export const ${c} = 1;\n`]));
-    const r = await build({ issue: { ...ISSUE, body: `Change src.mjs and ${Object.keys(libs).join(" ")}.` }, files: libs, replies: [{ verdict: "NEED_FILES", files: ["lib/z.mjs"] }] });
+    const r = await build({ issue: { ...ISSUE, body: `Change src.mjs and ${Object.keys(libs).join(" ")}.` }, files: { ...libs, "lib/z.mjs": "export const z = 1;\n" }, replies: [{ verdict: "NEED_FILES", files: ["lib/z.mjs"] }] });
     assert.equal(r.code, 1);
     assert.equal(r.llm.length, 1);
     assert.match(r.posts[0], /NEED_FILES_UNREADABLE/);
+    assert.doesNotMatch(r.llm[0].messages.at(-1).content, /export const z = 1/);
   });
 
   it("stops before any model call without a push token", async () => {

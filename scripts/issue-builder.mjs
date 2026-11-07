@@ -60,12 +60,12 @@ function applyBuild(repoDir, patches, policies) {
   return { files: writes.map((w) => w.file) };
 }
 
-/** Reads wanted files into `known`, skipping ones already sent. Returns the requested new files it could not provide. */
-function readFiles(repoDir, wanted, known) {
+/** Reads wanted tracked files into `known`, skipping ones already sent; a path git does not track is as unreadable as a missing one. Returns the requested new files it could not provide. */
+function readFiles(repoDir, tree, wanted, known) {
   const refused = [];
   for (const file of wanted) {
     if (known.has(file)) continue;
-    const abs = known.size < MAX_FILES ? resolveRepoFile(repoDir, file) : null;
+    const abs = known.size < MAX_FILES && tree.includes(file) ? resolveRepoFile(repoDir, file) : null;
     if (abs) known.set(file, clip(readFileSync(abs, "utf8"), MAX_FILE_CHARS));
     else refused.push(file);
   }
@@ -74,7 +74,7 @@ function readFiles(repoDir, wanted, known) {
 
 async function askBuilder({ issue, repoDir, tree, basePhi, allowance, env, fetchImpl, baseDir }) {
   const contents = new Map();
-  readFiles(repoDir, tree.filter((f) => `${issue.title}\n${issue.body}`.includes(f)), contents);
+  readFiles(repoDir, tree, tree.filter((f) => `${issue.title}\n${issue.body}`.includes(f)), contents);
   for (let call = 0; call < MAX_MODEL_CALLS; call += 1) {
     const user = fenceData({ issue: { number: issue.number, title: issue.title, body: issue.body }, phi_budget: { base_phi: basePhi, phi_allowance: allowance }, tracked_files: tree.join("\n"), file_contents: Object.fromEntries(contents) });
     const res = await callCourtModel({ role: "builder", system: loadRolePrompt(baseDir, "builder"), user, env, fetchImpl });
@@ -85,7 +85,7 @@ async function askBuilder({ issue, repoDir, tree, basePhi, allowance, env, fetch
     // A no-op request is fatal only when it asked about a file that could not be sent;
     // asking again about files it already has just spends another bounded model call.
     const before = contents.size;
-    const refused = readFiles(repoDir, reply.files, contents);
+    const refused = readFiles(repoDir, tree, reply.files, contents);
     if (refused.length > 0 && contents.size === before) return { ok: false, reason: "NEED_FILES_UNREADABLE" };
   }
   return { ok: false, reason: "TOO_MANY_FILE_REQUESTS" };
