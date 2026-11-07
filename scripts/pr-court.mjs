@@ -184,7 +184,7 @@ async function runCriticRound({ repoDir, diffText = "", files = [], intent = () 
   const res = await callCourtModel({ role: "critic", system: rolePrompt, user: fenceData({ head_sha: headSha, round, ...intent(), diff: diffText, ...readContext(repoDir, files, diffText) }), env, fetchImpl });
   if (!res.ok) return res;
   const reply = validateCritic(res.data);
-  return reply ? { ok: true, ...reply, usage: res.usage } : invalidReply("critic", res.data);
+  return reply ? { ok: true, ...reply, usage: res.usage } : { ...invalidReply("critic", res.data), ...(res.usage && { usage: res.usage }) };
 }
 
 async function runAdvocateRound({ repoDir, diffText = "", files = [], intent = () => ({}), authorAssociation, findings = [], basePhi, phiAllowance = 0, round = 1, policies, env, fetchImpl, rolePrompt = "", commit = null }) {
@@ -197,21 +197,21 @@ async function runAdvocateRound({ repoDir, diffText = "", files = [], intent = (
   const res = await callCourtModel({ role: "advocate", system: rolePrompt, user, env, fetchImpl });
   if (!res.ok) return res;
   const reply = validateAdvocate(res.data, findings);
-  if (!reply) return invalidReply("advocate", res.data);
+  if (!reply) return { ...invalidReply("advocate", res.data), ...(res.usage && { usage: res.usage }) };
   const patches = reply.responses.flatMap((r) => r.patches);
   if (patches.length === 0) return { ok: true, verdict: "REBUT", ...reply, usage: res.usage };
   const staged = stagePatches(repoDir, patches, policies);
-  if (staged.error) return escalate(staged.error, reply);
+  if (staged.error) return escalate(staged.error, { ...reply, ...(res.usage && { usage: res.usage }) });
   const restore = () => { for (const { abs, original } of staged.files.values()) writeFileSync(abs, original); };
   try {
     for (const { abs, next } of staged.files.values()) writeFileSync(abs, next);
     const phi = computePhi(repoDir).total;
-    if (!Number.isSafeInteger(basePhi) || phi > basePhi + allowanceOf(phiAllowance)) { restore(); return escalate("PHI_INCREASE", reply); }
-    if (!commit) { restore(); return escalate("NO_PUSH_TOKEN", reply); }
+    if (!Number.isSafeInteger(basePhi) || phi > basePhi + allowanceOf(phiAllowance)) { restore(); return escalate("PHI_INCREASE", { ...reply, ...(res.usage && { usage: res.usage }) }); }
+    if (!commit) { restore(); return escalate("NO_PUSH_TOKEN", { ...reply, ...(res.usage && { usage: res.usage }) }); }
     return { ok: true, verdict: "FIXED", headSha: commit([...staged.files.keys()]), ...reply, usage: res.usage };
   } catch (err) {
     restore();
-    return escalate(`PATCH_FAILED: ${err instanceof Error ? err.message : String(err)}`, reply);
+    return escalate(`PATCH_FAILED: ${err instanceof Error ? err.message : String(err)}`, { ...reply, ...(res.usage && { usage: res.usage }) });
   }
 }
 
@@ -227,7 +227,7 @@ async function runJudgeArbitration({ repoDir, diffText = "", files = [], intent 
   const res = await callCourtModel({ role: "judge", system, user: fenceData({ head_sha: headSha, round, evidence, findings, transcript, ...intent(), diff: diffText, ...readContext(repoDir, files, diffText) }), env, fetchImpl });
   if (!res.ok) return res;
   const ruling = validateJudge(res.data, findings);
-  if (!ruling) return invalidReply("judge", res.data);
+  if (!ruling) return { ...invalidReply("judge", res.data), ...(res.usage && { usage: res.usage }) };
   return { ok: true, ...ruling, usage: res.usage, verdict: ruling.verdict === "REMAND" && round >= MAX_ROUNDS ? "ESCALATE" : ruling.verdict };
 }
 
