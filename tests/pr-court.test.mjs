@@ -1084,6 +1084,15 @@ describe("court tick end to end", () => {
 
   const fenced = (call, name) => new RegExp(`name="${name}">\\n([\\s\\S]*?)\\n</DATA_`).exec(call.body.messages[1].content)?.[1];
 
+  it("shows a change the candidate's .gitattributes marks as binary", async () => {
+    await withDir(async (dir) => {
+      const box = sandbox(dir, ".gitattributes", "src.mjs binary\n");
+      const { fetchImpl, calls } = mockFetch(critic);
+      await quiet(() => runCourtTick({ env: box.env, io: box.io, fetchImpl, baseDir: ROOT }));
+      assert.match(fenced(calls[0], "diff"), /^-export const extra = 3;$/m);
+    });
+  });
+
   it("gives every role the PR's intent, the linked issue and the full changed files", async () => {
     await withDir(async (dir) => {
       const box = sandbox(dir);

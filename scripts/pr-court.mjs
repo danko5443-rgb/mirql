@@ -317,7 +317,9 @@ function defaultIo(env) {
 }
 
 function diffSnapshot(io, repoDir, base, head) {
-  const git = (...args) => io.run("git", ["-C", repoDir, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", ...args, `${base}...${head}`]);
+  // --text: a candidate's .gitattributes must not turn a change into "Binary files differ", which hides it from the hazard scan
+  // while file_contents still hands its full text to the model.
+  const git = (...args) => io.run("git", ["-C", repoDir, "diff", "--no-ext-diff", "--no-textconv", "--text", "--no-renames", ...args, `${base}...${head}`]);
   return { diffText: git(), files: git("--name-only", "-z").split("\0").filter(Boolean) };
 }
 
