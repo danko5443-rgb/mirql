@@ -23,7 +23,7 @@ function walkJsFiles(dir) {
   });
 }
 
-test("the repo-wide empty-catch count stays under its ceiling", () => {
+test("the repo-wide empty-catch count is pinned exactly at its ceiling", () => {
   const perFile = [];
   let total = 0;
   for (const file of [...walkJsFiles(join(ROOT, "packages")), ...walkJsFiles(join(ROOT, "bin")), ...walkJsFiles(join(ROOT, "scripts"))]) {
@@ -34,11 +34,11 @@ test("the repo-wide empty-catch count stays under its ceiling", () => {
     }
   }
   assert.ok(
-    total <= CEILING,
-    `MP-003 violations grew to ${total} (ceiling ${CEILING}).\n` +
+    total === CEILING,
+    `MP-003 violation count is ${total}, but CEILING pins it at ${CEILING}.\n` +
       "An empty catch is refused unless it carries `// mp-003-allow: <reason>`.\n" +
-      "Fix the new violations, or annotate them with a real reason.\n" +
+      "If it grew: fix the new violations, or annotate them with a real reason.\n" +
       `Current offenders:\n${perFile.sort().join("\n")}\n` +
-      "When the count drops, lower the CEILING so it can never grow back.",
+      `If it dropped: lower CEILING to ${total} so the count can never grow back.`,
   );
 });
