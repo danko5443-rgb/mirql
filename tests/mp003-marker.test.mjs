@@ -234,3 +234,21 @@ test("dollar-named and destructured catch params", () => {
   assert.equal(checkSwallowedExceptions("try { a(); } catch ({ message }) { }", "x.mjs").violations.length > 0, true, "a destructured empty catch is still flagged");
   assert.equal(checkSwallowedExceptions("try { a(); } catch ({ message }) { report(message); }", "x.mjs").violations.length, 0, "a destructured used catch passes");
 });
+
+// A promise handler written with the `function` keyword has the same head
+// problem as an arrow: its param must be read, or a body that only names the
+// error slips through.
+test("function-keyword promise handlers that only name the error are flagged", () => {
+  const cases = [
+    "p().catch(function (err) { err; });",
+    "p().catch(function onErr(err) { err; });",
+  ];
+  for (const code of cases) {
+    assert.equal(checkSwallowedExceptions(code, "x.mjs").violations.length > 0, true, code);
+  }
+});
+
+test("a function-keyword promise handler that uses its error still passes", () => {
+  assert.equal(checkSwallowedExceptions("p().catch(function (err) { log(err); });", "x.mjs").violations.length, 0);
+  assert.equal(checkSwallowedExceptions("p().catch(function onErr(err) { log(err); });", "x.mjs").violations.length, 0);
+});

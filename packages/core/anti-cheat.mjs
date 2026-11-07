@@ -447,8 +447,9 @@ export function checkSwallowedExceptions(sourceCode, filename, { changedLines } 
 
     if (foundBrace !== -1) {
       const { body, endIdx } = extractBalancedBlock(sourceCode, foundBrace + 1);
-      const arrowParam = /(?:\(\s*([A-Za-z_$][\w$]*)\s*\)|\b([A-Za-z_$][\w$]*))\s*=>\s*\{?\s*$/.exec(sourceCode.slice(afterParen, foundBrace + 1));
-      const arrowParamName = arrowParam ? (arrowParam[1] ?? arrowParam[2]) : null;
+      // Handler head: `(x) =>`, `x =>`, or `function (x)` / `function name(x)`.
+      const arrowParam = /(?:(?:\(\s*([A-Za-z_$][\w$]*)\s*\)|\b([A-Za-z_$][\w$]*))\s*=>|function\s*(?:[A-Za-z_$][\w$]*\s*)?\(\s*([A-Za-z_$][\w$]*)\s*\))\s*\{?\s*$/.exec(sourceCode.slice(afterParen, foundBrace + 1));
+      const arrowParamName = arrowParam ? (arrowParam[1] ?? arrowParam[2] ?? arrowParam[3]) : null;
       if ((isEffectivelyEmpty(body) || isErrorReferenceOnly(body, arrowParamName)) && !markerExempts(body, pcMatch.index, endIdx)) {
         const upToMatch = sourceCode.slice(0, pcMatch.index);
         const line = upToMatch.split("\n").length;
