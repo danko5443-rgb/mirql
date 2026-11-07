@@ -53,14 +53,13 @@ describe("Law 15: identity is content, location is machinery", () => {
     assert.deepEqual(copyLines, originalLines, "the copy is byte-identical to its source");
     assert.ok(!originalLines.join("\n").includes(original), "event content never names the ledger's own mechanical location");
     const head = join(original, "ledger", "head.json");
-    if (existsSync(head)) assert.ok(!readFileSync(head, "utf8").includes(original), "the head sidecar never names the ledger's location either");
+    assert.ok(existsSync(head), "the head sidecar exists where this test looks for it, so the next check cannot skip silently");
+    assert.ok(!readFileSync(head, "utf8").includes(original), "the head sidecar never names the ledger's location either");
 
     const stateOriginal = foldQueueState(original);
     const stateCopy = foldQueueState(copy);
-    assert.equal(stateCopy.seq, stateOriginal.seq);
-    assert.equal(stateCopy.epoch, stateOriginal.epoch);
-    assert.deepEqual(Object.keys(stateCopy.jobs), Object.keys(stateOriginal.jobs), "job identity survives the move");
-    assert.deepEqual(Object.keys(stateCopy.warrants), Object.keys(stateOriginal.warrants));
+    assert.ok(Object.keys(stateOriginal.jobs).length > 0, "the fold saw the enqueued job, so the comparison below is not empty");
+    assert.deepEqual(stateCopy, stateOriginal, "the whole folded state, every value and not just the keys, survives the move");
     assert.equal(getQueueStatus(copy).halted, true, "the projection is the same pure fold over the same bytes");
   });
 
@@ -116,5 +115,7 @@ describe("Law 15: identity is content, location is machinery", () => {
     const changed = submitWarrant(dir, warrant(ulid(1_700_200_300_000), "law15 different intent"), { repoRoot: ROOT });
     assert.equal(changed.status, "submitted", "changed content is a different identity and is admitted on its own");
     assert.notEqual(changed.warrant_id, first.warrant_id);
+    // Two generations in the same millisecond are still two identities.
+    assert.notEqual(ulid(1_700_200_400_000), ulid(1_700_200_400_000), "same-millisecond ULIDs never collide");
   });
 });
