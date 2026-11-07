@@ -199,3 +199,38 @@ test("the markers shipped on main stay honoured once they are in the base", () =
     assert.equal(verdict.checks.anti_cheat, true, verdict.detail);
   });
 });
+
+// A catch that only names the error is a swallow with extra steps: MP-003
+// refuses it exactly like an empty body (Phase 6.6 strengthening).
+test("reference-only catch bodies are swallowed exceptions", () => {
+  const cases = [
+    "try { a(); } catch (e) { e; }",
+    "try { a(); } catch (e) { e }",
+    "try { a(); } catch (e) { void e; }",
+    "p().catch((e) => e);",
+    "p().catch((e) => { e; });",
+  ];
+  for (const code of cases) {
+    assert.equal(checkSwallowedExceptions(code, "x.mjs").violations.length > 0, true, code);
+  }
+});
+
+test("a catch that uses its error still passes", () => {
+  const cases = [
+    "try { a(); } catch (e) { log(e); }",
+    "try { a(); } catch (e) { throw new TypedError(e); }",
+    "try { a(); } catch (e) { return fail(e); }",
+    "p().catch((e) => report(e));",
+  ];
+  for (const code of cases) {
+    assert.equal(checkSwallowedExceptions(code, "x.mjs").violations.length, 0, code);
+  }
+});
+
+// The param name goes into a RegExp and catch bindings come in more shapes
+// than a plain identifier: both edges stay checked.
+test("dollar-named and destructured catch params", () => {
+  assert.equal(checkSwallowedExceptions("try { a(); } catch (e$) { e$; }", "x.mjs").violations.length > 0, true, "a `$` in the param must not forge the pattern");
+  assert.equal(checkSwallowedExceptions("try { a(); } catch ({ message }) { }", "x.mjs").violations.length > 0, true, "a destructured empty catch is still flagged");
+  assert.equal(checkSwallowedExceptions("try { a(); } catch ({ message }) { report(message); }", "x.mjs").violations.length, 0, "a destructured used catch passes");
+});
