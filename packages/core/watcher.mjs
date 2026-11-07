@@ -109,12 +109,12 @@ export class LedgerWatcher extends EventEmitter {
 
     try {
       if (this.dirWatcher) {
-        try { this.dirWatcher.close(); } catch {}
+        try { this.dirWatcher.close(); } catch { /* mp-003-allow: best-effort close of a directory watcher we are about to replace */ }
       }
       this.dirWatcher = watch(dir, (eventType, filename) => {
         if (existsSync(this.ledgerPath)) {
           if (this.dirWatcher) {
-            try { this.dirWatcher.close(); } catch {}
+            try { this.dirWatcher.close(); } catch { /* mp-003-allow: best-effort close before re-attaching after a ledger event */ }
             this.dirWatcher = null;
           }
           this._attachFileWatcher();
@@ -135,13 +135,13 @@ export class LedgerWatcher extends EventEmitter {
     if (this.closed || !existsSync(this.ledgerPath)) return;
     try {
       if (this.fsWatcher) {
-        try { this.fsWatcher.close(); } catch {}
+        try { this.fsWatcher.close(); } catch { /* mp-003-allow: best-effort close of the file watcher we are about to replace */ }
       }
       this.fsWatcher = watch(this.ledgerPath, (eventType) => {
         if (eventType === "rename" && !existsSync(this.ledgerPath)) {
           // File was deleted or moved; watch directory again
           if (this.fsWatcher) {
-            try { this.fsWatcher.close(); } catch {}
+            try { this.fsWatcher.close(); } catch { /* mp-003-allow: best-effort close before falling back to the directory watcher */ }
             this.fsWatcher = null;
           }
           this._attachDirWatcher();
@@ -241,7 +241,7 @@ export class LedgerWatcher extends EventEmitter {
       this._handleError(err);
     } finally {
       if (fd !== null) {
-        try { closeSync(fd); } catch {}
+        try { closeSync(fd); } catch { /* mp-003-allow: best-effort close of a descriptor opened only to read new ledger lines */ }
       }
     }
 
@@ -324,11 +324,11 @@ export class LedgerWatcher extends EventEmitter {
     }
     this.firstPendingMs = null;
     if (this.fsWatcher) {
-      try { this.fsWatcher.close(); } catch {}
+      try { this.fsWatcher.close(); } catch { /* mp-003-allow: best-effort close during shutdown; the watcher is being discarded */ }
       this.fsWatcher = null;
     }
     if (this.dirWatcher) {
-      try { this.dirWatcher.close(); } catch {}
+      try { this.dirWatcher.close(); } catch { /* mp-003-allow: best-effort close during shutdown; the watcher is being discarded */ }
       this.dirWatcher = null;
     }
     this.removeAllListeners();

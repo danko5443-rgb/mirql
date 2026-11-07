@@ -46,7 +46,7 @@ function readLockMeta(target) {
     const raw = readFileSync(target, "utf8");
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object") return parsed;
-  } catch {}
+  } catch { /* mp-003-allow: unparseable or unreadable meta reads as null, i.e. unverifiable, and the caller decides fail-closed */ }
   return null;
 }
 
@@ -133,7 +133,7 @@ export function claimStaleLock(lockPath, expectedNonce) {
   try {
     claimedMeta = readLockMeta(claimPath);
     claimedStat = statSync(claimPath);
-  } catch {}
+  } catch { /* mp-003-allow: a claimed lock that cannot be read or stat'ed stays unverified, so the claim fails closed */ }
 
   const claimedNonce = typeof claimedMeta?.nonce === "string" ? claimedMeta.nonce : null;
 
@@ -141,7 +141,7 @@ export function claimStaleLock(lockPath, expectedNonce) {
   if (claimedNonce !== null && claimedNonce === expectedNonce) {
     try {
       unlinkSync(claimPath);
-    } catch {}
+    } catch { /* mp-003-allow: best-effort unlink of our own claim; a missing file means another contender removed it first */ }
     return { claimed: true };
   }
 
@@ -151,7 +151,7 @@ export function claimStaleLock(lockPath, expectedNonce) {
     if (shouldBreakStaleLock(claimedMeta, claimedStat)) {
       try {
         unlinkSync(claimPath);
-      } catch {}
+      } catch { /* mp-003-allow: best-effort unlink of our own claim; a missing file means another contender removed it first */ }
       return { claimed: true };
     }
   }
@@ -164,14 +164,14 @@ export function claimStaleLock(lockPath, expectedNonce) {
     restored = true;
     try {
       unlinkSync(claimPath);
-    } catch {}
+    } catch { /* mp-003-allow: best-effort cleanup after the lock was already restored by link */ }
   } catch {
     // If linkSync fails (e.g. non-NTFS or EEXIST), try rename if lockPath is free
     if (!existsSync(lockPath)) {
       try {
         renameSync(claimPath, lockPath);
         restored = true;
-      } catch {}
+      } catch { /* mp-003-allow: the free-path rename already restored the lock; the leftover claim file is unimportant */ }
     }
   }
   return { claimed: false, displaced: true, restored };
@@ -208,8 +208,8 @@ export function acquireLock(lockPath, timeoutMs = 10000) {
         writeFileSync(fd, metadata, "utf8");
       } catch (writeErr) {
         // B3: Fail-closed on metadata write failure (never leave empty lockfile)
-        try { closeSync(fd); } catch {}
-        try { unlinkSync(lockPath); } catch {}
+        try { closeSync(fd); } catch { /* mp-003-allow: closing a descriptor during fail-closed teardown; the write error below is the one that matters */ }
+        try { unlinkSync(lockPath); } catch { /* mp-003-allow: unlinking the empty lockfile during fail-closed teardown; the write error below is the one that matters */ }
         throw writeErr;
       }
 
@@ -221,10 +221,10 @@ export function acquireLock(lockPath, timeoutMs = 10000) {
         if (parsed.pid === process.pid && parsed.nonce === nonce) {
           verified = true;
         }
-      } catch {}
+      } catch { /* mp-003-allow: an unreadable lock cannot verify our nonce, so verification fails closed */ }
 
       if (!verified) {
-        try { closeSync(fd); } catch {}
+        try { closeSync(fd); } catch { /* mp-003-allow: any read or parse failure means unverified, and the descriptor is closed right below */ }
         continue;
       }
 
@@ -248,9 +248,9 @@ export function acquireLock(lockPath, timeoutMs = 10000) {
             inspectedNonce = typeof meta?.nonce === "string" ? meta.nonce : null;
             breakable = shouldBreakStaleLock(meta, st);
           } finally {
-            try { closeSync(staleFd); } catch {}
+            try { closeSync(staleFd); } catch { /* mp-003-allow: best-effort close of a descriptor opened only to inspect a stale lock */ }
           }
-        } catch {}
+        } catch { /* mp-003-allow: an uninspectable stale lock is not provably breakable, so it is left alone (fail-closed) */ }
 
         if (breakable) {
           claimStaleLock(lockPath, inspectedNonce);
@@ -275,7 +275,7 @@ export function releaseLock(fd, lockPath) {
   activeNonces.delete(fd);
   try {
     if (typeof fd === "number" && fd >= 0) closeSync(fd);
-  } catch {}
+  } catch { /* mp-003-allow: best-effort close during release; the nonce is already forgotten */ }
   try {
     const raw = readFileSync(lockPath, "utf8");
     const meta = JSON.parse(raw);
@@ -285,8 +285,7 @@ export function releaseLock(fd, lockPath) {
         unlinkSync(lockPath);
       }
     }
-  } catch {
-    // If lockfile is missing or already unlinked, safe no-op
+  } catch { /* mp-003-allow: a lockfile that is already gone means released */
   }
 }
 
