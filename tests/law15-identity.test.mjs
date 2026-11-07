@@ -83,8 +83,13 @@ describe("Law 15: identity is content, location is machinery", () => {
     const sha = git("rev-parse", "HEAD");
 
     const viaOne = computeGitTreePhi(work, sha).metrics.total;
-    execFileSync("git", ["clone", "-q", "-c", "core.autocrlf=false", repo, join(home, "clone-two")], { env: { ...process.env, ...GIT_ENV } });
-    const viaTwo = computeGitTreePhi(join(home, "clone-two"), sha).metrics.total;
+    const cloneTwo = join(home, "clone-two");
+    execFileSync("git", ["clone", "-q", "-c", "core.autocrlf=false", "--branch", "feature/two-entirely-different-name", repo, cloneTwo], { env: { ...process.env, ...GIT_ENV } });
+    const branchOf = (dir) => execFileSync("git", ["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" }).trim();
+    // The two measurements must really come from different branches, or this proves nothing.
+    assert.equal(branchOf(work), "feature/one");
+    assert.equal(branchOf(cloneTwo), "feature/two-entirely-different-name");
+    const viaTwo = computeGitTreePhi(cloneTwo, sha).metrics.total;
     assert.equal(viaOne, viaTwo, "Phi binds to the commit, not to any branch or clone that points at it");
     assert.ok(Number.isSafeInteger(viaOne) && viaOne > 0, "the tree actually measured something");
   });
