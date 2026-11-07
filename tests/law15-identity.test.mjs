@@ -11,12 +11,9 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { sha256, ulid, generateEd25519Keypair } from "../packages/core/index.mjs";
-import { semantic_fingerprint } from "../packages/core/warrant.mjs";
 import { computeGitTreePhi } from "../packages/run/phi.mjs";
 import { authorizeTestKey, provisionTestTrust } from "./helpers/keyring.mjs";
-import { appendLedgerEvent, foldQueueState, getQueueStatus } from "../packages/queue/index.mjs";
-
-// The identity assertions below call the real `semantic_fingerprint`, `sha256` and `ulid` exports from packages/core.
+import { appendLedgerEvent, foldQueueState, getQueueStatus, submitWarrant } from "../packages/queue/index.mjs";
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
 const GIT_ENV = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.test", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.test" };
@@ -92,22 +89,27 @@ describe("Law 15: identity is content, location is machinery", () => {
     assert.ok(Number.isSafeInteger(viaOne) && viaOne > 0, "the tree actually measured something");
   });
 
-  it("core identity primitives (`semantic_fingerprint`, `sha256`, `ulid`) are content-derived, never location-derived", () => {
-    const intent = { scope: ["packages/queue/**"], goal: "law15 fingerprint" };
-    const warrantId = semantic_fingerprint({ ...intent });
-    assert.notEqual(warrantId, semantic_fingerprint({ ...intent, scope: ["packages/run/**"] }), "changed intent is a different warrant identity");
-    const first = sha256(JSON.stringify(intent));
-    const elsewhere = join(home, "another", "mechanical", "location");
-    mkdirSync(elsewhere, { recursive: true });
-    const cwd = process.cwd();
-    process.chdir(elsewhere);
-    try {
-      assert.equal(semantic_fingerprint({ ...intent }), warrantId, "identical intent is the same warrant identity from any working directory");
-      assert.equal(first, sha256(JSON.stringify({ ...intent })), "identical content is identical identity from any working directory");
-    } finally {
-      process.chdir(cwd);
-    }
-    assert.notEqual(first, sha256(JSON.stringify({ ...intent, scope: ["packages/run/**"] })), "changed content is a different identity");
-    assert.notEqual(ulid(1_700_200_000_000), ulid(1_700_200_000_000), "distinct ulid generations never collide at the same timestamp");
+  it("a warrant's semantic_fingerprint is content identity: the queue deduplicates the same intent and admits changed intent", () => {
+    // `semantic_fingerprint` is a warrant FIELD its author computes as a content hash; core exports
+    // no helper, so the test computes it the way every fixture does and exercises it where the
+    // product actually relies on it: submitWarrant's deduplication gate.
+    const fingerprint = (goal) => sha256(`intent: ${goal}`);
+    const warrant = (id, goal) => ({
+      v: 1, id, class: "surgical", semantic_fingerprint: fingerprint(goal),
+      anchors: [{ path: "packages/queue/index.mjs" }], evidence: { citations: 1 },
+      red_check: { reviewed: 1 }, scope: { allow_globs: ["packages/queue/**"] },
+      budget_micro_usd: 500_000, created_by: "human:owner",
+    });
+    const dir = join(home, "ledger");
+    mkdirSync(dir, { recursive: true });
+    provisionTestTrust(dir);
+    const first = submitWarrant(dir, warrant(ulid(1_700_200_100_000), "law15 identical intent"), { repoRoot: ROOT });
+    assert.equal(first.status, "submitted", "the first intent is admitted");
+    const again = submitWarrant(dir, warrant(ulid(1_700_200_200_000), "law15 identical intent"), { repoRoot: ROOT });
+    assert.equal(again.status, "deduplicated", "the same content under a new id and moment is still the same intent");
+    assert.equal(again.warrant_id, first.warrant_id, "dedup resolves to the original identity, not the newer mechanical copy");
+    const changed = submitWarrant(dir, warrant(ulid(1_700_200_300_000), "law15 different intent"), { repoRoot: ROOT });
+    assert.equal(changed.status, "submitted", "changed content is a different identity and is admitted on its own");
+    assert.notEqual(changed.warrant_id, first.warrant_id);
   });
 });
