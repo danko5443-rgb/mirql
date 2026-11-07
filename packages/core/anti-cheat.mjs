@@ -369,7 +369,9 @@ export function isErrorReferenceOnly(bodyText, paramName) {
     .replace(/\/\/[^\n]*/g, "")
     .replace(/(["'`])(?:\\.|(?!\1)[\s\S])*?\1/g, "")
     .trim();
-  return new RegExp(`^(?:void\\s+)?${paramName};?$`).test(cleaned);
+  // `$` is legal in identifiers and an anchor in a RegExp: escape it so `e$` cannot forge a pattern.
+  const literal = paramName.replace(/\$/g, "\\$");
+  return new RegExp(`^(?:void\\s+)?${literal};?$`).test(cleaned);
 }
 
 /**
@@ -405,8 +407,10 @@ export function checkSwallowedExceptions(sourceCode, filename, { changedLines } 
   };
   const describe = (text, detail) => (MP003_ALLOW_RE.test(text) ? MP003_MARKER_REFUSED : detail);
 
-  // 1. Standard catch blocks: parse with balanced braces (ignoring strings, comments, regexes)
-  const catchStartRegex = /catch\s*(?:\(\s*([A-Za-z_$][\w$]*)\s*\))?\s*\{/g;
+  // 1. Standard catch blocks: parse with balanced braces (ignoring strings, comments, regexes).
+  //    A plain identifier parameter is captured for the reference-only check; a destructured
+  //    binding `catch ({ message })` still matches (no capture), so it keeps its empty-body check.
+  const catchStartRegex = /catch\s*(?:\(\s*([A-Za-z_$][\w$]*)\s*\)|\((?:[^)]*)\))?\s*\{/g;
   let match;
   while ((match = catchStartRegex.exec(sourceCode)) !== null) {
     const { body, endIdx: catchEnd } = extractBalancedBlock(sourceCode, match.index + match[0].length);

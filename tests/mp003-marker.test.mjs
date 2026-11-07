@@ -226,3 +226,11 @@ test("a catch that uses its error still passes", () => {
     assert.equal(checkSwallowedExceptions(code, "x.mjs").violations.length, 0, code);
   }
 });
+
+// The param name goes into a RegExp and catch bindings come in more shapes
+// than a plain identifier: both edges stay checked.
+test("dollar-named and destructured catch params", () => {
+  assert.equal(checkSwallowedExceptions("try { a(); } catch (e$) { e$; }", "x.mjs").violations.length > 0, true, "a `$` in the param must not forge the pattern");
+  assert.equal(checkSwallowedExceptions("try { a(); } catch ({ message }) { }", "x.mjs").violations.length > 0, true, "a destructured empty catch is still flagged");
+  assert.equal(checkSwallowedExceptions("try { a(); } catch ({ message }) { report(message); }", "x.mjs").violations.length, 0, "a destructured used catch passes");
+});
