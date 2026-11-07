@@ -728,14 +728,15 @@ describe("replayCache — the disposable cache is byte-reproducible", () => {
 // 6. Projections
 // ---------------------------------------------------------------------------
 
-describe("getView — the five named projections", () => {
-  test("PROJECTIONS pins the five canonical names", () => {
+describe("getView — the named projections", () => {
+  test("PROJECTIONS pins the canonical names", () => {
     assert.deepEqual([...PROJECTIONS], [
       "job_state",
       "orchestrator_digest",
       "human_digest",
       "phi",
       "budget",
+      "quiescence",
     ]);
     assert.equal(TOOL, "log");
   });
@@ -1788,5 +1789,60 @@ describe("Claude Opus 5.5 High Review Findings — Regression Suite", () => {
     const cliRes = runBin(BIN_LOG, ["view", "orchestrator_digest", "--dir", dir]);
     assert.equal(cliRes.status, 0);
     assert.equal(Buffer.byteLength(cliRes.stdout.trim(), "utf8") <= ORCHESTRATOR_DIGEST_MAX_BYTES, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. Quiescence projection (Law 14)
+// ---------------------------------------------------------------------------
+
+describe("getView — the quiescence projection", () => {
+  const writeLedger = (events, policy = null) => {
+    const base = mkdtempSync(join(tmpdir(), "mirql-quiesce-"));
+    const dir = join(base, ".mirql");
+    mkdirSync(join(dir, "ledger"), { recursive: true });
+    if (policy) {
+      mkdirSync(join(base, "policy"), { recursive: true });
+      writeFileSync(join(base, "policy", "mirql.json"), JSON.stringify(policy));
+    }
+    writeFileSync(join(dir, "ledger", "events.jsonl"), `${events.map((e) => JSON.stringify(e)).join("\n")}\n`);
+    return dir;
+  };
+  const event = (seq, type, payload, wall = 1_000 + seq) => ({ seq, epoch: 1, hlc: { wall_ms: wall, logical: 0, node: "t" }, ts: new Date(wall).toISOString(), type, payload });
+  const outcome = (seq, cost, wall) => event(seq, "attempt.outcome", { job_id: `j${seq}`, warrant_id: "w", status: "completed", verdict: "pass", cost_micro_usd: cost }, wall);
+  const modeChange = (seq, to, wall) => event(seq, "factory.mode_changed", { from_mode: "BUILD", to_mode: to, reason: "test" }, wall);
+  const POLICY = { daily_budget_micro_usd: 1_000_000, quiescent_max_budget_bp: 1000 };
+
+  test("a QUIESCENT window's spend is measured against the policy ceiling", () => {
+    const dir = writeLedger([
+      event(1, "mirql.genesis", { macro_state: "BUILD" }),
+      outcome(2, 50_000),
+      modeChange(3, "QUIESCENT"),
+      outcome(4, 40_000),
+    ], POLICY);
+    const view = getView(dir, "quiescence");
+    assert.equal(view.mode, "QUIESCENT");
+    assert.equal(view.mode_since_ms, 1_003, "the window opens when the mode changes");
+    assert.equal(view.mode_window_spend_micro_usd, 40_000, "spend before the mode change stays out of the window");
+    assert.equal(view.budget_spent_micro_usd, 90_000, "the cumulative total keeps every spend");
+    assert.equal(view.quiescent_ceiling_micro_usd, 100_000, "ceiling = daily budget x bp, integer math (Law 17)");
+    assert.equal(view.quiescent_ok, true);
+  });
+
+  test("a window over its ceiling is not ok, another mode has no verdict, and no policy means no ceiling to spend", () => {
+    const over = writeLedger([modeChange(1, "QUIESCENT"), outcome(2, 40_000), outcome(3, 70_000)], POLICY);
+    const overView = getView(over, "quiescence");
+    assert.equal(overView.mode_window_spend_micro_usd, 110_000);
+    assert.equal(overView.quiescent_ok, false, "Law 14: quiescent consumption must stay under the ceiling");
+
+    const building = writeLedger([outcome(1, 40_000)], POLICY);
+    const buildView = getView(building, "quiescence");
+    assert.equal(buildView.quiescent_ok, null, "only a QUIESCENT window gets a verdict");
+    assert.equal(buildView.mode_window_spend_micro_usd, 40_000, "the accounting still runs while building");
+
+    const noPolicy = writeLedger([modeChange(1, "QUIESCENT")]);
+    const bareView = getView(noPolicy, "quiescence");
+    assert.equal(bareView.quiescent_ceiling_micro_usd, 0);
+    assert.equal(bareView.quiescent_ok, true, "an empty window is under any ceiling");
   });
 });

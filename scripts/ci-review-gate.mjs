@@ -231,7 +231,11 @@ async function callCourtModel({ role, system = "", user, env = process.env, fetc
       await readChatStream(resp.body, data);
     } else data = await resp.json();
     const raw = String(req.text(data) ?? "");
-    return { ok: true, data: JSON.parse((raw.match(/\{[\s\S]*\}/) ?? [raw])[0]) };
+    // The provider's usage object is the only cost signal the loop has; keep the integer token counts (Law 17), never a price guess.
+    const usage = data?.usage && Number.isSafeInteger(data.usage.total_tokens)
+      ? { prompt_tokens: Number.isSafeInteger(data.usage.prompt_tokens) ? data.usage.prompt_tokens : null, completion_tokens: Number.isSafeInteger(data.usage.completion_tokens) ? data.usage.completion_tokens : null, total_tokens: data.usage.total_tokens }
+      : null;
+    return { ok: true, data: JSON.parse((raw.match(/\{[\s\S]*\}/) ?? [raw])[0]), usage };
   } catch (err) {
     /* mp-003-allow: network or JSON failure fails closed without a verdict */
     const cause = err?.cause?.code;
