@@ -368,12 +368,15 @@ const LANDING_NEXT_STEPS = {
   NOTARY_NOT_RERUNNABLE: "The gate has no finished failed run, or used its 5 re-run attempts. Wait for a wake-up, or push to the PR.",
 };
 
+/** One notice per marker, however many wake-ups: only the court's own comment counts as already told. */
+const toldByCourt = (comments, mark) => (comments ?? []).some((c) => c.user?.login === COURT_ACTOR.login && String(c.body).includes(mark));
+
 /** Landing codes lived only in the run log; a stalled merge must be readable on the PR itself. Deduped per code and head; a failure here only warns. Never a verdict: no state marker, and the text is the court's own landing table, never model text. */
 function postLandingNotice(io, repo, prNumber, comments, { code, headSha }) {
   if (code === "MERGED" || code === "MERGED_ELSEWHERE") return;
   const mark = `mirql-court-landing:v1 ${code} ${headSha}`;
   try {
-    if ((comments ?? []).some((c) => c.user?.login === COURT_ACTOR.login && String(c.body).includes(mark))) return;
+    if (toldByCourt(comments, mark)) return;
     io.post(repo, prNumber, [
       `<!-- ${mark} -->`,
       `**PR Court could not land this PR** (\`${code}\` at \`${headSha}\`). The Judge's MERGE verdict stands; only the landing stopped.`,
@@ -468,8 +471,7 @@ async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl 
       const mark = `mirql-court-failure:v1 ${name} ${headSha} ${res.reason}`;
       try {
         // One notice per head, role and reason, however many wake-ups fail the same way.
-        const told = comments.some((c) => c.user?.login === COURT_ACTOR.login && String(c.body).includes(mark));
-        if (!told) io.post(repo, prNumber, formatCourtFailure({ mark, role: name, headSha, reason: res.reason, prNumber }));
+        if (!toldByCourt(comments, mark)) io.post(repo, prNumber, formatCourtFailure({ mark, role: name, headSha, reason: res.reason, prNumber }));
       } catch (err) { /* mp-003-allow: the failure is already logged, and the tick stays red */ console.log(`::warning::pr-court: failure notice not posted: ${err?.name}`); }
       return 1;
     };
