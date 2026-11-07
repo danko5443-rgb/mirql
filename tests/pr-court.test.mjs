@@ -18,11 +18,14 @@ import { callCourtModel, collectExternalFindings, findAiApproval, scanDiffHazard
 import {
   decideCourtStep,
   formatCourtReceipt,
+  formatLandingNotice,
+  LANDING_NEXT_STEPS,
   landCourtMerge,
   loadRolePrompt,
   main,
   MAX_ROUNDS,
   parseCourtState,
+  postLandingNotice,
   resolveRepoFile,
   runAdvocateRound,
   runCourtTick,
@@ -635,6 +638,18 @@ describe("court judge", () => {
     }
   });
 
+  it("names the allowance and the warrant state when refusing Phi growth", async () => {
+    const over = { ...GREEN, deltaPhi: 5, phiAllowance: 0, phiWarrant: "NO_WARRANT" };
+    const { res, calls } = await judge(undefined, { evidence: over });
+    assert.equal(res.ok, true);
+    assert.equal(res.verdict, "RECUSE");
+    assert.match(res.rationale, /DELTA_PHI: 5 \(Phi allowance: 0; warrant: NO_WARRANT\)/);
+    assert.equal(calls.length, 0, "a refusal needs no model call");
+    const spent = { ...GREEN, deltaPhi: 7, phiAllowance: 3, phiWarrant: "0 of 500 left" };
+    const { res: res2 } = await judge(undefined, { evidence: spent });
+    assert.match(res2.rationale, /DELTA_PHI: 7 \(Phi allowance: 3; warrant: 0 of 500 left\)/);
+  });
+
   it("rules on growth inside the warrant, and only then adds the warrant rule to its prompt", async () => {
     const rule = /## Phi warrant/;
     const systemText = (calls) => calls[0].body.messages.slice(0, -1).map((message) => message.content).join("\n");
@@ -657,10 +672,10 @@ describe("court judge", () => {
       [{ evidence: { ...GREEN, suitePassHead: false } }, /^SUITE_NOT_GREEN$/],
       [{ evidence: { ...GREEN, suitePassBase: false } }, /^SUITE_NOT_GREEN$/],
       [{ evidence: { suitePassBase: true, suitePassHead: true } }, /^DELTA_PHI/],
-      [{ evidence: { ...GREEN, deltaPhi: 1 } }, /^DELTA_PHI: 1$/],
-      [{ evidence: { ...GREEN, deltaPhi: 6, phiAllowance: 5 } }, /^DELTA_PHI: 6$/],
-      [{ evidence: { ...GREEN, deltaPhi: 1, phiAllowance: "100" } }, /^DELTA_PHI: 1$/],
-      [{ evidence: { ...GREEN, deltaPhi: 1, phiAllowance: -1 } }, /^DELTA_PHI: 1$/],
+      [{ evidence: { ...GREEN, deltaPhi: 1 } }, /^DELTA_PHI: 1 \(Phi allowance: 0; warrant: unmeasured\)$/],
+      [{ evidence: { ...GREEN, deltaPhi: 6, phiAllowance: 5 } }, /^DELTA_PHI: 6 \(Phi allowance: 5; warrant: unmeasured\)$/],
+      [{ evidence: { ...GREEN, deltaPhi: 1, phiAllowance: "100" } }, /^DELTA_PHI: 1 \(Phi allowance: 0; warrant: unmeasured\)$/],
+      [{ evidence: { ...GREEN, deltaPhi: 1, phiAllowance: -1 } }, /^DELTA_PHI: 1 \(Phi allowance: 0; warrant: unmeasured\)$/],
       [{ files: ["roles/judge.md"] }, /^COURTHOUSE_LOCK: roles\/judge\.md/],
       [{ files: [".github/workflows/x.yml"] }, /^COURTHOUSE_LOCK/],
       [{ files: ["policy/paths.yaml"] }, /^COURTHOUSE_LOCK/],
@@ -1029,6 +1044,44 @@ describe("court landing", () => {
       assert.ok(!io.runs.some((r) => r[1] === "view" || r[1] === "issue"));
     }
   });
+
+  it("posts one landing notice per stalled code, and none for a landed merge", () => {
+    const posted = [];
+    const io = { post: (_repo, _pr, body) => { posted.push(body); } };
+    for (const code of Object.keys(LANDING_NEXT_STEPS)) postLandingNotice(io, "o/r", "7", [], { code, headSha: HEAD });
+    postLandingNotice(io, "o/r", "7", [], { code: "MERGED", headSha: HEAD });
+    postLandingNotice(io, "o/r", "7", [], { code: "MERGED_ELSEWHERE", headSha: HEAD });
+    assert.equal(posted.length, Object.keys(LANDING_NEXT_STEPS).length);
+    for (const code of Object.keys(LANDING_NEXT_STEPS)) {
+      const body = posted.find((b) => b.includes(`\`${code}\``));
+      assert.ok(body, code);
+      assert.ok(body.includes(LANDING_NEXT_STEPS[code]), `${code} says its next step`);
+      assert.ok(body.includes(`<!-- mirql-court-landing:v1 ${code} ${HEAD} -->`), `${code} carries its dedupe mark`);
+      assert.ok(!body.includes("mirql-court-state") && !body.includes("@"), `${code} is not a receipt and mentions nobody`);
+      assert.ok(body.includes("Judge's MERGE verdict stands"), `${code} keeps the verdict and the landing apart`);
+    }
+  });
+
+  it("names the next step for an unknown landing code too", () => {
+    const posted = [];
+    const io = { post: (_repo, _pr, body) => { posted.push(body); } };
+    postLandingNotice(io, "o/r", "7", [], { code: "SOME_FUTURE_CODE", headSha: HEAD });
+    assert.equal(posted.length, 1);
+    assert.match(posted[0], /Read the Court run log/);
+  });
+
+  it("dedupes a landing notice the court already posted, and survives a posting failure", async () => {
+    const posted = [];
+    const io = { post: (_repo, _pr, body) => { posted.push(body); } };
+    const already = [{ user: { login: "github-actions[bot]", type: "Bot" }, body: formatLandingNotice({ mark: `mirql-court-landing:v1 NOTARY_NOT_GREEN ${HEAD}`, code: "NOTARY_NOT_GREEN", headSha: HEAD, prNumber: 7 }) }];
+    postLandingNotice(io, "o/r", "7", already, { code: "NOTARY_NOT_GREEN", headSha: HEAD });
+    assert.equal(posted.length, 0, "the mark the court itself posted counts");
+    postLandingNotice(io, "o/r", "7", [{ user: { login: "mallory", type: "User" }, body: `<!-- mirql-court-landing:v1 NOTARY_BASE_STALE ${HEAD} -->` }], { code: "NOTARY_BASE_STALE", headSha: HEAD });
+    assert.equal(posted.length, 1, "someone else's marker is not the court's voice");
+    const broken = { post: () => { throw new Error("gh failed"); } };
+    const said = await capturingLog(() => postLandingNotice(broken, "o/r", "7", [], { code: "NOTARY_NOT_GREEN", headSha: HEAD }));
+    assert.match(said, /::warning::.*landing notice not posted: Error/);
+  });
 });
 
 describe("court tick end to end", () => {
@@ -1084,7 +1137,7 @@ describe("court tick end to end", () => {
       post: (_repo, _pr, body) => { comments.push(receipt({}, { body })); },
     };
     const env = { ...ENV, REPO: "o/r", PR_NUMBER: "7", CANDIDATE_DIR: candidate, MIRQL_COURT_TOKEN: "token", PATH: process.env.PATH };
-    const verdicts = () => comments.map((c) => /"role":"(\w+)","verdict":"(\w+)"/.exec(c.body).slice(1).join(":"));
+    const verdicts = () => comments.filter((c) => c.body.includes("mirql-court-state")).map((c) => /"role":"(\w+)","verdict":"(\w+)"/.exec(c.body).slice(1).join(":"));
     const sync = () => { pr.head.sha = git(candidate, "rev-parse", "HEAD"); };
     return { git, origin, candidate, comments, gh, pr, io, env, jobs, verdicts, sync, issueAuthor };
   }
@@ -1235,6 +1288,21 @@ describe("court tick end to end", () => {
     });
   });
 
+  it("posts one landing notice when AUTO_MERGE is off, and no new one on the next wake-up", async () => {
+    await withDir(async (dir) => {
+      const box = sandbox(dir);
+      const reply = { verdict: "MERGE", rationale: "fine", rulings: [] };
+      const rulings = { ...merge, rulings: [{ finding_id: "f1", status: "OVERRULED_FALSE_POSITIVE", reason: "agreed" }] };
+      assert.equal(await quiet(() => runCourtTick({ env: box.env, io: box.io, fetchImpl: mockFetch(critic, rebut, rulings).fetchImpl, baseDir: ROOT })), 0);
+      const noticesOf = (code) => box.comments.filter((c) => c.body.includes(`mirql-court-landing:v1 ${code}`));
+      assert.equal(noticesOf("AUTO_MERGE_OFF").length, 1);
+      assert.match(noticesOf("AUTO_MERGE_OFF")[0].body, /owner decides/);
+      assert.ok(!box.comments.some((c) => c.body.includes("mirql-court-state") && c.body.includes("AUTO_MERGE_OFF")), "the notice is not a receipt");
+      assert.equal(await quiet(() => runCourtTick({ env: box.env, io: box.io, fetchImpl: mockFetch(reply).fetchImpl, baseDir: ROOT })), 0);
+      assert.equal(noticesOf("AUTO_MERGE_OFF").length, 1, "one notice per code and head");
+    });
+  });
+
   it("the judge waits for suite evidence, and a red head posts nothing so a green re-run comes back", async () => {
     await withDir(async (dir) => {
       const box = sandbox(dir);
@@ -1333,13 +1401,17 @@ describe("court tick end to end", () => {
       });
     });
 
-    it("stays silent and green with no API key", async () => {
+    it("posts one notice and stays red with no API key", async () => {
       await withDir(async (dir) => {
         const box = sandbox(dir);
         const { fetchImpl, calls } = mockFetch();
-        assert.equal(await quiet(() => runCourtTick({ env: { ...box.env, ZAI_API_KEY: "" }, io: box.io, fetchImpl, baseDir: ROOT })), 0);
+        const env = { ...box.env, ZAI_API_KEY: "" };
+        assert.equal(await quiet(() => runCourtTick({ env, io: box.io, fetchImpl, baseDir: ROOT })), 1, "a dead key is a failure, not a quiet day");
         assert.equal(calls.length, 0);
-        assert.equal(box.comments.length, 0);
+        assert.equal(notices(box).length, 1);
+        assert.match(notices(box)[0].body, /`NO_API_KEY`/);
+        assert.equal(await quiet(() => runCourtTick({ env, io: box.io, fetchImpl, baseDir: ROOT })), 1, "still red on the next wake-up");
+        assert.equal(notices(box).length, 1, "one notice per head and reason");
       });
     });
 
