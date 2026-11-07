@@ -27,8 +27,9 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /**
  * @param {{ rootDir: string, repoDir: string, tipSha: string, document: unknown, maxCommits?: number }} input
  *   rootDir holds the base copy's pin; repoDir holds the git history.
- * @returns {{ ok: false, reason: string } | { ok: true, warrant_hash: string, phi_budget: number, phi_per_pr: number | null, phi_spent: number, phi_remaining: number, phi_allowance: number }}
+ * @returns {{ ok: false, reason: string } | { ok: true, warrant_hash: string, phi_budget: number, phi_per_pr: number | null, phi_spent: number, phi_remaining: number, phi_allowance: number, commits_to_limit: number }}
  *   phi_allowance is what one PR may add: phi_remaining, capped by phi_per_pr when the warrant sets one.
+ *   commits_to_limit is how many more first-parent commits the warrant's base may gain before TOO_MANY_COMMITS.
  */
 export function measurePhiWarrant({ rootDir, repoDir, tipSha, document, maxCommits = MAX_COMMITS }) {
   if (!document) return { ok: false, reason: "NO_WARRANT" };
@@ -54,11 +55,24 @@ export function measurePhiWarrant({ rootDir, repoDir, tipSha, document, maxCommi
       previous = current;
     }
     const remaining = Math.max(0, warrant.phi_budget - spent);
-    return { ok: true, warrant_hash: warrant.hash, phi_budget: warrant.phi_budget, phi_per_pr: warrant.phi_per_pr ?? null, phi_spent: spent, phi_remaining: remaining, phi_allowance: perPrAllowance(warrant, remaining) };
+    return { ok: true, warrant_hash: warrant.hash, phi_budget: warrant.phi_budget, phi_per_pr: warrant.phi_per_pr ?? null, phi_spent: spent, phi_remaining: remaining, phi_allowance: perPrAllowance(warrant, remaining), commits_to_limit: maxCommits - chain.length };
   } catch (err) {
     return { ok: false, reason: `MEASURE_FAILED: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
+
+/** Both time bombs — budget and the 200-commit base — warn at a fifth left, so a stall is seen before it blocks. */
+const RUNWAY_FIFTH = 5;
+export const runwayWarnings = (r) => {
+  const lines = [];
+  if (r.phi_remaining * RUNWAY_FIFTH <= r.phi_budget) {
+    lines.push(`::warning::Phi warrant runway low: ${r.phi_remaining} of ${r.phi_budget} left. Grant a fresh one: node scripts/phi-warrant.mjs grant --budget <n> --key <owner-key>`);
+  }
+  if (r.commits_to_limit * RUNWAY_FIFTH <= MAX_COMMITS) {
+    lines.push(`::warning::Phi warrant base is aging: ${r.commits_to_limit} commits before the ${MAX_COMMITS}-commit limit. Sign a fresh warrant from the current tip.`);
+  }
+  return lines;
+};
 
 export function main(env = process.env, rootDir = ROOT) {
   const result = measurePhiWarrant({ rootDir, repoDir: rootDir, tipSha: env.BASE_SHA, document: env.PHI_WARRANT });
@@ -68,6 +82,7 @@ export function main(env = process.env, rootDir = ROOT) {
     return 0;
   }
   if (env.GITHUB_OUTPUT) appendFileSync(env.GITHUB_OUTPUT, `spent=${result.phi_spent}\n`);
+  for (const line of runwayWarnings(result)) console.log(line);
   return 0;
 }
 
