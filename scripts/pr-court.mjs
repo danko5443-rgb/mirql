@@ -4,7 +4,7 @@
 // propose JSON; this tool validates, applies, commits, posts and merges (Law 3).
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { lstatSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { signoffLabel } from "./ci-owner-signoff.mjs";
@@ -184,7 +184,7 @@ async function runCriticRound({ repoDir, diffText = "", files = [], intent = () 
   const res = await callCourtModel({ role: "critic", system: rolePrompt, user: fenceData({ head_sha: headSha, round, ...intent(), diff: diffText, ...readContext(repoDir, files, diffText) }), env, fetchImpl });
   if (!res.ok) return res;
   const reply = validateCritic(res.data);
-  return reply ? { ok: true, ...reply } : invalidReply("critic", res.data);
+  return reply ? { ok: true, ...reply, usage: res.usage } : { ...invalidReply("critic", res.data), ...(res.usage && { usage: res.usage }) };
 }
 
 async function runAdvocateRound({ repoDir, diffText = "", files = [], intent = () => ({}), authorAssociation, findings = [], basePhi, phiAllowance = 0, round = 1, policies, env, fetchImpl, rolePrompt = "", commit = null }) {
@@ -197,21 +197,21 @@ async function runAdvocateRound({ repoDir, diffText = "", files = [], intent = (
   const res = await callCourtModel({ role: "advocate", system: rolePrompt, user, env, fetchImpl });
   if (!res.ok) return res;
   const reply = validateAdvocate(res.data, findings);
-  if (!reply) return invalidReply("advocate", res.data);
+  if (!reply) return { ...invalidReply("advocate", res.data), ...(res.usage && { usage: res.usage }) };
   const patches = reply.responses.flatMap((r) => r.patches);
-  if (patches.length === 0) return { ok: true, verdict: "REBUT", ...reply };
+  if (patches.length === 0) return { ok: true, verdict: "REBUT", ...reply, usage: res.usage };
   const staged = stagePatches(repoDir, patches, policies);
-  if (staged.error) return escalate(staged.error, reply);
+  if (staged.error) return escalate(staged.error, { ...reply, ...(res.usage && { usage: res.usage }) });
   const restore = () => { for (const { abs, original } of staged.files.values()) writeFileSync(abs, original); };
   try {
     for (const { abs, next } of staged.files.values()) writeFileSync(abs, next);
     const phi = computePhi(repoDir).total;
-    if (!Number.isSafeInteger(basePhi) || phi > basePhi + allowanceOf(phiAllowance)) { restore(); return escalate("PHI_INCREASE", reply); }
-    if (!commit) { restore(); return escalate("NO_PUSH_TOKEN", reply); }
-    return { ok: true, verdict: "FIXED", headSha: commit([...staged.files.keys()]), ...reply };
+    if (!Number.isSafeInteger(basePhi) || phi > basePhi + allowanceOf(phiAllowance)) { restore(); return escalate("PHI_INCREASE", { ...reply, ...(res.usage && { usage: res.usage }) }); }
+    if (!commit) { restore(); return escalate("NO_PUSH_TOKEN", { ...reply, ...(res.usage && { usage: res.usage }) }); }
+    return { ok: true, verdict: "FIXED", headSha: commit([...staged.files.keys()]), ...reply, usage: res.usage };
   } catch (err) {
     restore();
-    return escalate(`PATCH_FAILED: ${err instanceof Error ? err.message : String(err)}`, reply);
+    return escalate(`PATCH_FAILED: ${err instanceof Error ? err.message : String(err)}`, { ...reply, ...(res.usage && { usage: res.usage }) });
   }
 }
 
@@ -227,8 +227,8 @@ async function runJudgeArbitration({ repoDir, diffText = "", files = [], intent 
   const res = await callCourtModel({ role: "judge", system, user: fenceData({ head_sha: headSha, round, evidence, findings, transcript, ...intent(), diff: diffText, ...readContext(repoDir, files, diffText) }), env, fetchImpl });
   if (!res.ok) return res;
   const ruling = validateJudge(res.data, findings);
-  if (!ruling) return invalidReply("judge", res.data);
-  return { ok: true, ...ruling, verdict: ruling.verdict === "REMAND" && round >= MAX_ROUNDS ? "ESCALATE" : ruling.verdict };
+  if (!ruling) return { ...invalidReply("judge", res.data), ...(res.usage && { usage: res.usage }) };
+  return { ok: true, ...ruling, usage: res.usage, verdict: ruling.verdict === "REMAND" && round >= MAX_ROUNDS ? "ESCALATE" : ruling.verdict };
 }
 
 function decideCourtStep(state, { externalFindings = [], externalReviewed = false, codexPending = false, locked = false, lateChanges = false } = {}) {
@@ -400,19 +400,21 @@ const COURT_STEPS = {
     post({ round: judgeRound, role: "judge", verdict: refusalVerdict(refused), text: refused ?? `COURTHOUSE_LOCK: ${locked.slice(0, 10).join(", ")} - ${locked.some(isReviewerConfigPath) ? "reviewer config: no sign-off clears the gate, so the owner merges by hand." : `run node scripts/owner-signoff.mjs ${prNumber}`}` }); return 0;
   },
   escalate: ({ post, judgeRound }) => { post({ round: judgeRound, role: "judge", verdict: "ESCALATE", text: "MAX_ROUNDS: findings remain open after the last Advocate round." }); return 0; },
-  async critic({ ctx, snapshot, post, fail, state, prompt, intent }) {
+  async critic({ countTokens, ctx, snapshot, post, fail, state, prompt, intent }) {
     const res = await runCriticRound({ ...ctx, ...snapshot(), intent, round: state.advocateRounds + 1, rolePrompt: prompt("critic") });
+    countTokens("critic", res.usage);
     if (res.refused) { post({ round: state.advocateRounds + 1, role: "judge", verdict: refusalVerdict(res.reason), text: res.reason }); return 0; }
     if (!res.ok) return fail(res);
     const list = res.findings.map((f) => `- **${f.severity} ${f.id}** \`${f.file}:${f.line}\` ${f.title}`);
     post({ round: state.advocateRounds + 1, role: "critic", verdict: res.verdict, count: res.findings.length, payload: { findings: res.findings }, text: [res.summary, ...list].join("\n") });
     return null;
   },
-  async advocate({ ctx, snapshot, post, fail, state, prompt, intent, findings, basePhi, phiAllowance, env, io, pr }) {
+  async advocate({ countTokens, ctx, snapshot, post, fail, state, prompt, intent, findings, basePhi, phiAllowance, env, io, pr }) {
     const round = state.advocateRounds + 1;
     const token = env.MIRQL_COURT_TOKEN;
     const commit = token ? (files) => pushCommit(io, ctx.repoDir, files, pr.head.ref, token, `fix: PR Court advocate round ${round}`, env) : null;
     const res = await runAdvocateRound({ ...ctx, ...snapshot(), intent, findings, basePhi: basePhi(), phiAllowance: phiAllowance(), round, rolePrompt: prompt("advocate"), commit });
+    countTokens("advocate", res.usage);
     if (!res.ok) return fail(res);
     if (res.verdict === "ESCALATE" || res.verdict === "RECUSE") { post({ round, role: "judge", verdict: res.verdict, text: advocateText(res) }); return 0; }
     const titled = (id) => { const f = findings.find((x) => x.id === id); return `${f.file}:${f.line} ${f.title}`; };
@@ -420,13 +422,14 @@ const COURT_STEPS = {
     post({ round, headSha: res.headSha, role: "advocate", verdict: res.verdict, count: responses.length, payload: { responses }, text: advocateText(res) });
     return res.verdict === "FIXED" ? 0 : null;
   },
-  async judge({ ctx, snapshot, post, fail, state, prompt, intent, findings, basePhi, phiAllowance, phiWarrant, judgeRound, io, repo }) {
+  async judge({ countTokens, ctx, snapshot, post, fail, state, prompt, intent, findings, basePhi, phiAllowance, phiWarrant, judgeRound, io, repo }) {
     const notary = notaryRun(io, repo, ctx.headSha);
     if (!["success", "failure"].includes(notary?.head) || !["success", "failure"].includes(notary?.base)) return 0;
     const { diffText, files } = snapshot();
     const allowance = phiAllowance();
     const evidence = { suitePassBase: notary.base === "success", suitePassHead: notary.head === "success", deltaPhi: computeGitTreePhi(ctx.repoDir, ctx.headSha).metrics.total - basePhi(), phiAllowance: allowance, phiWarrant: phiWarrant() };
     const res = await runJudgeArbitration({ ...ctx, diffText, files, intent, evidence, findings, transcript: state.transcript, round: judgeRound, rolePrompt: prompt("judge") });
+    countTokens("judge", res.usage);
     if (!res.ok) return fail(res);
     if (res.verdict === "WAIT") return 0; // A red suite posts nothing, so a green re-run can come back.
     post({ round: judgeRound, role: "judge", verdict: res.verdict, count: res.unresolved.length, payload: { findings: res.unresolved, rulings: res.rulings }, text: res.rationale });
@@ -440,7 +443,30 @@ const COURT_STEPS = {
   },
 };
 
-async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl = globalThis.fetch, baseDir = resolve(dirname(fileURLToPath(import.meta.url)), ".."), now = Date.now } = {}) {
+async function runCourtTick(options = {}) {
+  const env = options.env ?? process.env;
+  // The loop's own spend was its only unmeasured resource: token counts per role, integers, no price guesses (Law 17).
+  const tokenTotals = Object.create(null);
+  const countTokens = (role, usage) => {
+    if (usage?.total_tokens) tokenTotals[role] = (tokenTotals[role] ?? 0) + usage.total_tokens;
+  };
+  const reportTokens = () => {
+    const roles = Object.keys(tokenTotals);
+    if (roles.length === 0) return;
+    const total = Object.values(tokenTotals).reduce((sum, n) => sum + n, 0);
+    log(`tick tokens: ${JSON.stringify({ ...tokenTotals, total })}`);
+    try {
+      if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `### PR Court tokens\n\n\`\`\`json\n${JSON.stringify({ ...tokenTotals, total }, null, 2)}\n\`\`\`\n`);
+    } catch (err) { /* mp-003-allow: the summary is a convenience; the log line above already carries the count */ console.log(`::warning::pr-court: token summary not written: ${err?.name}`); }
+  };
+  try {
+    return await courtTickSteps({ ...options, countTokens });
+  } finally {
+    reportTokens();
+  }
+}
+
+async function courtTickSteps({ env = process.env, io = defaultIo(env), fetchImpl = globalThis.fetch, baseDir = resolve(dirname(fileURLToPath(import.meta.url)), ".."), now = Date.now, countTokens = () => {} } = {}) {
   const started = now();
   const { REPO: repo, PR_NUMBER: prNumber, CANDIDATE_DIR: repoDir } = env;
   if (env.MIRQL_COURT_DISABLED === "1") return 0;
@@ -498,7 +524,7 @@ async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl 
     };
     const code = await COURT_STEPS[name]({
       ctx: { repoDir, headSha, authorAssociation: pr.author_association, policies, env, fetchImpl },
-      state, env, io, pr, repo, prNumber, findings, post, fail, comments,
+      state, env, io, pr, repo, prNumber, findings, post, fail, comments, countTokens,
       judgeRound: Math.max(state.advocateRounds, 1),
       prompt: (role) => loadRolePrompt(baseDir, role),
       intent: () => prIntent(io, repo, prNumber, pr),

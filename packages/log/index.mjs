@@ -37,6 +37,12 @@ export const TOOL = "log";
 /** prev_hash anchor of the very first event in any ledger (canonical core primitive). */
 export { GENESIS_PREV_HASH };
 
+/** The honest time of an event: its declared timestamp, else its HLC wall clock, else epoch 0 (never "now"). */
+const eventTsMs = (event) => {
+  const ts = event?.timestamp_ms ?? event?.hlc?.wall_ms ?? (event?.ts ? Date.parse(event.ts) : 0);
+  return Number.isFinite(ts) ? ts : 0;
+};
+
 /** The named projections served by getView / `mirql l view`. */
 export const PROJECTIONS = Object.freeze([
   "job_state",
@@ -44,6 +50,7 @@ export const PROJECTIONS = Object.freeze([
   "human_digest",
   "phi",
   "budget",
+  "quiescence",
 ]);
 
 const PROJECTION_ALIASES = Object.freeze({
@@ -53,6 +60,7 @@ const PROJECTION_ALIASES = Object.freeze({
   human_digest: "human_digest",
   phi: "phi",
   budget: "budget",
+  quiescence: "quiescence",
 });
 
 const SUBCOMMANDS = Object.freeze([
@@ -189,6 +197,8 @@ function deriveKeyIdFromPrivate(privateKey) {
 function richFold(events, rawLines = []) {
   const state = {
     mode: null,
+    mode_since_ms: null,
+    mode_window_spend_micro_usd: 0,
     epoch: 0,
     seq: 0,
     last_event_hash: null,
@@ -255,6 +265,11 @@ function richFold(events, rawLines = []) {
 
     if (type === "mirql.genesis") {
       if (typeof payload.macro_state === "string") state.mode = payload.macro_state;
+    } else if (type === "factory.mode_changed") {
+      // Law 14 accounting: a new mode window starts at zero spend, whatever the old window did.
+      if (typeof payload.to_mode === "string") state.mode = payload.to_mode;
+      state.mode_since_ms = eventTsMs(event);
+      state.mode_window_spend_micro_usd = 0;
     } else if (type === "factory.halted" || type === "mirql.halted" || type === "mirql.halt") {
       state.halted = true;
     } else if (
@@ -303,6 +318,7 @@ function richFold(events, rawLines = []) {
         );
       }
       state.budget_spent_micro_usd += cost;
+      state.mode_window_spend_micro_usd += cost;
       if (warrantId !== null) {
         state.by_warrant[warrantId] =
           (state.by_warrant[warrantId] ?? 0) + cost;
@@ -409,7 +425,20 @@ function countJobs(jobs, statuses) {
 }
 
 /** Project a rich fold state into one of the named views. */
-function projectView(rich, projection) {
+/** Law 14's ceiling: the integer micro-USD a QUIESCENT window may spend, from the policy the operator signed. */
+function quiescentCeilingMicro(policy) {
+  const daily = Number.isSafeInteger(policy?.daily_budget_micro_usd) ? policy.daily_budget_micro_usd : 0;
+  const bp = Number.isSafeInteger(policy?.quiescent_max_budget_bp) ? policy.quiescent_max_budget_bp : 0;
+  return Math.floor((daily * bp) / 10000);
+}
+
+function loadViewPolicy(resolvedMirqlDir) {
+  try {
+    return JSON.parse(readFileSync(join(resolvedMirqlDir, "..", "policy", "mirql.json"), "utf8"));
+  } catch (err) { /* mp-003-allow: no policy means no ceiling to enforce, and the accounting is still exact */ return null; }
+}
+
+function projectView(rich, projection, policy = null) {
   const key = PROJECTION_ALIASES[projection];
   if (key === undefined) {
     throw new LedgerError(
@@ -420,6 +449,17 @@ function projectView(rich, projection) {
   switch (key) {
     case "job_state":
       return jobStateFrom(rich);
+    case "quiescence": {
+      const ceiling = quiescentCeilingMicro(policy);
+      return {
+        mode: rich.mode,
+        mode_since_ms: rich.mode_since_ms,
+        mode_window_spend_micro_usd: rich.mode_window_spend_micro_usd,
+        budget_spent_micro_usd: rich.budget_spent_micro_usd,
+        quiescent_ceiling_micro_usd: ceiling,
+        quiescent_ok: rich.mode === "QUIESCENT" ? rich.mode_window_spend_micro_usd <= ceiling : null,
+      };
+    }
     case "orchestrator_digest": {
       let mode = rich.mode;
       if (typeof mode === "string" && mode.length > 256) {
@@ -776,7 +816,7 @@ export function foldEvents(source) {
 export function getView(mirqlDir, projection) {
   const dir = resolveMirqlDir(mirqlDir);
   const { events, rawLines } = readLedgerSafe(dir);
-  return projectView(richFold(events, rawLines), projection);
+  return projectView(richFold(events, rawLines), projection, loadViewPolicy(dir));
 }
 
 // ---------------------------------------------------------------------------

@@ -231,7 +231,18 @@ async function callCourtModel({ role, system = "", user, env = process.env, fetc
       await readChatStream(resp.body, data);
     } else data = await resp.json();
     const raw = String(req.text(data) ?? "");
-    return { ok: true, data: JSON.parse((raw.match(/\{[\s\S]*\}/) ?? [raw])[0]) };
+    // The provider's usage object is the only cost signal the loop has; keep the integer token counts (Law 17), never a price guess.
+    // zai/openai/openrouter report OpenAI-shape usage, Anthropic input_tokens+output_tokens, Gemini usageMetadata: normalize all three.
+    const u = data?.usage ?? data?.usageMetadata;
+    const total = Number.isSafeInteger(u?.total_tokens) ? u.total_tokens
+      : Number.isSafeInteger(u?.input_tokens) && Number.isSafeInteger(u?.output_tokens) ? u.input_tokens + u.output_tokens
+      : Number.isSafeInteger(u?.totalTokenCount) ? u.totalTokenCount : null;
+    const usage = total === null ? null : {
+      prompt_tokens: Number.isSafeInteger(u.prompt_tokens) ? u.prompt_tokens : Number.isSafeInteger(u.promptTokenCount) ? u.promptTokenCount : null,
+      completion_tokens: Number.isSafeInteger(u.completion_tokens) ? u.completion_tokens : Number.isSafeInteger(u.candidatesTokenCount) ? u.candidatesTokenCount : null,
+      total_tokens: total,
+    };
+    return { ok: true, data: JSON.parse((raw.match(/\{[\s\S]*\}/) ?? [raw])[0]), usage };
   } catch (err) {
     /* mp-003-allow: network or JSON failure fails closed without a verdict */
     const cause = err?.cause?.code;
