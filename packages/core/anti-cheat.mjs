@@ -358,6 +358,21 @@ export function isEffectivelyEmpty(bodyText) {
 }
 
 /**
+ * A catch body that only names the caught error (`e`, `e;`, `void e`) is a swallow
+ * with extra steps: the exception is observed and discarded, which MP-003 refuses
+ * exactly like an empty body. The marker rules are unchanged.
+ */
+export function isErrorReferenceOnly(bodyText, paramName) {
+  if (typeof paramName !== "string" || !/^[A-Za-z_$][\w$]*$/.test(paramName)) return false;
+  const cleaned = bodyText
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "")
+    .replace(/(["'`])(?:\\.|(?!\1)[\s\S])*?\1/g, "")
+    .trim();
+  return new RegExp(`^(?:void\\s+)?${paramName};?$`).test(cleaned);
+}
+
+/**
  * MP-003 exemption marker: `// mp-003-allow: <reason>` (or the block-comment
  * form) in a catch body records why the silence is intended. The comment comes
  * from the source being scanned, so it proves nothing by itself: it only exempts
@@ -391,11 +406,11 @@ export function checkSwallowedExceptions(sourceCode, filename, { changedLines } 
   const describe = (text, detail) => (MP003_ALLOW_RE.test(text) ? MP003_MARKER_REFUSED : detail);
 
   // 1. Standard catch blocks: parse with balanced braces (ignoring strings, comments, regexes)
-  const catchStartRegex = /catch\s*(?:\([^)]*\))?\s*\{/g;
+  const catchStartRegex = /catch\s*(?:\(\s*([A-Za-z_$][\w$]*)\s*\))?\s*\{/g;
   let match;
   while ((match = catchStartRegex.exec(sourceCode)) !== null) {
     const { body, endIdx: catchEnd } = extractBalancedBlock(sourceCode, match.index + match[0].length);
-    if (isEffectivelyEmpty(body) && !markerExempts(body, match.index, catchEnd)) {
+    if ((isEffectivelyEmpty(body) || isErrorReferenceOnly(body, match[1])) && !markerExempts(body, match.index, catchEnd)) {
       const upToMatch = sourceCode.slice(0, match.index);
       const line = upToMatch.split("\n").length;
       violations.push({
@@ -428,7 +443,9 @@ export function checkSwallowedExceptions(sourceCode, filename, { changedLines } 
 
     if (foundBrace !== -1) {
       const { body, endIdx } = extractBalancedBlock(sourceCode, foundBrace + 1);
-      if (isEffectivelyEmpty(body) && !markerExempts(body, pcMatch.index, endIdx)) {
+      const arrowParam = /(?:\(\s*([A-Za-z_$][\w$]*)\s*\)|\b([A-Za-z_$][\w$]*))\s*=>\s*\{?\s*$/.exec(sourceCode.slice(afterParen, foundBrace + 1));
+      const arrowParamName = arrowParam ? (arrowParam[1] ?? arrowParam[2]) : null;
+      if ((isEffectivelyEmpty(body) || isErrorReferenceOnly(body, arrowParamName)) && !markerExempts(body, pcMatch.index, endIdx)) {
         const upToMatch = sourceCode.slice(0, pcMatch.index);
         const line = upToMatch.split("\n").length;
         violations.push({
@@ -454,7 +471,9 @@ export function checkSwallowedExceptions(sourceCode, filename, { changedLines } 
       const arrowMatch = argStr.match(/=>\s*(.*)$/);
       if (arrowMatch) {
         const expr = arrowMatch[1].trim();
-        if (isEffectivelyEmpty(expr) && !markerExempts(expr, pcMatch.index, j)) {
+        const exprParam = /(?:\(\s*([A-Za-z_$][\w$]*)\s*\)|\b([A-Za-z_$][\w$]*))\s*=>/.exec(argStr);
+        const exprParamName = exprParam ? (exprParam[1] ?? exprParam[2]) : null;
+        if ((isEffectivelyEmpty(expr) || isErrorReferenceOnly(expr, exprParamName)) && !markerExempts(expr, pcMatch.index, j)) {
           const upToMatch = sourceCode.slice(0, pcMatch.index);
           const line = upToMatch.split("\n").length;
           violations.push({
