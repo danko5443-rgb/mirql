@@ -75,12 +75,12 @@ export function runSupervisor(options = {}) {
 
   const cleanupState = () => {
     if (heartbeatTicker) {
-      try { heartbeatTicker.kill(); } catch {}
+      try { heartbeatTicker.kill(); } catch { /* mp-003-allow: best-effort kill of the detached heartbeat ticker during cleanup */ }
     }
     if (!options.skipPidFile) {
       try {
         if (existsSync(pidPath)) unlinkSync(pidPath);
-      } catch {}
+      } catch { /* mp-003-allow: best-effort pidfile removal during cleanup; the process is ending anyway */ }
     }
   };
 
@@ -264,7 +264,7 @@ function measureGitHead(workspaceDir) {
     if (res.status === 0 && /^[0-9a-f]{40,64}\n?$/.test(res.stdout || "")) {
       return res.stdout.trim();
     }
-  } catch {}
+  } catch { /* mp-003-allow: an unreadable git answer means no base sha, and the caller treats null as unavailable */ }
   return null;
 }
 
@@ -458,7 +458,7 @@ export function touchHeartbeat(mirqlDir) {
     const stateDir = join(mirqlDir, "state");
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, "heartbeat"), `${Date.now()}\n`, "utf8");
-  } catch {}
+  } catch { /* mp-003-allow: a heartbeat that cannot be written leaves the stale timestamp for the lifeguard to judge */ }
 }
 
 /**
@@ -474,7 +474,7 @@ export function startHeartbeatTicker(heartbeatPath, intervalMs = 2000) {
       Number.isSafeInteger(Number(intervalMs)) && Number(intervalMs) > 0
         ? Number(intervalMs)
         : 2000;
-    const code = `const fs = require('node:fs'); const f = process.argv[1]; function tick() { if (process.ppid && process.ppid !== 1) { try { process.kill(process.ppid, 0); } catch { process.exit(0); } } try { fs.writeFileSync(f, Date.now() + '\\n', 'utf8'); } catch {} } tick(); setInterval(tick, ${safeInterval});`;
+    const code = `const fs = require('node:fs'); const f = process.argv[1]; function tick() { if (process.ppid && process.ppid !== 1) { try { process.kill(process.ppid, 0); } catch { process.exit(0); } } try { fs.writeFileSync(f, Date.now() + '\\n', 'utf8'); } catch { /* mp-003-allow: the ticker child is a fire-and-forget best-effort writer */ } } tick(); setInterval(tick, ${safeInterval});`;
     const cp = spawn(
       process.execPath,
       ["-e", code, heartbeatPath],
@@ -579,7 +579,7 @@ export async function runSupervisorReactive(options = {}) {
       expiryTimer = null;
       wakeAtMs = Infinity;
       if (!watcher.closed) {
-        runStep(null).catch(() => {});
+        runStep(null).catch(() => { /* mp-003-allow: runStep reports its own failures; this only drops the promise rejection placeholder */ });
       }
     }, delay);
   };
@@ -789,7 +789,7 @@ export async function runSupervisorReactive(options = {}) {
   }
 
   if (options.initialRun) {
-    await runStep(null).catch(() => {});
+    await runStep(null).catch(() => { /* mp-003-allow: runStep reports its own failures; this only drops the promise rejection placeholder */ });
   }
 
   return {
