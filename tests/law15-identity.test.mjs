@@ -10,11 +10,14 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, write
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { ulid, generateEd25519Keypair } from "../packages/core/index.mjs";
-import { semantic_fingerprint } from "../packages/core/warrant.mjs";
+import { sha256, ulid, generateEd25519Keypair } from "../packages/core/index.mjs";
 import { computeGitTreePhi } from "../packages/run/phi.mjs";
 import { authorizeTestKey, provisionTestTrust } from "./helpers/keyring.mjs";
 import { appendLedgerEvent, foldQueueState, getQueueStatus } from "../packages/queue/index.mjs";
+
+// `semantic_fingerprint` is a warrant FIELD its author computes as a content hash; there is
+// no shared helper in core, so this computes one the way the queue's own fixtures do.
+const semantic_fingerprint = (intent) => sha256(JSON.stringify(intent));
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
 const GIT_ENV = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.test", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.test" };
