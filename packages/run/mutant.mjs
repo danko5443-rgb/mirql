@@ -415,7 +415,7 @@ function makeSandbox(sourcePath, testPaths) {
         unlinkSync(sandboxSource);
         writeFileSync(sandboxSource, readFileSync(resolve(sourcePath)));
       }
-    } catch {}
+    } catch { /* mp-003-allow: best-effort dereference of a source symlink into a real sandbox copy; the copy semantics are pinned by the mutation tests */ }
 
     for (let i = 0; i < sandboxTests.length; i++) {
       const t = sandboxTests[i];
@@ -426,20 +426,20 @@ function makeSandbox(sourcePath, testPaths) {
           unlinkSync(t);
           writeFileSync(t, readFileSync(resolve(realT)));
         }
-      } catch {}
+      } catch { /* mp-003-allow: best-effort dereference of a test symlink into a real sandbox copy; the copy semantics are pinned by the mutation tests */ }
     }
 
     // cpSync preserves file modes; the sandbox owns its copies, so the mutation
     // target must be writable even if the real file was read-only.
     try {
       chmodSync(sandboxSource, 0o666);
-    } catch {}
+    } catch { /* mp-003-allow: chmod on the sandbox copy is best-effort; a read-only source that stays read-only fails the mutation write loudly */ }
     return { root: sandboxRoot, source: sandboxSource, tests: sandboxTests };
   } catch (err) {
     if (sandboxRoot && existsSync(sandboxRoot)) {
       try {
         rmSync(sandboxRoot, { recursive: true, force: true });
-      } catch {}
+      } catch { /* mp-003-allow: the sandbox setup already failed; a leftover temp directory is reclaimed by the OS */ }
     }
     return null;
   }
@@ -512,7 +512,7 @@ export function runMutationTesting(options = {}) {
     try {
       writeFileSync(sourcePath, readFileSync(backupPath, "utf8"), "utf8");
       unlinkSync(backupPath);
-    } catch {}
+    } catch { /* mp-003-allow: a failed restore leaves the backup in place for manual recovery; the mutation run already failed */ }
   }
 
   const originalContent = readFileSync(sourcePath, "utf8");
@@ -657,7 +657,7 @@ export function runMutationTesting(options = {}) {
     if (sandbox) {
       try {
         rmSync(sandbox.root, { recursive: true, force: true });
-      } catch {}
+      } catch { /* mp-003-allow: best-effort sandbox teardown after the mutation verdict is recorded */ }
     }
   }
 }

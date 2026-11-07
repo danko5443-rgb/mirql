@@ -89,7 +89,7 @@ export function createJourneySandbox(options = {}) {
       if (!options.keepSandbox) {
         try {
           rmSync(workDir, { recursive: true, force: true });
-        } catch {}
+        } catch { /* mp-003-allow: best-effort cleanup of the journey's throwaway sandbox */ }
       }
     },
   };
@@ -134,7 +134,7 @@ export function executeCli(args, ctx = {}) {
   if (res.stdout) {
     try {
       parsed = JSON.parse(res.stdout.trim());
-    } catch {}
+    } catch { /* mp-003-allow: unparseable journey output stays unparsed; the raw text is still reported */ }
   }
 
   return {

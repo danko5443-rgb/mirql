@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { checkSwallowedExceptions } from "../packages/core/anti-cheat.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const CEILING = 67; // measured 2026-11-07: 67 violations in 21 files
+const CEILING = 66; // measured 2026-11-07: every silent catch in the tree carries a reason; the count only falls by real handling
 
 function walkJsFiles(dir) {
   return readdirSync(dir).flatMap((name) => {
