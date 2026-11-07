@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { generateEd25519Keypair, signEvent } from "../packages/core/ed25519.mjs";
 import { PHI_WARRANT_DOMAIN, PHI_WARRANT_PIN_PATH, phiWarrantAllowance, readPhiWarrantPin, verifyPhiWarrant } from "../packages/core/phi-warrant.mjs";
 import { evaluatePullRequest } from "../packages/mergeproof/evaluator.mjs";
-import { main, measurePhiWarrant } from "../scripts/ci-phi-warrant.mjs";
+import { main, measurePhiWarrant, runwayWarnings } from "../scripts/ci-phi-warrant.mjs";
 import { run } from "../scripts/phi-warrant.mjs";
 import { createOwnerKey } from "../packages/inbox/keys.mjs";
 
@@ -361,6 +361,39 @@ describe("phi warrant: spend from merged history", () => {
       assert.equal(evaluatePullRequest(doc, { rootDir: dir, phiWarrant: warrant, phiSpent: spent }).verdict, "conformance_pass");
       const over = { ...doc, phi: { phi_base: 0, phi_head: remaining + 1, delta_phi: remaining + 1 } };
       assert.equal(evaluatePullRequest(over, { rootDir: dir, phiWarrant: warrant, phiSpent: spent }).violation, "PHI_INCREASE");
+    });
+  });
+
+  it("reports the commit runway and warns before either time bomb blocks the factory", () => {
+    withHistory(({ dir, base, tip }) => {
+      // base -> grown -> shrunk -> merge: three first-parent commits past the warrant's base.
+      const warrant = JSON.stringify(sign(OWNER, { base_sha: base, phi_budget: 5 }));
+      const m = measure(dir, tip, warrant);
+      assert.equal(m.commits_to_limit, 200 - 3);
+      const lines = runwayWarnings(m);
+      assert.ok(lines.some((l) => l.includes("Phi warrant runway low") && l.includes("of 5 left")), JSON.stringify(lines));
+      assert.equal(lines.some((l) => l.includes("base is aging")), false, "a fresh base has commit runway");
+
+      const fresh = measure(dir, tip, JSON.stringify(sign(OWNER, { base_sha: base, phi_budget: 100000 })));
+      assert.deepEqual(runwayWarnings(fresh), [], "a healthy warrant says nothing");
+
+      const aging = { ...fresh, commits_to_limit: 40 };
+      assert.match(runwayWarnings(aging)[0], /base is aging: 40 commits before the 200-commit limit/);
+    });
+  });
+
+  it("main emits the runway warnings into the CI log", () => {
+    withHistory(({ dir, base, tip }) => {
+      const lines = [];
+      const original = console.log;
+      console.log = (line) => lines.push(line);
+      try {
+        const warrant = JSON.stringify(sign(OWNER, { base_sha: base, phi_budget: 5 }));
+        assert.equal(main({ PHI_WARRANT: warrant, BASE_SHA: tip }, dir), 0);
+        assert.ok(lines.some((l) => l.startsWith("::warning::Phi warrant runway low")), JSON.stringify(lines));
+      } finally {
+        console.log = original;
+      }
     });
   });
 });
