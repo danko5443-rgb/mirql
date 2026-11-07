@@ -16,7 +16,7 @@ import { appendFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { readPhiWarrantPin, verifyPhiWarrant } from "../packages/core/phi-warrant.mjs";
+import { perPrAllowance, readPhiWarrantPin, verifyPhiWarrant } from "../packages/core/phi-warrant.mjs";
 import { computeGitTreePhi } from "../packages/run/phi.mjs";
 import { isEntrypoint } from "./ci-review-gate.mjs";
 
@@ -27,7 +27,8 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /**
  * @param {{ rootDir: string, repoDir: string, tipSha: string, document: unknown, maxCommits?: number }} input
  *   rootDir holds the base copy's pin; repoDir holds the git history.
- * @returns {{ ok: false, reason: string } | { ok: true, warrant_hash: string, phi_budget: number, phi_spent: number, phi_remaining: number }}
+ * @returns {{ ok: false, reason: string } | { ok: true, warrant_hash: string, phi_budget: number, phi_per_pr: number | null, phi_spent: number, phi_remaining: number, phi_allowance: number }}
+ *   phi_allowance is what one PR may add: phi_remaining, capped by phi_per_pr when the warrant sets one.
  */
 export function measurePhiWarrant({ rootDir, repoDir, tipSha, document, maxCommits = MAX_COMMITS }) {
   if (!document) return { ok: false, reason: "NO_WARRANT" };
@@ -52,7 +53,8 @@ export function measurePhiWarrant({ rootDir, repoDir, tipSha, document, maxCommi
       spent += Math.max(0, current - previous);
       previous = current;
     }
-    return { ok: true, warrant_hash: warrant.hash, phi_budget: warrant.phi_budget, phi_spent: spent, phi_remaining: Math.max(0, warrant.phi_budget - spent) };
+    const remaining = Math.max(0, warrant.phi_budget - spent);
+    return { ok: true, warrant_hash: warrant.hash, phi_budget: warrant.phi_budget, phi_per_pr: warrant.phi_per_pr ?? null, phi_spent: spent, phi_remaining: remaining, phi_allowance: perPrAllowance(warrant, remaining) };
   } catch (err) {
     return { ok: false, reason: `MEASURE_FAILED: ${err instanceof Error ? err.message : String(err)}` };
   }
