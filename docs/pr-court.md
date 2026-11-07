@@ -48,7 +48,7 @@ A red suite posts no receipt at all, so the court comes back when a re-run turns
 ### Repository variables
 
 - **`MIRQL_COURT_AUTO_MERGE=1`:** enables merging. Default is off; with it unset, the court stops at the Judge's verdict and a human lands the PR.
-- **`MIRQL_PHI_WARRANT`:** the owner's signed Phi warrant, set by `node scripts/phi-warrant.mjs grant`. It is checked against the key pinned in `policy/phi-warrant-key.json` on `main`. Delete the variable to revoke it.
+- **`MIRQL_PHI_WARRANT`:** the owner's signed Phi warrant, set by `node scripts/phi-warrant.mjs grant --budget <n> --per-pr <m>`. One PR may add at most `<m>` of the `<n>` Phi; a larger PR still needs the owner's sign-off, so one PR cannot spend the whole budget. It is checked against the key pinned in `policy/phi-warrant-key.json` on `main`. Delete the variable to revoke it.
 - **`MIRQL_COURT_DISABLED=1`:** halts the court (for incidents or maintenance windows): no role runs and nothing merges. A review signal can still re-run a failed notary gate when the head has an approval or an owner sign-off.
 - **`MIRQL_BUILDER_DISABLED=1`:** stops the Issue Builder. New issues then open no PRs.
 - **`MIRQL_BUILDER_MODEL` / `MIRQL_BUILDER_PROVIDER`:** model and provider overrides for the Builder, like the Court's.

@@ -512,7 +512,7 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
       "LAW_13",
       "PHI_INCREASE",
       "reject",
-      `Law 13 invariant violation: complexity potential increased (delta_phi = +${deltaPhi} > 0). ${phiAllowance > 0 ? `The signed warrant has only +${phiAllowance} left` : "The notary sees no signed warrant with allowance left, so the authorized allowance is 0"}; a human must decide this merge (the repo owner's reviewed:<head sha> label can clear this, capped at needs_human).`,
+      `Law 13 invariant violation: complexity potential increased (delta_phi = +${deltaPhi} > 0). ${phiAllowance > 0 ? `The signed warrant allows only +${phiAllowance} for this PR (what is left, capped by its per-PR limit)` : "The notary sees no signed warrant with allowance left, so the authorized allowance is 0"}; a human must decide this merge (the repo owner's reviewed:<head sha> label can clear this, capped at needs_human).`,
       { checks, delta_phi: deltaPhi },
     );
   }

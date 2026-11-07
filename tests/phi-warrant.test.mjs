@@ -102,6 +102,22 @@ describe("phi warrant: verification", () => {
     });
     withCheckout((dir) => assert.equal(phiWarrantAllowance(dir, sign(), 0), 0), { pin: null });
   });
+
+  it("a signed per-PR limit caps what one PR may add, and only a signed one counts", () => {
+    withCheckout((dir) => {
+      assert.equal(phiWarrantAllowance(dir, sign(OWNER, { phi_per_pr: 30 }), 0), 30);
+      assert.equal(phiWarrantAllowance(dir, sign(OWNER, { phi_per_pr: 30 }), 80), 20);
+      assert.equal(phiWarrantAllowance(dir, sign(OWNER, { phi_per_pr: 500 }), 0), 100);
+      // Raising or removing the limit after signing breaks the signature.
+      const capped = sign(OWNER, { phi_per_pr: 30 });
+      assert.equal(phiWarrantAllowance(dir, { ...capped, phi_per_pr: 100 }, 0), 0);
+      const { phi_per_pr: _drop, ...uncapped } = capped;
+      assert.equal(phiWarrantAllowance(dir, uncapped, 0), 0);
+      for (const bad of [0, -1, "30", null]) {
+        assert.deepEqual(verifyPhiWarrant(sign(OWNER, { phi_per_pr: bad }), OWNER.publicKey), { ok: false, reason: "BAD_PER_PR" }, String(bad));
+      }
+    });
+  });
 });
 
 describe("phi warrant: evaluator", () => {
@@ -137,7 +153,7 @@ describe("phi warrant: evaluator", () => {
     const over = judge(grow(), { phiWarrant: sign(), phiSpent: 60 });
     assert.equal(over.verdict, "reject");
     assert.equal(over.violation, "PHI_INCREASE");
-    assert.match(over.detail, /only \+40 left/);
+    assert.match(over.detail, /only \+40 for this PR/);
   });
 
   it("without a causal proof it stops at needs_human, which is what a court receipt clears", () => {
@@ -171,6 +187,15 @@ describe("phi warrant: evaluator", () => {
     const locked = judge(grow({ evidence: { forbidden_paths_touched: ["CONSTITUTION.md"], tests_deleted: [] } }), signed);
     assert.equal(locked.verdict, "reject");
     assert.equal(locked.rule, "MP-001");
+  });
+
+  it("growth past the per-PR limit is rejected even with budget left, and the message says so", () => {
+    const res = judge(grow(), { phiWarrant: sign(OWNER, { phi_per_pr: 40 }), phiSpent: 0 });
+    assert.equal(res.verdict, "reject");
+    assert.equal(res.violation, "PHI_INCREASE");
+    assert.match(res.detail, /only [+]40 for this PR/);
+    assert.notEqual(judge(grow(), { phiWarrant: sign(OWNER, { phi_per_pr: 41 }), phiSpent: 0 }).verdict, "reject");
+    assert.notEqual(judge(grow(), { phiWarrant: sign(OWNER, { phi_per_pr: 40 }), phiSpent: 0, ownerSignoff: "ahmed-3m" }).verdict, "reject");
   });
 
   it("growth past the warrant can still take an owner sign-off", () => {
@@ -261,6 +286,17 @@ describe("phi warrant: spend from merged history", () => {
       const runGh = (args) => (args[0] === "api" ? `${tip}\n` : "\n");
       assert.equal(await run(["status"], { isTty: false, rootDir: dir, log: (line) => logs.push(line), runGh }), 1);
       assert.match(logs.join("\n"), /No Phi allowance: NO_WARRANT/);
+    });
+  });
+
+  it("reports the per-PR limit and the allowance it leaves one PR", () => {
+    withHistory(({ dir, base, tip }) => {
+      const capped = measure(dir, tip, sign(OWNER, { base_sha: base, phi_budget: 100000, phi_per_pr: 7 }));
+      assert.equal(capped.phi_per_pr, 7);
+      assert.equal(capped.phi_allowance, 7);
+      const open = measure(dir, tip, sign(OWNER, { base_sha: base, phi_budget: 100000 }));
+      assert.equal(open.phi_per_pr, null);
+      assert.equal(open.phi_allowance, open.phi_remaining);
     });
   });
 
@@ -359,13 +395,15 @@ describe("phi warrant: owner command", () => {
   it("grant signs from the live tip and stores a warrant CI accepts", async () => {
     await withCheckout(async (dir) => {
       const { calls, keyFile, options } = harness(dir);
-      assert.equal(await run(["grant", "--budget", "5000", "--key", keyFile], options), 0);
+      assert.equal(await run(["grant", "--budget", "5000", "--per-pr", "300", "--key", keyFile], options), 0);
       const set = calls.find((args) => args[0] === "variable");
       assert.deepEqual(set.slice(0, 4), ["variable", "set", "MIRQL_PHI_WARRANT", "--body"]);
       const warrant = JSON.parse(set[4]);
       assert.equal(warrant.base_sha, MAIN_TIP);
       assert.equal(warrant.phi_budget, 5000);
-      assert.equal(phiWarrantAllowance(dir, set[4], 1000), 4000);
+      assert.equal(warrant.phi_per_pr, 300);
+      assert.equal(phiWarrantAllowance(dir, set[4], 1000), 300);
+      assert.equal(phiWarrantAllowance(dir, set[4], 4800), 200);
       assert.doesNotMatch(set[4], new RegExp(OWNER.privateKey));
     });
   });
@@ -373,7 +411,7 @@ describe("phi warrant: owner command", () => {
   it("signs nothing unless the owner types yes", async () => {
     await withCheckout(async (dir) => {
       const { calls, keyFile, options } = harness(dir, { answer: "no" });
-      assert.equal(await run(["grant", "--budget", "5000", "--key", keyFile], options), 1);
+      assert.equal(await run(["grant", "--budget", "5000", "--per-pr", "300", "--key", keyFile], options), 1);
       assert.equal(calls.some((args) => args[0] === "variable"), false);
     });
   });
@@ -381,7 +419,7 @@ describe("phi warrant: owner command", () => {
   it("refuses to run without a terminal", async () => {
     await withCheckout(async (dir) => {
       const { calls, keyFile, options } = harness(dir, { isTty: false });
-      assert.equal(await run(["grant", "--budget", "5000", "--key", keyFile], options), 2);
+      assert.equal(await run(["grant", "--budget", "5000", "--per-pr", "300", "--key", keyFile], options), 2);
       assert.equal(await run(["pin", "--key", keyFile], options), 2);
       assert.deepEqual(calls, []);
     }, { pin: null });
@@ -390,7 +428,7 @@ describe("phi warrant: owner command", () => {
   it("refuses a key other than the pinned one, since CI would ignore the warrant", async () => {
     await withCheckout(async (dir) => {
       const { calls, logs, keyFile, options } = harness(dir);
-      assert.equal(await run(["grant", "--budget", "5000", "--key", keyFile], options), 1);
+      assert.equal(await run(["grant", "--budget", "5000", "--per-pr", "300", "--key", keyFile], options), 1);
       assert.deepEqual(calls, []);
       assert.match(logs.join("\n"), /Pin it first/);
     }, { pin: OTHER });
@@ -400,9 +438,12 @@ describe("phi warrant: owner command", () => {
     await withCheckout(async (dir) => {
       const { calls, keyFile, options } = harness(dir);
       for (const budget of ["-1", "1.5", "lots", "", "99999999999999999999"]) {
-        assert.equal(await run(["grant", `--budget=${budget}`, "--key", keyFile], options), 2, budget);
+        assert.equal(await run(["grant", `--budget=${budget}`, "--per-pr", "10", "--key", keyFile], options), 2, budget);
       }
       assert.equal(await run(["grant", "--key", keyFile], options), 2);
+      for (const perPr of [[], ["--per-pr", "0"], ["--per-pr", "-5"], ["--per-pr", "1.5"], ["--per-pr", "x"]]) {
+        assert.equal(await run(["grant", "--budget", "100", ...perPr, "--key", keyFile], options), 2, perPr.join(" "));
+      }
       assert.equal(await run(["revoke", "--key", keyFile], options), 2);
       assert.equal(await run(["grant", "--nope", "--key", keyFile], options), 2);
       assert.equal(await run([], options), 2);
@@ -478,7 +519,7 @@ describe("phi warrant: init", () => {
           now: () => new Date("2026-11-05T00:00:00Z"),
           runGh: (args) => { calls.push(args); return args[0] === "api" ? `${"c".repeat(40)}\n` : ""; },
         };
-        assert.equal(await run(["grant", "--budget", "100", "--key", keyFile], grantOptions), 0);
+        assert.equal(await run(["grant", "--budget", "100", "--per-pr", "50", "--key", keyFile], grantOptions), 0);
         const warrant = JSON.parse(calls.find((args) => args[0] === "variable")[4]);
         assert.equal(verifyPhiWarrant(warrant, doc.publicKey).ok, true);
       }, { pin: null });

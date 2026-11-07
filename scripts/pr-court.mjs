@@ -485,9 +485,9 @@ async function runCourtTick({ env = process.env, io = defaultIo(env), fetchImpl 
       if (warrantRemaining === null) {
         const measured = measurePhiWarrant({ rootDir: baseDir, repoDir, tipSha: baseSha, document: env.MIRQL_PHI_WARRANT });
         log(`phi warrant: ${JSON.stringify(measured)}`);
-        warrantRemaining = measured.ok ? measured.phi_remaining : 0;
+        warrantRemaining = measured.ok ? measured.phi_allowance : 0;
         // Why the allowance is what it is: a receipt that says only "DELTA_PHI" hides an expired or exhausted warrant.
-        warrantState = measured.ok ? `${measured.phi_remaining} of ${measured.phi_budget} left` : measured.reason;
+        warrantState = measured.ok ? `${measured.phi_remaining} of ${measured.phi_budget} left${measured.phi_per_pr === null ? "" : `, at most ${measured.phi_per_pr} per PR`}` : measured.reason;
       }
       return warrantRemaining;
     };

@@ -3,14 +3,16 @@
 //
 //   node scripts/phi-warrant.mjs init --key <owner key file>
 //   node scripts/phi-warrant.mjs pin --key <owner key file>
-//   node scripts/phi-warrant.mjs grant --budget <n> --key <owner key file>
+//   node scripts/phi-warrant.mjs grant --budget <n> --per-pr <m> --key <owner key file>
 //
 // `init` creates a new Ed25519 owner key at that path, encrypted with the
 // passphrase from MIRQL_HUMAN_PASSPHRASE; the private key never lands on disk
 // in plaintext, and an existing key file is never replaced.
 // `pin` writes the owner's public key to policy/phi-warrant-key.json; commit it
 // through a PR. `grant` signs an allowance of <n> Phi, counted from the current
-// default branch tip, and stores it in the MIRQL_PHI_WARRANT repository variable.
+// default branch tip, of which no single PR may use more than <m>, and stores it
+// in the MIRQL_PHI_WARRANT repository variable. A PR that grows Phi by more than
+// <m> still needs the owner's sign-off.
 // Run grant again when it is spent; `gh variable delete MIRQL_PHI_WARRANT` revokes.
 //
 // Run these yourself, in a terminal; they refuse to run without one. An encrypted
@@ -34,7 +36,7 @@ import { measurePhiWarrant } from "./ci-phi-warrant.mjs";
 import { isEntrypoint } from "./ci-review-gate.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const USAGE = "usage: node scripts/phi-warrant.mjs init --key <file> | pin --key <file> | grant --budget <n> --key <file> | status";
+const USAGE = "usage: node scripts/phi-warrant.mjs init --key <file> | pin --key <file> | grant --budget <n> --per-pr <m> --key <file> | status";
 
 function gh(args) {
   const res = spawnSync("gh", args, { encoding: "utf8" });
@@ -77,9 +79,14 @@ function init(keyPath, { rootDir, log, createKey = createOwnerKey, readKey = req
   return 0;
 }
 
-async function grant(owner, budgetText, { rootDir, runGh, ask, log, now }) {
+async function grant(owner, budgetText, perPrText, { rootDir, runGh, ask, log, now }) {
   if (!/^(0|[1-9][0-9]*)$/.test(budgetText ?? "") || !Number.isSafeInteger(Number(budgetText))) {
     log(USAGE);
+    return 2;
+  }
+  if (!/^[1-9][0-9]*$/.test(perPrText ?? "") || !Number.isSafeInteger(Number(perPrText))) {
+    log(`${USAGE}
+--per-pr is required: the most Phi one PR may add without your sign-off (at least 1).`);
     return 2;
   }
   if (readPhiWarrantPin(rootDir) !== owner.publicKey) {
@@ -88,6 +95,7 @@ async function grant(owner, budgetText, { rootDir, runGh, ask, log, now }) {
   }
   const baseSha = runGh(["api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha"]).trim();
   log(`Budget: ${budgetText} Phi, counted from default branch commit ${baseSha}`);
+  log(`Per PR: at most ${perPrText} Phi; a larger PR still needs your sign-off.`);
   log(`Signing key: ${owner.keyId}`);
   log("This replaces any warrant already set. PRs inside it merge without your sign-off.");
   const answer = await ask("Type yes to sign this warrant: ");
@@ -99,6 +107,7 @@ async function grant(owner, budgetText, { rootDir, runGh, ask, log, now }) {
     domain: PHI_WARRANT_DOMAIN,
     writer: { ns: "human:owner", key_id: owner.keyId },
     phi_budget: Number(budgetText),
+    phi_per_pr: Number(perPrText),
     base_sha: baseSha,
     issued_at: now().toISOString(),
   }, owner.privateKey, owner.keyId);
@@ -117,14 +126,15 @@ function status({ rootDir, runGh, log }) {
     log(`No Phi allowance: ${result.reason}. If this names a missing commit or pin, run git fetch and update to the default branch.`);
     return 1;
   }
-  log(`Phi warrant: ${result.phi_spent} of ${result.phi_budget} spent, ${result.phi_remaining} left, at default branch commit ${tipSha}.`);
+  const perPr = result.phi_per_pr === null ? "no per-PR limit" : `at most ${result.phi_per_pr} per PR`;
+  log(`Phi warrant: ${result.phi_spent} of ${result.phi_budget} spent, ${result.phi_remaining} left (${perPr}), at default branch commit ${tipSha}.`);
   return 0;
 }
 
 export async function run(argv, { runGh = gh, ask = askOnTerminal, isTty = process.stdin.isTTY, log = console.log, rootDir = ROOT, now = () => new Date(), createKey = createOwnerKey, readKey = requireHumanKey } = {}) {
   let parsed;
   try {
-    parsed = parseArgs({ args: argv, allowPositionals: true, options: { key: { type: "string" }, budget: { type: "string" } } });
+    parsed = parseArgs({ args: argv, allowPositionals: true, options: { key: { type: "string" }, budget: { type: "string" }, "per-pr": { type: "string" } } });
   } catch (err) {
     log(`${USAGE}\n${err instanceof Error ? err.message : String(err)}`);
     return 2;
@@ -141,7 +151,7 @@ export async function run(argv, { runGh = gh, ask = askOnTerminal, isTty = proce
   }
   if (command === "init") return init(values.key, { rootDir, log, createKey, readKey });
   const owner = requireHumanKey(join(rootDir, ".mirql"), { key: values.key });
-  return command === "pin" ? pin(owner, rootDir, log) : grant(owner, values.budget, { rootDir, runGh, ask, log, now });
+  return command === "pin" ? pin(owner, rootDir, log) : grant(owner, values.budget, values["per-pr"], { rootDir, runGh, ask, log, now });
 }
 
 if (isEntrypoint(import.meta.url)) {
