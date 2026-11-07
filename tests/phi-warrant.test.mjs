@@ -505,7 +505,10 @@ describe("phi warrant: init", () => {
       assert.ok(said.includes(keyFile), `output names the key file: ${said}`);
       assert.ok(said.includes(doc.keyId), `output names the key id: ${said}`);
       assert.ok(!said.includes(PASSPHRASE), "the passphrase is never printed");
-      assert.deepEqual(readdirSync(home), ["owner.key.json"], "nothing else appears beside the key");
+      // On Windows the ACL guard spawns powershell.exe under this redirected profile, and
+      // PowerShell itself mints an AppData directory there; it is not the key tool writing.
+      const besideKey = readdirSync(home).filter((name) => process.platform !== "win32" || name !== "AppData");
+      assert.deepEqual(besideKey, ["owner.key.json"], "nothing else appears beside the key");
       assert.equal(existsSync(join(home, ".mirql-trust")), false, "the trust root is never written");
       await withCheckout(async (dir) => {
         assert.equal(await run(["pin", "--key", keyFile], { isTty: true, rootDir: dir, log: () => {} }), 0);
