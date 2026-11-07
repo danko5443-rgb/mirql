@@ -1304,6 +1304,24 @@ describe("court tick end to end", () => {
     });
   });
 
+  it("counts the tokens each role spends and writes them to the run summary", async () => {
+    await withDir(async (dir) => {
+      const box = sandbox(dir);
+      box.jobs.head = null; // the judge waits for suite evidence, so exactly one model call runs
+      const approve = { verdict: "APPROVE", summary: "clean", findings: [] };
+      const fetchImpl = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(approve) } }], usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 } }) });
+      const summary = join(dir, "step-summary.md");
+      const lines = [];
+      const original = console.log;
+      console.log = (line) => { lines.push(String(line)); };
+      let code;
+      try { code = await runCourtTick({ env: { ...box.env, GITHUB_STEP_SUMMARY: summary }, io: box.io, fetchImpl, baseDir: ROOT }); } finally { console.log = original; }
+      assert.equal(code, 0);
+      assert.ok(lines.some((l) => l.includes("pr-court: tick tokens:") && l.includes("\"critic\":150") && l.includes("\"total\":150")), `token line: ${lines.join(" | ")}`);
+      assert.ok(readFileSync(summary, "utf8").includes("PR Court tokens"), "the run summary carries the spend");
+    });
+  });
+
   it("the judge waits for suite evidence, and a red head posts nothing so a green re-run comes back", async () => {
     await withDir(async (dir) => {
       const box = sandbox(dir);

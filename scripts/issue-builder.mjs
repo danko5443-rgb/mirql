@@ -116,7 +116,7 @@ async function buildIssue({ issue, branch, repo, number, repoDir, token, tell, e
   const git = (...args) => io.run("git", ["-C", repoDir, ...args]);
   const tree = git("ls-files").split("\n").filter(Boolean);
   const measured = measurePhiWarrant({ rootDir: baseDir, repoDir, tipSha: git("rev-parse", "HEAD").trim(), document: env.MIRQL_PHI_WARRANT });
-  const allowance = allowanceOf(measured.ok ? measured.phi_remaining : 0);
+  const allowance = allowanceOf(measured.ok ? measured.phi_allowance : 0);
   const basePhi = computePhi(repoDir).total;
   const res = await askBuilder({ issue: { ...issue, body: issue.body ?? "" }, repoDir, tree, basePhi, allowance, env, fetchImpl, baseDir });
   if (!res.ok) return tell(`stopped with \`${res.reason}\`. No PR was opened. To retry: \`gh workflow run "Mergeproof Issue Builder" -f issue_number=${number}\``, 1);

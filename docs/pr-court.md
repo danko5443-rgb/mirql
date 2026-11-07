@@ -10,7 +10,7 @@ The PR Court is a three-role LLM review loop run by a deterministic tool from a 
 4. **Notary check:** after the Judge says MERGE, the tool reads the notary run for the final head. If the gate is not green, it re-runs that run's failed jobs (`gh run rerun --failed`, up to 5 attempts) and waits; a job that already passed is not repeated. Only a green gate on that exact head, measured against the current base tip, authorizes the merge (Law 5: Base-Pinned Mortal Verdicts).
 5. **Merge** is executed by the tool, never by an LLM role. The tool then closes the issues the PR links with `Closes #n`, because GitHub left issue 93 open when the court merged PR 94. If that step fails, the merge stands and the run logs a warning. If the merge call fails but the PR turns out merged at the same head (someone merged it by hand at the same moment, as on PR 100), the tool logs `MERGED_ELSEWHERE` and still closes the issues. Any other failure fails the run. A landing that stops short of a merge (`docs/court-landing.md`) posts a `mirql-court-landing:v1` notice on the PR — one per code and head — naming the next step, so a stalled landing never lives only in the run log.
 
-The loop runs at most 3 rounds. Anything still unresolved at round 3 escalates to a human; silence and malformed output are hard refusals everywhere (Law 6: Silence Is Never Consent). A missing LLM key is no exception: the tick fails red with a `NO_API_KEY` notice on the PR, because a dead key must not read as a quiet day.
+The loop runs at most 3 rounds. Anything still unresolved at round 3 escalates to a human; silence and malformed output are hard refusals everywhere (Law 6: Silence Is Never Consent). A missing LLM key is no exception: the tick fails red with a `NO_API_KEY` notice on the PR, because a dead key must not read as a quiet day. Every tick also accounts for its own spend: the provider's token usage per role is logged (`pr-court: tick tokens: {"critic":N,...,"total":N}`) and written to the workflow run summary — integer token counts, never a price guess (Law 17).
 
 ## What the roles read
 
@@ -48,7 +48,7 @@ A red suite posts no receipt at all, so the court comes back when a re-run turns
 ### Repository variables
 
 - **`MIRQL_COURT_AUTO_MERGE=1`:** enables merging. Default is off; with it unset, the court stops at the Judge's verdict and a human lands the PR.
-- **`MIRQL_PHI_WARRANT`:** the owner's signed Phi warrant, set by `node scripts/phi-warrant.mjs grant`. It is checked against the key pinned in `policy/phi-warrant-key.json` on `main`. Delete the variable to revoke it.
+- **`MIRQL_PHI_WARRANT`:** the owner's signed Phi warrant, set by `node scripts/phi-warrant.mjs grant --budget <n> --per-pr <m>`. One PR may add at most `<m>` of the `<n>` Phi; a larger PR still needs the owner's sign-off, so one PR cannot spend the whole budget. It is checked against the key pinned in `policy/phi-warrant-key.json` on `main`. Delete the variable to revoke it.
 - **`MIRQL_COURT_DISABLED=1`:** halts the court (for incidents or maintenance windows): no role runs and nothing merges. A review signal can still re-run a failed notary gate when the head has an approval or an owner sign-off.
 - **`MIRQL_BUILDER_DISABLED=1`:** stops the Issue Builder. New issues then open no PRs.
 - **`MIRQL_BUILDER_MODEL` / `MIRQL_BUILDER_PROVIDER`:** model and provider overrides for the Builder, like the Court's.
