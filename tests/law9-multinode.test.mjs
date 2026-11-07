@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { sha256, ulid, generateEd25519Keypair } from "../packages/core/index.mjs";
 import { provisionTestTrust, authorizeTestKey } from "./helpers/keyring.mjs";
 import {
@@ -40,9 +40,13 @@ function makeValidWarrant(overrides = {}) {
   };
 }
 
-/** A real N-1 supervisor node: a child process leasing through the CLI against the shared ledger. */
+/** A real N-1 supervisor node: a child process leasing through the public queue API against the shared ledger. */
 function spawnLeaseNode(dir) {
-  return execFileAsync(process.execPath, [MIRQL_BIN, "q", "lease", "--dir", dir, "--concurrency", "8"], { timeout: 60_000 });
+  const queueEntry = pathToFileURL(join(ROOT, "packages", "queue", "index.mjs")).href;
+  const script = `import { leaseNextJob } from ${JSON.stringify(queueEntry)};
+const lease = leaseNextJob(process.env.MIRQL_LAW9_DIR, { repoRoot: ${JSON.stringify(ROOT)} });
+console.log(JSON.stringify(lease));`;
+  return execFileAsync(process.execPath, ["--input-type=module", "-e", script], { timeout: 60_000, env: { ...process.env, MIRQL_LAW9_DIR: dir } });
 }
 
 function spawnTickNode(dir) {
