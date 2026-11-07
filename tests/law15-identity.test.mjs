@@ -11,11 +11,12 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { sha256, ulid, generateEd25519Keypair } from "../packages/core/index.mjs";
+import { semantic_fingerprint } from "../packages/core/warrant.mjs";
 import { computeGitTreePhi } from "../packages/run/phi.mjs";
 import { authorizeTestKey, provisionTestTrust } from "./helpers/keyring.mjs";
 import { appendLedgerEvent, foldQueueState, getQueueStatus } from "../packages/queue/index.mjs";
 
-// The identity assertions below call the real `sha256` and `ulid` exports from packages/core.
+// The identity assertions below call the real `semantic_fingerprint`, `sha256` and `ulid` exports from packages/core.
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
 const GIT_ENV = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.test", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.test" };
@@ -91,11 +92,21 @@ describe("Law 15: identity is content, location is machinery", () => {
     assert.ok(Number.isSafeInteger(viaOne) && viaOne > 0, "the tree actually measured something");
   });
 
-  it("core identity primitives (`sha256`, `ulid`) are content-derived, never location-derived", () => {
+  it("core identity primitives (`semantic_fingerprint`, `sha256`, `ulid`) are content-derived, never location-derived", () => {
     const intent = { scope: ["packages/queue/**"], goal: "law15 fingerprint" };
+    const warrantId = semantic_fingerprint({ ...intent });
+    assert.notEqual(warrantId, semantic_fingerprint({ ...intent, scope: ["packages/run/**"] }), "changed intent is a different warrant identity");
     const first = sha256(JSON.stringify(intent));
-    assert.equal(first, sha256(JSON.stringify({ ...intent })), "identical content is identical identity under any path");
-    assert.ok(!String(first).includes(home), "a content hash never encodes the caller's location");
+    const elsewhere = join(home, "another", "mechanical", "location");
+    mkdirSync(elsewhere, { recursive: true });
+    const cwd = process.cwd();
+    process.chdir(elsewhere);
+    try {
+      assert.equal(semantic_fingerprint({ ...intent }), warrantId, "identical intent is the same warrant identity from any working directory");
+      assert.equal(first, sha256(JSON.stringify({ ...intent })), "identical content is identical identity from any working directory");
+    } finally {
+      process.chdir(cwd);
+    }
     assert.notEqual(first, sha256(JSON.stringify({ ...intent, scope: ["packages/run/**"] })), "changed content is a different identity");
     assert.notEqual(ulid(1_700_200_000_000), ulid(1_700_200_000_000), "distinct ulid generations never collide at the same timestamp");
   });
