@@ -872,15 +872,16 @@ describe("court state machine", () => {
 describe("court landing", () => {
   const BASE = "d".repeat(40);
   const issueRef = (number, repo = "o/r") => ({ number, url: `https://github.com/${repo}/issues/${number}` });
-  function landingIo({ gate = "success", prHead = HEAD, state = "open", tip = BASE, runBase = BASE, run: runOverride = {}, after = null, linked = [], failOn = null, failIssue = null } = {}) {
+  function landingIo({ gate = "success", prHead = HEAD, state = "open", tip = BASE, runBase = BASE, run: runOverride = {}, after = null, linked = [], failOn = null, failIssue = null, race = [] } = {}) {
     const runs = [];
+    let mergeFailed = false;
     let current = { id: 5, head_sha: HEAD, status: "completed", conclusion: gate === "success" ? "success" : "failure", run_attempt: 1, pull_requests: [{ base: { sha: runBase } }], ...runOverride };
     let jobGate = gate;
     return {
       runs,
       run: (cmd, args) => {
         runs.push([cmd, ...args]);
-        if (args[1] === failOn) throw new Error(`${failOn} refused`);
+        if (args[1] === failOn) { mergeFailed ||= failOn === "merge"; throw new Error(`${failOn} refused`); }
         if (args[1] === "close" && args[2] === failIssue) throw new Error(`close ${failIssue} refused`);
         if (args[1] === "rerun" && after) { current = { ...current, run_attempt: 2, conclusion: after }; jobGate = after; }
         return args[1] === "view" ? JSON.stringify({ closingIssuesReferences: linked }) : "";
@@ -888,13 +889,15 @@ describe("court landing", () => {
       api: (path) => {
         if (path.includes("/jobs?")) return { jobs: [{ name: "Mergeproof Conscience Gate", conclusion: jobGate }] };
         if (path.includes("/runs?")) return { workflow_runs: [current] };
+        // After a failed merge, `race` lists what each later read of the PR returns; its last entry repeats.
+        if (path.includes("/pulls/") && mergeFailed && race.length) return { head: { sha: HEAD }, base: { ref: "main" }, ...(race.length > 1 ? race.shift() : race[0]) };
         if (path.includes("/pulls/")) return { state, head: { sha: prHead }, base: { ref: "main" } };
         if (path.includes("/commits/")) return { sha: tip };
         throw new Error(`unexpected ${path}`);
       },
     };
   }
-  const land = (io, env = { AUTO_MERGE: "1" }) => landCourtMerge({ repo: "o/r", prNumber: "7", headSha: HEAD, env, io, wait: { polls: 2, delayMs: 0 } });
+  const land = (io, env = { AUTO_MERGE: "1" }) => landCourtMerge({ repo: "o/r", prNumber: "7", headSha: HEAD, env, io, wait: { polls: 2, delayMs: 0, racePolls: 3, raceDelayMs: 0 } });
   const merged = (io) => io.runs.some((r) => r.includes("merge"));
 
   it("merges a green, current head, pinned to that head", async () => {
@@ -999,6 +1002,21 @@ describe("court landing", () => {
     assert.deepEqual(closes(io).map((r) => r[3]), ["93", "95"]);
     assert.match(said, /::warning::.*\(#93\): Error/);
     assert.ok(!said.includes("close 93 refused"), "only the error name is logged");
+  });
+
+  it("counts a merge that someone else landed on the same head, and still closes the linked issues", async () => {
+    // PR 100: the owner merged by hand while the court's own merge got "Merge already in progress".
+    const io = landingIo({ linked: [issueRef(99)], failOn: "merge", race: [{ state: "open" }, { state: "closed", merged: true }] });
+    assert.equal(await land(io), "MERGED_ELSEWHERE");
+    assert.deepEqual(closes(io).map((r) => r[3]), ["99"]);
+  });
+
+  it("still fails when the PR was closed unmerged, merged at another head, or stays open", async () => {
+    for (const race of [[{ state: "closed", merged: false }], [{ state: "closed", merged: true, head: { sha: OLD } }], [{ state: "open" }]]) {
+      const io = landingIo({ linked: [issueRef(99)], failOn: "merge", race });
+      await assert.rejects(land(io), /merge refused/);
+      assert.equal(closes(io).length, 0);
+    }
   });
 
   it("closes no issue when the merge fails or never runs", async () => {
