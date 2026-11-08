@@ -135,6 +135,24 @@ test("scanner: a quote inside a regex literal does not blind the scan (drift.mjs
   assert.equal(violations.length, 1, "the real empty catch after the regex must still be found");
 });
 
+test("scanner: a quote-carrying regex after a keyword cannot blind the scan", () => {
+  // `typeof /['"`]/` is a legal regex literal: without the keyword tail in the
+  // prev-token rule its quote opened a phantom string, and without a newline
+  // bound that phantom masked every later line of the file (MP-002/MP-003 bypass).
+  const multiLine = [
+    "const q = typeof /['" + '"' + "`]/;",
+    'it.' + 'skip("bypassed", () => {});',
+    `try { x(); } ${CATCH} (e) {}`,
+  ].join("\n");
+  assert.equal(checkTestWeakenings(multiLine, "tests/a.test.mjs").ok, false,
+    "a skip below a quote-carrying regex must stay live");
+  assert.equal(checkSwallowedExceptions(multiLine, "tests/a.test.mjs").violations.length, 1,
+    "a catch below a quote-carrying regex must stay live");
+  const sameLine = 'const q = typeof /[' + '"' + ']/; ' + 'it.' + 'skip("s");';
+  assert.equal(checkTestWeakenings(sameLine, "tests/a.test.mjs").ok, false,
+    "the keyword tail must close the regex instead of opening a phantom string");
+});
+
 test("scanner: multiline weakening match flags when any line of the match is changed", () => {
   const code = "it\n  .skip('x', () => {});\n";
   assert.equal(checkTestWeakenings(code, "tests/a.test.mjs", { changedLines: new Set([2]) }).ok, false,
@@ -182,11 +200,10 @@ test("evaluator: adding it-skip on a changed line rejects with MP-002", () => {
 });
 
 test("evaluator: non-test .mjs files are not weakening-scanned at all", () => {
-  const code = [
-    "const replace = 'it.' + 'skip(\"works\"';",
-    'const note = "test." + "only tonight";',
-    "// describe todo documented",
-  ].join("\n");
+  // A live weakening token on a changed line of a production file: with the
+  // isTestFilePath guard this stays clean, and deleting the guard turns the
+  // same run into an MP-002 rejection — this pins the guard, not the fixture.
+  const code = "const tokens = [];\n" + 'it.' + 'skip("works", () => {});' + "\n";
   withRepo({ "src/one.mjs": "const a = 1;\n" }, { "src/one.mjs": code }, (repo) => {
     const verdict = evaluate(repo, { "src/one.mjs": code });
     assert.notEqual(verdict.rule, "MP-002", verdict.detail);

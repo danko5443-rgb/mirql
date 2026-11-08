@@ -394,9 +394,10 @@ const MP003_MARKER_REFUSED =
  * `${...}` interpolation bodies stay live code (they run); only the `${` and
  * its matching `}` belong to the literal. Regex literals are masked too, so a
  * quote inside `/['"`]/ cannot masquerade as a string opener and blind the
- * scan; telling them apart from division uses the same prev-token rule as
- * extractBalancedBlock, and an opening `/` that never closes on its own line
- * resumes live scanning at the line end.
+ * scan; telling them apart from division uses the prev-token rule of
+ * extractBalancedBlock extended with the keyword tails (`typeof`, `else`, …)
+ * that can also start a regex, and any opener that never closes on its own
+ * line — regex or string — resumes live scanning at that line's end.
  *
  * @param {string} sourceCode
  * @returns {string} same-length string of "0" (code) and "1" (literal) flags
@@ -418,7 +419,7 @@ function computeLiteralMask(sourceCode) {
   let liveTail = "";
   const isRegexStart = () => {
     const prevChar = liveTail.slice(-1);
-    return !prevChar || /[=([,:;!&|?{}]/.test(prevChar) || /\breturn$/.test(liveTail);
+    return !prevChar || /[=([,:;!&|?{}]/.test(prevChar) || /\b(?:return|typeof|void|in|of|instanceof|else|do)$/.test(liveTail);
   };
   for (let i = 0; i < n; i++) {
     const ch = sourceCode[i];
@@ -449,7 +450,9 @@ function computeLiteralMask(sourceCode) {
     } else if (state === "single" || state === "double") {
       mark(i);
       if (ch === "\\") { if (next !== "") { mark(i + 1); i++; } }
-      else if ((state === "single" && ch === "'") || (state === "double" && ch === '"')) state = "code";
+      // A raw newline can never occur inside a JS string literal: this opener
+      // was a mis-parse, so resume live scanning and bound any blinding to one line.
+      else if (ch === "\n" || (state === "single" && ch === "'") || (state === "double" && ch === '"')) state = "code";
     } else if (state === "regex") {
       mark(i);
       if (ch === "\\") { if (next !== "") { mark(i + 1); i++; } }
