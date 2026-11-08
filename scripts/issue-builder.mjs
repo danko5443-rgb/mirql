@@ -112,6 +112,15 @@ async function runIssueBuilder({ env = process.env, io = defaultIo(env), fetchIm
   }
 }
 
+/** Locks the new PR's conversation (#148): public users cannot comment on it, so spam cannot bury the Court's receipts; collaborators and installed Apps still can. */
+function lockPrConversation(io, repo, createOutput, asOwner) {
+  const prNumber = Number(String(createOutput).match(/\/pull\/(\d+)/)?.[1] ?? 0);
+  if (!prNumber) { console.log("::warning::issue-builder: PR conversation not locked: no PR number in the create output"); return; }
+  try {
+    io.run("gh", ["api", `repos/${repo}/issues/${prNumber}/lock`, "--method", "PUT", "--input", "-"], { ...asOwner, input: JSON.stringify({ lock_reason: "resolved" }) });
+  } catch (err) { /* mp-003-allow: the PR is already open and the lock is idempotent, so it can be retried by hand */ console.log(`::warning::issue-builder: PR ${prNumber} conversation not locked: ${err?.name}`); }
+}
+
 async function buildIssue({ issue, branch, repo, number, repoDir, token, tell, env, io, fetchImpl, baseDir }) {
   const git = (...args) => io.run("git", ["-C", repoDir, ...args]);
   const tree = git("ls-files").split("\n").filter(Boolean);
@@ -127,14 +136,16 @@ async function buildIssue({ issue, branch, repo, number, repoDir, token, tell, e
   if (phi > basePhi + allowance) return tell(`stopped with \`PHI_OVER_WARRANT\`: this change grows Phi by ${phi - basePhi}, and ${allowance} is left. No PR was opened.`);
   pushCommit(io, repoDir, applied.files, branch, token, `Build issue ${number}: ${issue.title}`, env);
   const asOwner = { env: { ...env, GH_TOKEN: token } };
+  let created = "";
   try {
     // Opened with the owner's token: a PR from GITHUB_TOKEN starts no workflows, and the Court would not trust its author.
-    io.run("gh", ["pr", "create", "--repo", repo, "--base", BASE_BRANCH, "--head", branch, "--title", issue.title, "--body", `Closes #${number}\n\n${sanitizeCourtText(res.summary)}\n`], asOwner);
+    created = io.run("gh", ["pr", "create", "--repo", repo, "--base", BASE_BRANCH, "--head", branch, "--title", issue.title, "--body", `Closes #${number}\n\n${sanitizeCourtText(res.summary)}\n`], asOwner);
   } catch (err) {
     console.log(`::error::issue-builder: PR not opened: ${err?.name}`);
     io.run("gh", ["api", "--method", "DELETE", `repos/${repo}/git/refs/heads/${branch}`], asOwner);
     return tell("stopped with `PR_NOT_OPENED`. The patch was pushed but the PR failed, so the branch was deleted. Check that `MIRQL_COURT_TOKEN` has `pull-requests: write`.", 1);
   }
+  lockPrConversation(io, repo, created, asOwner);
   return 0;
 }
 
