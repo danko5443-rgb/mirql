@@ -266,11 +266,14 @@ To eliminate manual review bottlenecks and recover from external bot rate limits
    - **Critic (`roles/critic.md`):** Independent fallback reviewer when external bots (`coderabbitai[bot]`, `chatgpt-codex-connector[bot]`) are rate-limited or absent. Evaluates nonce-fenced diffs strictly as untrusted data and emits `APPROVE` or `COMMENT` with P1/P2 findings while respecting **Law 13**.
    - **Advocate (`roles/advocate.md`):** Ping-Pong responder that answers every open finding from Codex, CodeRabbit, or Critic with either `AGREE_AND_FIX` (minimal search/replace patches verified in-memory against the Courthouse Lock, `MP-002`, `MP-003`, and the $\Phi$ allowance before committing and pushing via `MIRQL_COURT_TOKEN`) or `REBUT` (evidence-backed rebuttal citing exact files, line ranges, test pins, or Constitutional laws).
    - **Judge (`roles/judge.md`):** Final constitutional arbiter invoked only after deterministic preconditions pass (`OWNER`/`MEMBER`/`COLLABORATOR` author, zero diff hazards, no Courthouse Lock path touched, `Candidate Tests` and `Base Suite` green, and $\Delta\Phi$ within what is left of the signed Phi warrant, or $\le 0$ without one). Verifies that `AGREE_AND_FIX` patches landed in `HEAD`, adjudicates `REBUT` arguments (`FIXED`, `OVERRULED_FALSE_POSITIVE`, or `UNRESOLVED`), and emits `MERGE`, `REMAND` (when `round < 3`), or `ESCALATE` (when `round >= 3` or uncertain).
+   - **Fast path:** a Critic `APPROVE` at a head with zero open findings and no outstanding pinned-bot finding closes the review at once — the tool posts the Judge `MERGE` receipt itself (marked `fast_path: true`) and the Advocate and Judge rounds are skipped. Nothing else is bypassed: the landing still requires a green notary on the exact head against the current base tip, and every Court limit (author trust, Courthouse Lock, hazard scan, $\Delta\Phi$) applies unchanged. An Advocate push ends the tick at the push, so no Judge call is ever spent on a stale SHA.
 3. **Receipts, Notary Re-Run, and Auto-Merge:**
    - Each role records a tamper-checked state marker (`<!-- mirql-court-state:v1 {...} -->`) in PR comments under the `github-actions[bot]` identity (`scripts/ci-review-gate.mjs`).
    - A verified Judge `MERGE` receipt clears `findAiApproval` as `mirql-judge[bot]` (overruling false-positive reviewer findings adjudicated on that exact `HEAD`), re-runs a failed `Mergeproof External Notary` gate if needed, and—when `MIRQL_COURT_AUTO_MERGE=1` is enabled—lands the PR with `gh pr merge --match-head-commit <head_sha>`.
 
-The [Issue Builder](docs/pr-court.md#issue-builder) feeds the Court: when an owner, member or collaborator opens an issue, the **Builder** (`roles/builder.md`) proposes patches and `scripts/issue-builder.mjs` validates them, pushes `mirql/issue-<n>` and opens the PR. It never runs the code it writes. Set `MIRQL_BUILDER_DISABLED=1` to stop it.
+Role calls ride a provider registry with automatic fail-over: a hard provider failure (401/402/429/5xx or `LLM_TIMEOUT`) hands the call to the next keyed provider (`zai` → `anthropic` → `openai` → `openrouter` → `gemini`), and a tick only fails when every keyed provider is exhausted (`ALL_PROVIDERS_FAILED`); `MIRQL_<ROLE>_PROVIDER` pins a role to one provider and never fails over.
+
+The [Issue Builder](docs/pr-court.md#issue-builder) feeds the Court: when an owner, member or collaborator opens an issue, the **Builder** (`roles/builder.md`) proposes patches and `scripts/issue-builder.mjs` validates them, pushes `mirql/issue-<n>` and opens the PR. It never runs the code it writes. Set `MIRQL_BUILDER_DISABLED=1` to stop it. The Builder locks each new PR's conversation the moment it opens it (via `issues:write` on `MIRQL_COURT_TOKEN`), so public users cannot bury Court receipts in spam, while collaborators and installed Apps still comment; a refused lock warns and never blocks the PR.
 
 ### Owner Sign-Off (`reviewed:<head sha>`)
 
@@ -284,7 +287,8 @@ This shows the head commit and asks for a typed yes, then adds the label
 `reviewed:<head sha>`, which re-runs the gate. A new push voids the sign-off;
 after removing the label, re-run the job. The other rules still run, the verdict
 stays `needs_human` at best, and the merge stays manual. Only this owner sign-off—never
-an AI reviewer or PR Court receipt—can clear a pull request that grows the complexity score $\Phi$
+an AI reviewer or PR Court receipt—can clear a pull request that touches the Courthouse Lock (`MP-001`,
+`TOUCH_HUMAN_ONLY`) or grows the complexity score $\Phi$
 (`phiGrowthSignedOff`); it grants no warrant allowance, and refactors must still shrink $\Phi$. A pull request that
 changes reviewer config or agent instructions (such as `AGENTS.md` or `roles/judge.md`) is never cleared by AI approval, so
 merging it is the owner's decision. The label records a review; it is not a
