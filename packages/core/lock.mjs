@@ -177,6 +177,52 @@ export function claimStaleLock(lockPath, expectedNonce) {
   return { claimed: false, displaced: true, restored };
 }
 
+/** Windows can raise these on a lock open as a peer creates/renames/deletes the same path; they are contention noise, not verdicts. */
+const TRANSIENT_LOCK_OPEN_CODES = new Set(["EPERM", "EBUSY", "ETXTBSY"]);
+
+/** After this many retries of a transient open failure the original error surfaces (issue #121: ≤5 attempts, ≤250 ms total). */
+const TRANSIENT_LOCK_OPEN_RETRIES = 4;
+const TRANSIENT_LOCK_OPEN_BACKOFF_MS = 10;
+
+/**
+ * True only on a failed `open` syscall whose code is transient under
+ * cross-process contention on Windows (EACCES counts only there; elsewhere it
+ * is a real permission verdict). EEXIST is deliberately excluded: it is the
+ * normal contended signal that acquireLock's stale-lock path must see.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+export function isTransientLockOpenError(err) {
+  if (!err || typeof err !== "object" || err.syscall !== "open") return false;
+  if (TRANSIENT_LOCK_OPEN_CODES.has(err.code)) return true;
+  return process.platform === "win32" && err.code === "EACCES";
+}
+
+/**
+ * Open the lock path in exclusive-create mode, retrying transient open
+ * failures a bounded number of times, then surfaces them (issue #121:
+ * a lock-open loser under Windows contention backs off briefly instead of
+ * crashing the node). Only the open syscall is retried; every other step of
+ * acquisition — write, verify, stale-break — is untouched.
+ *
+ * @param {string} lockPath
+ * @param {(path: string, flags: string) => number} [opener] - overridable so tests can stage transient failures deterministically
+ * @returns {number} file descriptor
+ */
+export function openLockExclusive(lockPath, opener = openSync) {
+  let retries = 0;
+  while (true) {
+    try {
+      return opener(lockPath, "wx");
+    } catch (err) {
+      if (!isTransientLockOpenError(err) || retries >= TRANSIENT_LOCK_OPEN_RETRIES) throw err;
+      retries += 1;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, TRANSIENT_LOCK_OPEN_BACKOFF_MS * retries);
+    }
+  }
+}
+
 /**
  * Acquire exclusive lockfile with retry/backoff.
  * Writes { pid, ts, nonce } into the lockfile; the nonce makes every
@@ -185,6 +231,7 @@ export function claimStaleLock(lockPath, expectedNonce) {
  * Fail-closed (B3): Write errors immediately abort and clean up.
  * Verification failure never falls through to return fd.
  * Hard deadline (M3): Bounded execution prevents unbounded spinning.
+ * Transient open failures (issue #121) retry briefly via openLockExclusive; stale-breaking stays untouched.
  *
  * @param {string} lockPath
  * @param {number} [timeoutMs]
@@ -202,7 +249,7 @@ export function acquireLock(lockPath, timeoutMs = 10000) {
 
     const nonce = randomUUID();
     try {
-      const fd = openSync(lockPath, "wx");
+      const fd = openLockExclusive(lockPath);
       try {
         const metadata = JSON.stringify({ pid: process.pid, ts: Date.now(), nonce });
         writeFileSync(fd, metadata, "utf8");
