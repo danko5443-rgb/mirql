@@ -6,7 +6,7 @@ The PR Court is a three-role LLM review loop run by a deterministic tool from a 
 
 1. **Critic** (`roles/critic.md`) reviews the diff and emits findings (verdict APPROVE or COMMENT, P1/P2 defects only). External reviewers (coderabbitai, codex-connector) supply findings instead when they are available; the Critic is the independent fallback when they are rate limited or absent.
 2. **Advocate** (`roles/advocate.md`) answers each finding: either AGREE_AND_FIX with minimal patches (kept within `delta_phi <= phi_allowance`, which is 0 without a signed Phi warrant) or REBUT with evidence. The tool applies valid patches, commits, and pushes them.
-3. **Judge** (`roles/judge.md`) rules on every finding — FIXED, OVERRULED_FALSE_POSITIVE, or UNRESOLVED — and issues the terminal verdict: MERGE, REMAND (another round, up to 3), or ESCALATE (a human takes over). A MERGE covers only what the Judge saw: a later reviewer finding reopens the case, and a later CHANGES_REQUESTED holds the merge.
+3. **Judge** (`roles/judge.md`) rules on every finding — FIXED, OVERRULED_FALSE_POSITIVE, or UNRESOLVED — and issues the terminal verdict: MERGE, REMAND (another round, up to 3), or ESCALATE (a human takes over). The Judge rules on exactly the findings still open at that head; the prompt names that set explicitly, including the empty case after a base refresh, so a fresh round never echoes the transcript's historical rulings. A MERGE covers only what the Judge saw: a later reviewer finding reopens the case, and a later CHANGES_REQUESTED holds the merge.
 4. **Notary check:** after the Judge says MERGE, the tool reads the notary run for the final head. If the gate is not green, it re-runs that run's failed jobs (`gh run rerun --failed`, up to 5 attempts) and waits; a job that already passed is not repeated. Only a green gate on that exact head, measured against the current base tip, authorizes the merge (Law 5: Base-Pinned Mortal Verdicts).
 5. **Merge** is executed by the tool, never by an LLM role. The tool then closes the issues the PR links with `Closes #n`, because GitHub left issue 93 open when the court merged PR 94. If that step fails, the merge stands and the run logs a warning. If the merge call fails but the PR turns out merged at the same head (someone merged it by hand at the same moment, as on PR 100), the tool logs `MERGED_ELSEWHERE` and still closes the issues. Any other failure fails the run. A landing that stops short of a merge (`docs/court-landing.md`) posts a `mirql-court-landing:v1` notice on the PR — one per code and head — naming the next step, so a stalled landing never lives only in the run log.
 
@@ -36,7 +36,7 @@ Note the boundary of the lock in "Known limits" below: `scripts/**` and `package
 
 ## RECUSE and ESCALATE
 
-RECUSE means the court declines to rule: a locked path, an untrusted author, or a `delta_phi` above what is left of the owner's signed Phi warrant (0 when there is none). It ends the court's work on that head but says nothing about the PR, so an external approval still clears the review gate. ESCALATE and REMAND are rulings against the PR, and they block the gate even over an external approval.
+RECUSE means the court declines to rule: a locked path, an untrusted author, or a `delta_phi` above what is left of the owner's signed Phi warrant (0 when there is none). It ends the court's work on that head but says nothing about the PR. Clearing the gate afterwards is the owner's act alone: only an owner sign-off clears `MP-001` on a locked path — an external AI approval leaves it `reject` (`TOUCH_HUMAN_ONLY`), it just still satisfies the reviewer requirement for ordinary `humanApprove` paths. ESCALATE and REMAND are rulings against the PR, and they block the gate even over an external approval.
 
 A diff hazard (an injection phrase, Trojan unicode, or an oversized diff) escalates, because text that could fool the court could fool an external reviewer too. An owner sign-off can still clear it.
 
@@ -46,8 +46,8 @@ A red suite posts no receipt at all, so the court comes back when a re-run turns
 
 ### Repository secrets
 
-- **An LLM key**, one of: `ZAI_API_KEY` (already set), `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`. The court needs at least one to run its roles.
-- **`MIRQL_COURT_TOKEN`:** a fine-grained personal access token with `contents:write` on this repository, plus `pull-requests:write` for the Issue Builder. It exists so the Advocate's fix commits and the Builder's PRs trigger the notary: pushes and PRs made with the built-in `GITHUB_TOKEN` start no workflows, so without a court token the notary would never run on them. Without it the Advocate never pushes, every AGREE_AND_FIX escalates to a human instead, and the Issue Builder opens nothing.
+- **At least one LLM key**, any of: `ZAI_API_KEY` (already set), `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`. The roles ride a provider registry with automatic fail-over: a hard failure on one provider — `LLM_HTTP_ERROR` on 401/402/429/5xx, or `LLM_TIMEOUT` — hands the call to the next registry entry that has a key, so one dead key or quota wall degrades to another family instead of failing the tick. A tick ends `ALL_PROVIDERS_FAILED` only when every keyed provider is exhausted; a per-role pin (`MIRQL_<ROLE>_PROVIDER`) keeps one role on one provider and never fails over.
+- **`MIRQL_COURT_TOKEN`:** a fine-grained personal access token with `contents:write` on this repository, plus `pull-requests:write` for the Issue Builder and `issues:write` for the Builder's PR-thread lock. It exists so the Advocate's fix commits and the Builder's PRs trigger the notary: pushes and PRs made with the built-in `GITHUB_TOKEN` start no workflows, so without a court token the notary would never run on them. Without it the Advocate never pushes, every AGREE_AND_FIX escalates to a human instead, and the Issue Builder opens nothing.
 
 ### Repository variables
 
@@ -73,13 +73,15 @@ The court runs as a workflow from `main` (`.github/workflows/mergeproof-retrigge
 
 `.github/workflows/mergeproof-issue-builder.yml` starts the factory one step earlier. When an owner, member or collaborator opens an issue, the Builder (`roles/builder.md`) proposes patches or declines, and `scripts/issue-builder.mjs` validates them, pushes `mirql/issue-<n>` and opens a PR that closes the issue. From there it is an ordinary PR: the gate and the Court decide, and the warrant and the Courthouse Lock apply as usual. A refusal or failure is posted on the issue.
 
+The Builder locks the new PR's conversation the moment it opens it: public users cannot bury the Court's receipts in spam past the API's first comment page, while collaborators and installed Apps — the owner, the Court, the pinned reviewers — can still comment. A refused lock never blocks the PR; the run logs a warning and the PR stays open.
+
 To build an issue that is already open: `gh workflow run "Mergeproof Issue Builder" -f issue_number=<n>`. An issue that already has a `mirql/issue-<n>` branch is skipped.
 
 The Builder gets one attempt, and the job can't run the code it writes, since it holds secrets. If the PR's suite comes back red, the Court posts nothing and the Advocate doesn't run, so the PR waits for a person.
 
 ## Known limits
 
-- **No branch protection.** The repository has no branch protection on its current plan. The court itself checks the Mergeproof Conscience Gate job result before merging, but a person with write access can still merge anything by hand, bypassing the court entirely.
+- **No branch protection.** The repository is public and branch rulesets are available on it, but none is configured yet. The court itself checks the Mergeproof Conscience Gate job result before merging, but a person with write access can still merge anything by hand, bypassing the court entirely. A required-checks ruleset with an empty bypass list is on the owner checklist.
 - **Forgeable receipts.** Receipts are authenticated by the `github-actions[bot]` identity, so any workflow on any branch of this repository can forge one. A dedicated GitHub App identity is required before the repo is opened to untrusted pushers.
 - **Self-attesting head tests.** PR code runs in `mergeproof-candidate.yml`, on `pull_request`, so it no longer runs in the base-branch context, but it can still forge `suite_pass_head` by passing its own suite. A forged pass alone stops at `needs_human`, because CI never measures causal proof. The Judge does take the bit as evidence, so a forged pass that gets past the Critic and Judge can land code whose tests fail. This is why the court only serves OWNER/MEMBER/COLLABORATOR authors.
 - **A notary re-run does not re-run the tests.** The court's re-run re-reads the candidate suite's result, which is what a sign-off or approval needs. After a flaky failure, re-run `Mergeproof Candidate Suite` first; finishing it does not wake the notary, so re-run the notary's failed jobs after it.
