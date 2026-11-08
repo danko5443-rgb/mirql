@@ -69,7 +69,10 @@ export function collectDiff(baseSha, headSha, repoDir) {
   }
   const res = spawnSync(
     "git",
-    ["diff", "--name-status", `${baseSha}...${headSha}`],
+    // -z: NUL-separated fields, byte-exact paths. Otherwise git C-quotes
+    // any path with a byte >0x7F, a quote, or a backslash, and the later
+    // `git show` lookup fails on that legitimate path.
+    ["diff", "--name-status", "-z", `${baseSha}...${headSha}`],
     { cwd: repoDir, encoding: "utf8", timeout: 15000 },
   );
   if (res.status !== 0) {
@@ -79,26 +82,25 @@ export function collectDiff(baseSha, headSha, repoDir) {
   const files = [];
   const deletedTests = [];
   const deletedFiles = [];
-  for (const line of String(res.stdout || "").split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    const parts = line.split("\t");
-    const status = parts[0];
-    if (status.startsWith("R") && parts.length >= 3) {
-      const oldFile = parts[1];
-      const newFile = parts[2];
-      files.push(newFile);
+  // -z record shape: `status\0path\0`; renames: `status\0old\0new\0`
+  const fields = String(res.stdout || "").split("\0");
+  for (let i = 0; i < fields.length; i++) {
+    const status = fields[i];
+    if (!status) continue;
+    const rename = status.startsWith("R") && i + 2 < fields.length;
+    if (!rename && i + 1 >= fields.length) continue;
+    const oldFile = fields[i + 1];
+    i += rename ? 2 : 1;
+    files.push(fields[i]);
+    if (rename) {
       deletedFiles.push(oldFile);
-      if (isTestFilePath(oldFile) && !isTestFilePath(newFile)) {
+      if (isTestFilePath(oldFile) && !isTestFilePath(fields[i])) {
         deletedTests.push(oldFile);
       }
-    } else if (parts.length >= 2) {
-      const file = parts[1];
-      files.push(file);
-      if (status.startsWith("D")) {
-        deletedFiles.push(file);
-        if (isTestFilePath(file)) {
-          deletedTests.push(file);
-        }
+    } else if (status.startsWith("D")) {
+      deletedFiles.push(fields[i]);
+      if (isTestFilePath(fields[i])) {
+        deletedTests.push(fields[i]);
       }
     }
   }

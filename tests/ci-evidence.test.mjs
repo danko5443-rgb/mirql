@@ -277,6 +277,33 @@ describe("ci-evidence: honest notary evidence builder", () => {
         rmSync(repo2, { recursive: true, force: true });
       }
     });
+
+    it("round-trips paths git would C-quote (non-ASCII) so `git show` still works", () => {
+      const repo3 = mkdtempSync(join(tmpdir(), "mirql-ciev-unicode-"));
+      try {
+        git(repo3, "init", "-q");
+        git(repo3, "config", "user.email", "test@mirql.local");
+        git(repo3, "config", "user.name", "mirql-test");
+        mkdirSync(join(repo3, "docs"), { recursive: true });
+        writeFileSync(join(repo3, "docs", "café.mjs"), "export const café = 1;\n");
+        git(repo3, "add", "-A");
+        git(repo3, "commit", "-q", "-m", "base");
+        writeFileSync(join(repo3, "docs", "café.mjs"), "export const café = 2;\n");
+        git(repo3, "add", "-A");
+        git(repo3, "commit", "-q", "-m", "head");
+        const headSha = git(repo3, "rev-parse", "HEAD").trim();
+
+        const diff = collectDiff(git(repo3, "rev-parse", "HEAD~1").trim(), headSha, repo3);
+        assert.equal(diff.ok, true, `diff should succeed: ${diff.error}`);
+        assert.ok(diff.files.includes("docs/café.mjs"), `raw unquoted path expected: ${diff.files.join(",")}`);
+
+        const src = collectSourceCode(diff.files, diff.deletedFiles, headSha, repo3);
+        assert.equal(src.ok, true, `git show must not fail on a reported path: ${src.error}`);
+        assert.equal(src.sourceCode["docs/café.mjs"], "export const café = 2;\n");
+      } finally {
+        rmSync(repo3, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("4b. collectSourceCode (HEAD-committed evidence for the MP-003 diff-gate)", () => {
