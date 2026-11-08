@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { checkSwallowedExceptions } from "../packages/core/anti-cheat.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const CEILING = 66; // measured 2026-11-07: every silent catch in the tree carries a reason; the count only falls by real handling
+const CEILING = 65; // measured 2026-11-07 at 66; 2026-11-08: 65 — the literal mask stopped counting supervisor.mjs's heartbeat catches, which live inside the template-literal child script (never executing text in that file, markers included there)
 
 function walkJsFiles(dir) {
   return readdirSync(dir).flatMap((name) => {
