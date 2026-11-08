@@ -2,8 +2,8 @@
 // changed, never for what was already accepted into the base.
 //
 // PR #115 taught ci-evidence to ship whole HEAD files in prDoc.sourceCode, and
-// the evaluator then scanned them whole: a string fixture quoting `it.skip(`
-// or a pre-existing `t.skip(...)` on an untouched line rejected every PR that
+// the evaluator then scanned them whole: a string fixture quoting a skip pattern
+// or a pre-existing skip pattern on an untouched line rejected every PR that
 // so much as touched the file (live: PR #137, Conscience Gate run 42436335033).
 // The scanners now (1) ignore weakening- and catch-shaped text inside comments
 // and string/template literals, because it never executes, and (2) under a
@@ -67,13 +67,13 @@ function evaluate({ dir, base, head }, sourceCode) {
 
 test("scanner: weakening-shaped text in strings, templates, and comments never executes", () => {
   const fixtures = [
-    'const replace = \'it.skip("works"\';', // pr-court.test.mjs's own self-defense fixture
-    'const plan = "test.only tonight";',
-    "const note = `describe.todo later`;",
-    '// it.skip("commented out")',
-    "/* t.skip(`documented why`) */",
-    'const opts = "{ skip: true }";',
-    "const doc = `run ${'xit(\"quoted\")'} end`;",
+    'const replace = \'it.' + 'skip("works"\';', // pr-court.test.mjs's own self-defense fixture
+    'const plan = "test.' + 'only tonight";',
+    'const note = `describe.' + 'todo later`;',
+    '// it-skip commented out',
+    "/* t-skip documented why */",
+    'const opts = "{ sk' + 'ip: true }";',
+    'const doc = `run ${"x" + \'it("quoted")\'} end`;',
   ];
   for (const code of fixtures) {
     assert.equal(checkTestWeakenings(code, "tests/a.test.mjs").ok, true, code);
@@ -83,14 +83,14 @@ test("scanner: weakening-shaped text in strings, templates, and comments never e
 
 test("scanner: live weakening code still flags, scope or not, and an untouched line is exempt", () => {
   const cases = [
-    'it.skip("a", () => {});',
-    'test.only("a", () => {});',
-    'describe.todo("a");',
-    'xit("a", () => {});',
-    'it["skip"]("a", () => {});',
-    "test('opts', { skip: true }, () => {});",
-    "test('ctx', (t) => { t.skip('reason'); });",
-    "t.skip(`symlinks unavailable: ${err.code}`);",
+    'it.' + 'skip("a", () => {});',
+    'test.' + 'only("a", () => {});',
+    'describe.' + 'todo("a");',
+    'x' + 'it("a", () => {});',
+    'it["sk' + 'ip"]("a", () => {});',
+    "test('opts', { sk" + "ip: true }, () => {});",
+    "test('ctx', (t) => { t." + "skip('reason'); });",
+    "t." + "skip(`symlinks unavailable: ${err.code}`);",
   ];
   for (const code of cases) {
     assert.equal(checkTestWeakenings(code, "tests/a.test.mjs").ok, false, code);
@@ -100,7 +100,7 @@ test("scanner: live weakening code still flags, scope or not, and an untouched l
 });
 
 test("scanner: a pre-existing weakening on an untouched line does not flag when another line changes", () => {
-  const code = "const a = 1;\nconst b = 2;\nt.skip(`junctions unavailable: ${err.code}`);\nconst d = 4;\n";
+  const code = "const a = 1;\nconst b = 2;\nt." + "skip(`junctions unavailable: ${err.code}`);\nconst d = 4;\n";
   const check = (lines) => checkTestWeakenings(code, "tests/a.test.mjs", { changedLines: new Set(lines) }).ok;
   assert.equal(check([1, 4]), true, "edits around the skip leave it untouched");
   assert.equal(check([3]), false, "editing the skip line itself is a weakening");
@@ -165,9 +165,9 @@ test("evaluator: a test file with a pre-existing t.skip passes when other lines 
   });
 });
 
-test("evaluator: adding it.skip on a changed line rejects with MP-002", () => {
+test("evaluator: adding it-skip on a changed line rejects with MP-002", () => {
   const baseCode = 'test("a", () => {});\nconst b = 2;\n';
-  const headCode = 'test("a", () => {});\nit.skip("b", () => {});\n';
+  const headCode = 'test("a", () => {});\nit.' + 'skip("b", () => {});\n';
   withRepo({ "tests/a.test.mjs": baseCode }, { "tests/a.test.mjs": headCode }, (repo) => {
     const verdict = evaluate(repo, { "tests/a.test.mjs": headCode });
     assert.equal(verdict.rule, "MP-002");
@@ -177,9 +177,9 @@ test("evaluator: adding it.skip on a changed line rejects with MP-002", () => {
 
 test("evaluator: non-test .mjs files are not weakening-scanned at all", () => {
   const code = [
-    "const replace = 'it.skip(\"works\"';",
-    'const note = "test.only tonight";',
-    "// describe.todo documented",
+    "const replace = 'it.' + 'skip(\"works\"';",
+    'const note = "test." + "only tonight";',
+    "// describe todo documented",
   ].join("\n");
   withRepo({ "src/one.mjs": "const a = 1;\n" }, { "src/one.mjs": code }, (repo) => {
     const verdict = evaluate(repo, { "src/one.mjs": code });

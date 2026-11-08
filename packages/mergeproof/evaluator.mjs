@@ -678,7 +678,7 @@ function checkSwallowedAgainstBase(code, file, baseSha, headSha, repoDir) {
 
 /**
  * MP-002 scan scoped like the MP-003 one: only test files can weaken tests, and
- * only a line the candidate changed counts, so pre-existing `t.skip(...)` on an
+ * only a line the candidate changed counts, so pre-existing skip call on an
  * untouched line cannot lock a PR out of the gate. Weakening-shaped text inside
  * strings and comments is already ignored by the scanner. When the changed
  * lines cannot be established the strict verdict stands: fail closed.
