@@ -162,8 +162,8 @@ function findAiApproval(reviews, { reviewers, headSha, author, comments = [], re
   const changesRequested = decisive.some((r) => r.state === "CHANGES_REQUESTED");
   const approval = changesRequested ? null : decisive.find((r) => r.state === "APPROVED" && r.commit_id === headSha);
   if (approval) return approval.user.login;
-  const inlineFindings = (reviewComments ?? []).some((c) => isVerifiedBot(c, allowed, authorLc) && (c.commit_id === headSha || c.original_commit_id === headSha));
-  return criticEnabled && court.criticApproved && !changesRequested && !inlineFindings ? COURT_CRITIC : null;
+  // A Critic APPROVE is one model call, not a review: it never clears this lookup; only the Judge MERGE above does (issue #130).
+  return null;
 }
 
 function scanDiffHazards(diffText = "") {

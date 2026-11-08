@@ -817,12 +817,16 @@ describe("court receipts", () => {
     assert.equal(findAiApproval([approval], { reviewers: external, headSha: HEAD, author: "x", comments: [remand] }), "coderabbitai[bot]", "with the court off its receipts are ignored");
   });
 
-  it("a Critic APPROVE clears only with no open review findings", () => {
+  it("a Critic APPROVE alone never clears the reviewer lookup; a Judge MERGE on the exact head does", () => {
     const approve = receipt({ role: "critic", verdict: "APPROVE" });
-    assert.equal(clear([approve]), "mirql-critic[bot]");
-    assert.equal(clear([approve, receipt({ role: "critic", verdict: "COMMENT", count: 1, payload: { findings: [FINDING] } })]), null, "the latest Critic receipt wins");
+    assert.equal(clear([approve]), null, "one Critic model call is not a review");
+    assert.equal(clear([approve, receipt({ role: "critic", verdict: "COMMENT", count: 1, payload: { findings: [FINDING] } })]), null, "a Critic COMMENT approves nothing either");
+    assert.equal(clear([approve, receipt(merge)]), "mirql-judge[bot]", "the court approval is the Judge's MERGE");
+    assert.equal(clear([approve, receipt({ ...merge, headSha: OLD })]), null, "a MERGE at another head clears nothing");
+    const external = { user: { login: "coderabbitai[bot]", type: "Bot" }, state: "APPROVED", commit_id: HEAD, submitted_at: "2026-11-04T10:00:00Z" };
+    assert.equal(findAiApproval([external], { reviewers: REVIEWERS, headSha: HEAD, author: "x", comments: [approve] }), "coderabbitai[bot]", "an external approval is unaffected");
     const blocked = { user: { login: "coderabbitai[bot]", type: "Bot" }, state: "CHANGES_REQUESTED", commit_id: HEAD, submitted_at: "2026-11-04T10:00:00Z" };
-    assert.equal(findAiApproval([blocked], { reviewers: REVIEWERS, headSha: HEAD, author: "x", comments: [approve] }), null);
+    assert.equal(findAiApproval([blocked], { reviewers: REVIEWERS, headSha: HEAD, author: "x", comments: [approve, receipt(merge)] }), null, "a late Request changes voids even the Judge's MERGE");
     const inline = { user: { login: "coderabbitai[bot]", type: "Bot" }, commit_id: HEAD, body: "bug" };
     assert.equal(findAiApproval([], { reviewers: REVIEWERS, headSha: HEAD, author: "x", comments: [approve], reviewComments: [inline] }), null);
   });
@@ -876,7 +880,7 @@ describe("court receipts", () => {
     assert.equal(approved([recuse]), "coderabbitai[bot]");
     assert.equal(approved([comment, recuse]), "coderabbitai[bot]");
     assert.equal(clear([recuse]), null, "a recusal approves nothing by itself");
-    assert.equal(clear([receipt({ role: "critic", verdict: "APPROVE" }), recuse]), "mirql-critic[bot]", "as with no Judge receipt, a Critic APPROVE still counts");
+    assert.equal(clear([receipt({ role: "critic", verdict: "APPROVE" }), recuse]), null, "without a Judge MERGE no court receipt approves, even beside a recusal");
   });
 
   it("a MERGE covers only what the Judge saw", () => {
