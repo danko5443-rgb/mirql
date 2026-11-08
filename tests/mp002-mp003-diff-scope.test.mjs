@@ -120,12 +120,20 @@ test("scanner: catch-shaped text in string fixtures never executes", () => {
 test("scanner: a quote inside a regex literal does not blind the scan (drift.mjs regression)", () => {
   const code = [
     "const QUOTE = /['\"`]/;",
+    "const SLASH_CLASS = /[/']/;",
     "function probe() {",
     "  try { risky(); } catch (e) {}",
     "}",
   ].join("\n");
   const violations = checkSwallowedExceptions(code, "tests/a.test.mjs").violations;
   assert.equal(violations.length, 1, "the real empty catch after the regex must still be found");
+});
+
+test("scanner: multiline weakening match flags when any line of the match is changed", () => {
+  const code = "it\n  .skip('x', () => {});\n";
+  assert.equal(checkTestWeakenings(code, "tests/a.test.mjs", { changedLines: new Set([2]) }).ok, false,
+    "adding .skip on line 2 below an unchanged `it` on line 1 must still flag");
+  assert.equal(checkTestWeakenings(code, "tests/a.test.mjs", { changedLines: new Set([3]) }).ok, true);
 });
 
 test("scanner: under a scope, an untouched catch in a test file is exempt without a marker", () => {

@@ -410,6 +410,7 @@ function computeLiteralMask(sourceCode) {
   const interps = [];
   let depth = 0;
   let state = "code";
+  let inRegexClass = false;
   // Recent live, non-whitespace characters: the regex/division tiebreaker uses
   // the same rule as extractBalancedBlock — a `/` starts a regex literal only
   // after an operator/punctuator or `return`, never after an identifier or a
@@ -428,7 +429,7 @@ function computeLiteralMask(sourceCode) {
       } else if (ch === "/" && next === "*") {
         mark(i); mark(i + 1); i++; state = "blockComment";
       } else if (ch === "/") {
-        if (isRegexStart()) { mark(i); state = "regex"; liveTail = ""; }
+        if (isRegexStart()) { mark(i); state = "regex"; inRegexClass = false; liveTail = ""; }
         else liveTail = (liveTail + ch).slice(-12);
       } else if (ch === "'" || ch === '"' || ch === "`") {
         mark(i); state = ch === "'" ? "single" : ch === '"' ? "double" : "template";
@@ -452,13 +453,15 @@ function computeLiteralMask(sourceCode) {
     } else if (state === "regex") {
       mark(i);
       if (ch === "\\") { if (next !== "") { mark(i + 1); i++; } }
-      else if (ch === "/") {
+      else if (ch === "[") inRegexClass = true;
+      else if (ch === "]") inRegexClass = false;
+      else if (ch === "/" && !inRegexClass) {
         while (i + 1 < n && /[a-z]/i.test(sourceCode[i + 1])) { mark(i + 1); i++; }
-        state = "code"; liveTail = "";
+        state = "code"; liveTail = "/";
       } else if (ch === "\n") {
         // A regex literal cannot span lines: an opening `/` that never closes
         // was really division or broken code. Resume live scanning next line.
-        state = "code";
+        inRegexClass = false; state = "code";
       }
     } else { // template
       mark(i);
@@ -690,7 +693,12 @@ export function checkTestWeakenings(sourceCode, filename, { changedLines } = {})
       if (literal[m.index] === "1") continue; // weakening-shaped text in a comment or string never executes
       const upTo = sourceCode.slice(0, m.index);
       const line = upTo.split("\n").length;
-      if (changedLines instanceof Set && !changedLines.has(line)) continue; // the candidate did not touch this line
+      const endLine = line + m[0].split("\n").length - 1;
+      let touched = !(changedLines instanceof Set);
+      for (let l = line; !touched && l <= endLine; l++) {
+        if (changedLines.has(l)) touched = true;
+      }
+      if (!touched) continue; // the candidate did not touch any line of this match
       details.push(
         filename
           ? `${filename}:${line} matched weakening pattern ${m[0]}`
