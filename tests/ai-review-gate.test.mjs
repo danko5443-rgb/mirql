@@ -232,17 +232,25 @@ describe("ai review gate: evaluator", () => {
     assert.equal(res.violation, "TOUCH_HUMAN_ONLY");
   });
 
-  it("with an approval a clean humanOnly PR is capped at needs_human, never auto_merge", () => {
+  it("an external AI approval cannot clear a humanOnly PR (MP-001 stays reject)", () => {
     const res = evaluatePullRequest(humanOnlyDoc(), { rootDir: ROOT, humanOnlyReviewer: "coderabbitai[bot]" });
-    assert.equal(res.verdict, "needs_human");
+    assert.equal(res.verdict, "reject");
     assert.equal(res.rule, "MP-001");
-    assert.equal(res.human_only_reviewer, "coderabbitai[bot]");
+    assert.equal(res.violation, "TOUCH_HUMAN_ONLY");
   });
 
-  it("with an approval the remaining rules still reject", () => {
+  it("owner sign-off clears a humanOnly PR to needs_human, never auto_merge", () => {
+    const res = evaluatePullRequest(humanOnlyDoc(), { rootDir: ROOT, ownerSignoff: "ahmed-3m" });
+    assert.equal(res.verdict, "needs_human");
+    assert.equal(res.rule, "MP-001");
+    assert.equal(res.violation, "TOUCH_HUMAN_ONLY");
+    assert.equal(res.owner_signoff, "ahmed-3m");
+  });
+
+  it("with owner sign-off the remaining rules still reject", () => {
     const res = evaluatePullRequest(
       humanOnlyDoc({ evidence: { forbidden_paths_touched: [], tests_deleted: ["tests/feature.test.mjs"] } }),
-      { rootDir: ROOT, humanOnlyReviewer: "coderabbitai[bot]" },
+      { rootDir: ROOT, ownerSignoff: "ahmed-3m" },
     );
     assert.equal(res.verdict, "reject");
     assert.equal(res.violation, "TEST_DELETED");
@@ -275,14 +283,25 @@ describe("ai review gate: evaluator", () => {
     assert.equal(res.violation, "TOUCH_HUMAN_ONLY");
   });
 
-  it("m check --human-only-reviewer reaches the evaluator", () => {
+  it("m check --human-only-reviewer reaches the evaluator on humanApprove paths", () => {
+    const humanApproveDoc = {
+      schema: "outcome/v1",
+      pr: { number: 1, author: "ahmed-3m", kind: "bugfix" },
+      diff_stat: { files_changed: ["scripts/ci-review-gate.mjs"] },
+      proof: { causal_cycle_completed: true },
+      evidence: { forbidden_paths_touched: [], tests_deleted: [] },
+      anti_cheat: { violations_count: 0, flags: [] },
+      phi: { phi_base: 10, phi_head: 9, delta_phi: -1 },
+      surface: { uncited_commands: [], delta_count: 0 },
+    };
     const res = spawnSync(
       process.execPath,
-      [join(ROOT, "bin", "mirql.mjs"), "m", "check", "--pr", JSON.stringify(humanOnlyDoc()), "--human-only-reviewer", "coderabbitai[bot]"],
+      [join(ROOT, "bin", "mirql.mjs"), "m", "check", "--pr", JSON.stringify(humanApproveDoc), "--human-only-reviewer", "coderabbitai[bot]"],
       { cwd: ROOT, encoding: "utf8" },
     );
     const out = JSON.parse(res.stdout.trim().split(/\r?\n/).pop());
     assert.equal(out.verdict, "needs_human");
+    assert.equal(out.human_only_reviewer, "coderabbitai[bot]");
     assert.notEqual(res.status, 0, "needs_human never exits 0");
   });
 });

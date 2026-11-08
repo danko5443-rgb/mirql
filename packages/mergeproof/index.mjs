@@ -325,6 +325,8 @@ function cliCheck(flags) {
     delta_phi:
       Number.isSafeInteger(prDoc.phi?.delta_phi) ? prDoc.phi.delta_phi : null,
     checks: verdict.checks,
+    ...(typeof verdict.human_only_reviewer === 'string' ? { human_only_reviewer: verdict.human_only_reviewer } : {}),
+    ...(typeof verdict.owner_signoff === 'string' ? { owner_signoff: verdict.owner_signoff } : {}),
   };
   if (Array.isArray(verdict.flags) && verdict.flags.length > 0) {
     out.flags = verdict.flags;

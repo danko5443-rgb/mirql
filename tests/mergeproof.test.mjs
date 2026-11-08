@@ -939,5 +939,69 @@ describe("mergeproof: F1 anti-cheat string-concealment patch", () => {
       assert.equal(result.verdict, "reject");
     });
   });
+
+  describe("9. MP-001 Owner-Only Clearance (Issue #140)", () => {
+    const humanOnlyPr = (overrides = {}) => ({
+      schema: "outcome/v1",
+      pr: { number: 140, head_sha: "a".repeat(40), base_sha: "b".repeat(40), kind: "feature" },
+      diff_stat: { files_changed: ["CONSTITUTION.md"] },
+      proof: { causal_cycle_completed: true },
+      evidence: { forbidden_paths_touched: [], tests_deleted: [] },
+      anti_cheat: { violations_count: 0, flags: [] },
+      phi: { delta_phi: 0 },
+      surface: { uncited_commands: [], delta_count: 0 },
+      ...overrides,
+    });
+
+    const humanApprovePr = (overrides = {}) => ({
+      schema: "outcome/v1",
+      pr: { number: 140, head_sha: "a".repeat(40), base_sha: "b".repeat(40), kind: "feature" },
+      diff_stat: { files_changed: ["scripts/ci-review-gate.mjs"] },
+      proof: { causal_cycle_completed: true },
+      evidence: { forbidden_paths_touched: [], tests_deleted: [] },
+      anti_cheat: { violations_count: 0, flags: [] },
+      phi: { delta_phi: 0 },
+      surface: { uncited_commands: [], delta_count: 0 },
+      ...overrides,
+    });
+
+    it("forbidden path + humanOnlyReviewer: coderabbitai[bot] -> reject MP-001", () => {
+      const res = evaluatePullRequest(humanOnlyPr(), { rootDir: ROOT, humanOnlyReviewer: "coderabbitai[bot]" });
+      assert.equal(res.verdict, "reject");
+      assert.equal(res.rule, "MP-001");
+      assert.equal(res.violation, "TOUCH_HUMAN_ONLY");
+    });
+
+    it("forbidden path + owner sign-off -> needs_human MP-001", () => {
+      const res = evaluatePullRequest(humanOnlyPr(), { rootDir: ROOT, ownerSignoff: "ahmed-3m" });
+      assert.equal(res.verdict, "needs_human");
+      assert.equal(res.rule, "MP-001");
+      assert.equal(res.violation, "TOUCH_HUMAN_ONLY");
+      assert.equal(res.owner_signoff, "ahmed-3m");
+    });
+
+    it("forbidden path + mirql-judge[bot] -> reject MP-001 (unchanged)", () => {
+      const res = evaluatePullRequest(humanOnlyPr(), { rootDir: ROOT, humanOnlyReviewer: "mirql-judge[bot]" });
+      assert.equal(res.verdict, "reject");
+      assert.equal(res.rule, "MP-001");
+      assert.equal(res.violation, "TOUCH_HUMAN_ONLY");
+    });
+
+    it("non-forbidden humanApprove path + external reviewer -> cleared as today (unchanged)", () => {
+      const res = evaluatePullRequest(humanApprovePr(), { rootDir: ROOT, humanOnlyReviewer: "coderabbitai[bot]" });
+      assert.notEqual(res.rule, "MP-001");
+      assert.equal(res.human_only_reviewer, "coderabbitai[bot]");
+      assert.equal(res.rule, "MP-005");
+      assert.equal(res.verdict, "needs_human");
+    });
+
+    it("reviewer-config-touching PR + owner review -> still refused (unchanged)", () => {
+      const configPr = humanOnlyPr({ diff_stat: { files_changed: ["AGENTS.md"] } });
+      const res = evaluatePullRequest(configPr, { rootDir: ROOT, ownerSignoff: "ahmed-3m" });
+      assert.equal(res.verdict, "reject");
+      assert.equal(res.rule, "MP-001");
+      assert.equal(res.violation, "TOUCH_HUMAN_ONLY");
+    });
+  });
 });
 
