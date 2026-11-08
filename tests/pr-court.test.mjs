@@ -737,6 +737,29 @@ describe("court judge", () => {
     assert.equal((await judge(remand, { round: MAX_ROUNDS })).res.verdict, "ESCALATE");
   });
 
+  it("merges an empty docket on empty rulings, the base-refresh shape", async () => {
+    const { res } = await judge({ verdict: "MERGE", rationale: "every earlier finding is already ruled", rulings: [] }, { findings: [] });
+    assert.equal(res.ok, true);
+    assert.equal(res.verdict, "MERGE");
+    assert.deepEqual(res.rulings, []);
+    assert.deepEqual(res.unresolved, []);
+  });
+
+  it("carries the docket contract in the judge prompt, empty docket or not", async () => {
+    const empty = await judge({ verdict: "MERGE", rationale: "ok", rulings: [] }, { findings: [], rolePrompt: "ROLE" });
+    const [system, user] = empty.calls[0].body.messages;
+    assert.match(system.content, /## Findings docket/);
+    assert.match(system.content, /then return `rulings: \[\]`/);
+    assert.match(user.content, /name="findings">\n\[\]\n/);
+    const stocked = await judge(merge, { rolePrompt: "ROLE" });
+    assert.match(stocked.calls[0].body.messages[0].content, /## Findings docket/, "an unconditional rule keeps a stocked docket exact too");
+  });
+
+  it("still rejects a historical ruling echoed into an empty docket", async () => {
+    const echo = { verdict: "MERGE", rationale: "echo of round 1", rulings: [{ finding_id: "f1", status: "FIXED", reason: "already ruled" }] };
+    assert.deepEqual((await judge(echo, { findings: [] })).res, { ok: false, reason: "LLM_INVALID_REPLY" });
+  });
+
   it("refuses before any network call on missing evidence or a locked path", async () => {
     const cases = [
       [{ evidence: { ...GREEN, suitePassHead: false } }, /^SUITE_NOT_GREEN$/],
@@ -1376,6 +1399,27 @@ describe("court tick end to end", () => {
       assert.ok(!box.comments.some((c) => c.body.includes("mirql-court-state") && c.body.includes("AUTO_MERGE_OFF")), "the notice is not a receipt");
       assert.equal(await quiet(() => runCourtTick({ env: box.env, io: box.io, fetchImpl: mockFetch(reply).fetchImpl, baseDir: ROOT })), 0);
       assert.equal(noticesOf("AUTO_MERGE_OFF").length, 1, "one notice per code and head");
+    });
+  });
+
+  it("a base refresh starts a fresh judge round on an empty docket and accepts rulings: []", async () => {
+    await withDir(async (dir) => {
+      const box = sandbox(dir);
+      const overruled = { ...merge, rulings: [{ finding_id: "f1", status: "OVERRULED_FALSE_POSITIVE", reason: "agreed" }] };
+      assert.equal(await quiet(() => runCourtTick({ env: box.env, io: box.io, fetchImpl: mockFetch(critic, rebut, overruled).fetchImpl, baseDir: ROOT })), 0);
+      assert.deepEqual(box.verdicts(), ["critic:COMMENT", "advocate:REBUT", "judge:MERGE"]);
+      const ruled = box.pr.head.sha;
+
+      box.git(box.candidate, "commit", "--allow-empty", "-qm", "refresh the merge base");
+      box.sync();
+      const approval = { user: { login: "coderabbitai[bot]", type: "Bot" }, state: "APPROVED", commit_id: box.pr.head.sha, submitted_at: "2026-11-04T12:00:00Z" };
+      const list = box.io.list;
+      box.io.list = (path) => (path.endsWith("/reviews") ? [approval] : list(path));
+      const reMerge = { verdict: "MERGE", rationale: "the docket is empty at this head", rulings: [] };
+      assert.equal(await quiet(() => runCourtTick({ env: box.env, io: box.io, fetchImpl: mockFetch(reMerge).fetchImpl, baseDir: ROOT })), 0);
+      assert.deepEqual(box.verdicts(), ["critic:COMMENT", "advocate:REBUT", "judge:MERGE", "judge:MERGE"]);
+      assert.notEqual(box.pr.head.sha, ruled);
+      assert.ok(box.comments.at(-2).body.includes(box.pr.head.sha), "the fresh MERGE binds to the refreshed head");
     });
   });
 
