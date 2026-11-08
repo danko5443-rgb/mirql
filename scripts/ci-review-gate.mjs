@@ -211,45 +211,76 @@ async function readChatStream(body, reply) {
   if (!choice.finish_reason) throw new Error("stream ended early");
 }
 
-/** Fetch only, and fails closed: returns { ok: true, data } or { ok: false, reason }, never a partial answer. */
+/** The provider's usage object is the only cost signal the loop has; keep the integer token counts (Law 17), never a price guess.
+ * zai/openai/openrouter report OpenAI-shape usage, Anthropic input_tokens+output_tokens, Gemini usageMetadata: normalize all three. */
+const usageOf = (data) => {
+  const u = data?.usage ?? data?.usageMetadata;
+  const total = Number.isSafeInteger(u?.total_tokens) ? u.total_tokens
+    : Number.isSafeInteger(u?.input_tokens) && Number.isSafeInteger(u?.output_tokens) ? u.input_tokens + u.output_tokens
+    : Number.isSafeInteger(u?.totalTokenCount) ? u.totalTokenCount : null;
+  return total === null ? null : {
+    prompt_tokens: Number.isSafeInteger(u.prompt_tokens) ? u.prompt_tokens : Number.isSafeInteger(u.promptTokenCount) ? u.promptTokenCount : null,
+    completion_tokens: Number.isSafeInteger(u.completion_tokens) ? u.completion_tokens : Number.isSafeInteger(u.candidatesTokenCount) ? u.candidatesTokenCount : null,
+    total_tokens: total,
+  };
+};
+
+/** Fail-over attempts spent real tokens too, so their counts sum; a count no provider reported stays null, never a guess (Law 17). */
+const sumUsage = (a, b) => {
+  const add = (x, y) => Number.isSafeInteger(x) && Number.isSafeInteger(y) ? x + y : x ?? y;
+  return !b ? a : !a ? b : {
+    prompt_tokens: add(a.prompt_tokens, b.prompt_tokens),
+    completion_tokens: add(a.completion_tokens, b.completion_tokens),
+    total_tokens: a.total_tokens + b.total_tokens,
+  };
+};
+
+/** Fetch only, and fails closed: returns { ok: true, data } or { ok: false, reason }, never a partial answer.
+ * Unpinned, a hard failure (LLM_HTTP_ERROR on 401/402/429/5xx, or LLM_TIMEOUT) fails over to the next registry entry that has a
+ * key: one bounded pass, same per-attempt timeout. A pass that exhausts two or more candidates ends in ALL_PROVIDERS_FAILED,
+ * while a lone candidate keeps its own specific reason. An explicit MIRQL_<ROLE>_PROVIDER pin is a deliberate choice of exactly
+ * one provider, so a pin never fails over; any softer failure still fails closed at once. */
 async function callCourtModel({ role, system = "", user, env = process.env, fetchImpl = globalThis.fetch, maxTokens = 65536, timeoutMs = COURT_MODEL_TIMEOUT_MS } = {}) {
   const name = String(role).toUpperCase();
   const wanted = env[`MIRQL_${name}_PROVIDER`];
-  const provider = COURT_PROVIDERS.find((p) => env[p.key] && (!wanted || p.id === wanted));
-  if (!provider || typeof fetchImpl !== "function") return { ok: false, reason: "NO_API_KEY" };
-  const model = env[`MIRQL_${name}_MODEL`] || provider.model;
-  const req = courtRequest(provider, model, env[provider.key], system, user, maxTokens);
-  // Counts and names only: a model reply or a JSON.parse message can quote the diff.
-  const fail = (reason, why) => { console.error(`pr-court: ${name} ${provider.id}/${model} ${reason}: ${why}`); return { ok: false, reason }; };
-  let data = null;
-  const seen = () => (data ? `finish=${data?.choices?.[0]?.finish_reason ?? data?.stop_reason ?? data?.candidates?.[0]?.finishReason} content_chars=${String(req.text(data) ?? "").length} reasoning_chars=${data?.choices?.[0]?.message?.reasoning_content?.length ?? 0} completion_tokens=${data?.usage?.completion_tokens}` : "no reply");
-  try {
-    const resp = await fetchImpl(provider.url(env, model), { method: "POST", headers: req.headers, body: JSON.stringify(req.body), signal: AbortSignal.timeout(timeoutMs) });
-    if (!resp?.ok) return fail("LLM_HTTP_ERROR", `status=${resp?.status}`);
-    if (String(resp.headers?.get?.("content-type")).includes("text/event-stream")) {
-      data = { choices: [{ message: { content: "", reasoning_content: "" } }] };
-      await readChatStream(resp.body, data);
-    } else data = await resp.json();
-    const raw = String(req.text(data) ?? "");
-    // The provider's usage object is the only cost signal the loop has; keep the integer token counts (Law 17), never a price guess.
-    // zai/openai/openrouter report OpenAI-shape usage, Anthropic input_tokens+output_tokens, Gemini usageMetadata: normalize all three.
-    const u = data?.usage ?? data?.usageMetadata;
-    const total = Number.isSafeInteger(u?.total_tokens) ? u.total_tokens
-      : Number.isSafeInteger(u?.input_tokens) && Number.isSafeInteger(u?.output_tokens) ? u.input_tokens + u.output_tokens
-      : Number.isSafeInteger(u?.totalTokenCount) ? u.totalTokenCount : null;
-    const usage = total === null ? null : {
-      prompt_tokens: Number.isSafeInteger(u.prompt_tokens) ? u.prompt_tokens : Number.isSafeInteger(u.promptTokenCount) ? u.promptTokenCount : null,
-      completion_tokens: Number.isSafeInteger(u.completion_tokens) ? u.completion_tokens : Number.isSafeInteger(u.candidatesTokenCount) ? u.candidatesTokenCount : null,
-      total_tokens: total,
-    };
-    return { ok: true, data: JSON.parse((raw.match(/\{[\s\S]*\}/) ?? [raw])[0]), usage };
-  } catch (err) {
-    /* mp-003-allow: network or JSON failure fails closed without a verdict */
-    const cause = err?.cause?.code;
-    // Node's fetch has its own limits, reported as a TypeError with one of these codes.
-    const timedOut = err?.name === "TimeoutError" || /_TIMEOUT$/.test(cause);
-    return fail(timedOut ? "LLM_TIMEOUT" : "LLM_PARSE_ERROR", `${err?.name}${cause ? ` ${cause}` : ""} ${seen()}`);
+  const candidates = COURT_PROVIDERS.filter((p) => env[p.key] && (!wanted || p.id === wanted));
+  if (candidates.length === 0 || typeof fetchImpl !== "function") return { ok: false, reason: "NO_API_KEY" };
+  let spent = null;
+  for (const provider of candidates) {
+    const model = env[`MIRQL_${name}_MODEL`] || provider.model;
+    const req = courtRequest(provider, model, env[provider.key], system, user, maxTokens);
+    // Counts and names only: a model reply or a JSON.parse message can quote the diff.
+    const fail = (reason, why) => { console.error(`pr-court: ${name} ${provider.id}/${model} ${reason}: ${why}`); return { ok: false, reason }; };
+    let data = null;
+    const seen = () => (data ? `finish=${data?.choices?.[0]?.finish_reason ?? data?.stop_reason ?? data?.candidates?.[0]?.finishReason} content_chars=${String(req.text(data) ?? "").length} reasoning_chars=${data?.choices?.[0]?.message?.reasoning_content?.length ?? 0} completion_tokens=${data?.usage?.completion_tokens}` : "no reply");
+    try {
+      const resp = await fetchImpl(provider.url(env, model), { method: "POST", headers: req.headers, body: JSON.stringify(req.body), signal: AbortSignal.timeout(timeoutMs) });
+      const status = resp?.status;
+      if (!resp?.ok) {
+        const res = fail("LLM_HTTP_ERROR", `status=${status}`);
+        // 401/402/429/5xx blame the provider (bad key, quota wall, outage) rather than the request, so the next entry gets the same call.
+        const outage = [401, 402, 429].includes(status) || status >= 500;
+        if (!outage || candidates.length === 1) return res;
+        continue;
+      }
+      if (String(resp.headers?.get?.("content-type")).includes("text/event-stream")) {
+        data = { choices: [{ message: { content: "", reasoning_content: "" } }] };
+        await readChatStream(resp.body, data);
+      } else data = await resp.json();
+      const raw = String(req.text(data) ?? "");
+      return { ok: true, data: JSON.parse((raw.match(/\{[\s\S]*\}/) ?? [raw])[0]), usage: sumUsage(spent, usageOf(data)) };
+    } catch (err) {
+      /* mp-003-allow: network or JSON failure fails closed without a verdict */
+      const cause = err?.cause?.code;
+      // Node's fetch has its own limits, reported as a TypeError with one of these codes.
+      const timedOut = err?.name === "TimeoutError" || /_TIMEOUT$/.test(cause);
+      const res = fail(timedOut ? "LLM_TIMEOUT" : "LLM_PARSE_ERROR", `${err?.name}${cause ? ` ${cause}` : ""} ${seen()}`);
+      // A timed-out attempt already burned prompt tokens, so usage the provider did report still counts toward the next try.
+      if (!timedOut || candidates.length === 1) return res;
+      spent = sumUsage(spent, usageOf(data));
+    }
   }
+  return { ok: false, reason: "ALL_PROVIDERS_FAILED" };
 }
 
 async function runFallbackReview({ diffText = "", authorAssociation = "", env = process.env, fetchImpl = globalThis.fetch } = {}) {
