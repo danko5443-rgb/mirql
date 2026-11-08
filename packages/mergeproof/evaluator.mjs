@@ -38,6 +38,7 @@ import {
   loadPathPolicies,
   isHumanOnlyPath,
   isHumanApprovePath,
+  isTestFilePath,
   checkSwallowedExceptions,
   checkTestWeakenings,
 } from "../core/index.mjs";
@@ -358,7 +359,8 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
 
   if (prDoc.sourceCode || prDoc.source_code) {
     const src = prDoc.sourceCode ?? prDoc.source_code;
-    const weakenScan = scanSources(src, checkTestWeakenings);
+    const weakenScan = scanSources(src, (code, file) =>
+      checkWeakeningAgainstBase(code, file, assertedBase, assertedHead, repoDir));
     if (weakenScan !== null) {
       checks.tests_deleted = false;
       return fail(
@@ -672,6 +674,21 @@ function checkSwallowedAgainstBase(code, file, baseSha, headSha, repoDir) {
   if (strict.ok || !file) return strict;
   const changedLines = changedLinesSinceBase(code, file, baseSha, headSha, repoDir);
   return changedLines ? checkSwallowedExceptions(code, file, { changedLines }) : strict;
+}
+
+/**
+ * MP-002 scan scoped like the MP-003 one: only test files can weaken tests, and
+ * only a line the candidate changed counts, so pre-existing `t.skip(...)` on an
+ * untouched line cannot lock a PR out of the gate. Weakening-shaped text inside
+ * strings and comments is already ignored by the scanner. When the changed
+ * lines cannot be established the strict verdict stands: fail closed.
+ */
+function checkWeakeningAgainstBase(code, file, baseSha, headSha, repoDir) {
+  if (file && !isTestFilePath(file)) return { ok: true, count: 0, details: [] };
+  const strict = checkTestWeakenings(code, file);
+  if (strict.ok || !file) return strict;
+  const changedLines = changedLinesSinceBase(code, file, baseSha, headSha, repoDir);
+  return changedLines ? checkTestWeakenings(code, file, { changedLines }) : strict;
 }
 
 /** Runs `scanner` over sourceCode (a string or a { file: code } record), returning the first failing file description or null when clean. */

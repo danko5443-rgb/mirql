@@ -386,6 +386,91 @@ const MP003_MARKER_REFUSED =
   "mp-003-allow marker refused: it only exempts a catch unchanged from the authoritative base, and this one was changed or its base could not be verified";
 
 /**
+ * Maps which characters of `sourceCode` never execute: line comments, block
+ * comments, string literals, and template literals, delimiters included. Every
+ * other character — live code, whitespace, newlines — maps to "0" at the same
+ * index, so a regex match on the original text can be tested with
+ * `mask[match.index] === "1"` without disturbing index or line math. Template
+ * `${...}` interpolation bodies stay live code (they run); only the `${` and
+ * its matching `}` belong to the literal. Regex literals are masked too, so a
+ * quote inside `/['"`]/ cannot masquerade as a string opener and blind the
+ * scan; telling them apart from division uses the same prev-token rule as
+ * extractBalancedBlock, and an opening `/` that never closes on its own line
+ * resumes live scanning at the line end.
+ *
+ * @param {string} sourceCode
+ * @returns {string} same-length string of "0" (code) and "1" (literal) flags
+ */
+function computeLiteralMask(sourceCode) {
+  const n = sourceCode.length;
+  const flags = new Array(n).fill("0");
+  const mark = (i) => { flags[i] = "1"; };
+  // One frame per open `${`: the brace depth suspended when it opened, restored
+  // when its matching `}` returns scanning to the template.
+  const interps = [];
+  let depth = 0;
+  let state = "code";
+  // Recent live, non-whitespace characters: the regex/division tiebreaker uses
+  // the same rule as extractBalancedBlock — a `/` starts a regex literal only
+  // after an operator/punctuator or `return`, never after an identifier or a
+  // closing paren/bracket, which would make it division.
+  let liveTail = "";
+  const isRegexStart = () => {
+    const prevChar = liveTail.slice(-1);
+    return !prevChar || /[=([,:;!&|?{}]/.test(prevChar) || /\breturn$/.test(liveTail);
+  };
+  for (let i = 0; i < n; i++) {
+    const ch = sourceCode[i];
+    const next = i + 1 < n ? sourceCode[i + 1] : "";
+    if (state === "code") {
+      if (ch === "/" && next === "/") {
+        mark(i); mark(i + 1); i++; state = "lineComment";
+      } else if (ch === "/" && next === "*") {
+        mark(i); mark(i + 1); i++; state = "blockComment";
+      } else if (ch === "/") {
+        if (isRegexStart()) { mark(i); state = "regex"; liveTail = ""; }
+        else liveTail = (liveTail + ch).slice(-12);
+      } else if (ch === "'" || ch === '"' || ch === "`") {
+        mark(i); state = ch === "'" ? "single" : ch === '"' ? "double" : "template";
+      } else if (interps.length > 0 && ch === "{") {
+        depth++;
+      } else if (interps.length > 0 && ch === "}") {
+        if (depth === 0) { mark(i); depth = interps.pop(); state = "template"; }
+        else depth--;
+      } else if (!/\s/.test(ch)) {
+        liveTail = (liveTail + ch).slice(-12);
+      }
+    } else if (state === "lineComment") {
+      if (ch === "\n") state = "code"; else mark(i);
+    } else if (state === "blockComment") {
+      mark(i);
+      if (ch === "*" && next === "/") { mark(i + 1); i++; state = "code"; }
+    } else if (state === "single" || state === "double") {
+      mark(i);
+      if (ch === "\\") { if (next !== "") { mark(i + 1); i++; } }
+      else if ((state === "single" && ch === "'") || (state === "double" && ch === '"')) state = "code";
+    } else if (state === "regex") {
+      mark(i);
+      if (ch === "\\") { if (next !== "") { mark(i + 1); i++; } }
+      else if (ch === "/") {
+        while (i + 1 < n && /[a-z]/i.test(sourceCode[i + 1])) { mark(i + 1); i++; }
+        state = "code"; liveTail = "";
+      } else if (ch === "\n") {
+        // A regex literal cannot span lines: an opening `/` that never closes
+        // was really division or broken code. Resume live scanning next line.
+        state = "code";
+      }
+    } else { // template
+      mark(i);
+      if (ch === "\\") { if (next !== "") { mark(i + 1); i++; } }
+      else if (ch === "`") state = "code";
+      else if (ch === "$" && next === "{") { mark(i); mark(i + 1); i++; interps.push(depth); depth = 0; state = "code"; }
+    }
+  }
+  return flags.join("");
+}
+
+/**
  * Scans source code for empty catch blocks and swallowed exceptions (MP-003).
  *
  * @param {string} sourceCode
@@ -393,13 +478,30 @@ const MP003_MARKER_REFUSED =
  * @param {{ changedLines?: Set<number> }} [scope] - 1-based lines of sourceCode the
  *   candidate changed, from a trusted source. A marker exempts a catch only when
  *   this is given and no line of the catch is in it. Omitted, no marker counts.
+ *   Under a scope, a catch in a *test file* untouched by the candidate is also
+ *   exempt without a marker: tests/ was never inside the marker ratchet, so its
+ *   silence was already accepted into the base. Production files keep the exact
+ *   marker contract.
  * @returns {{ ok: boolean, violations: Array<{ file?: string, pattern: string, line: number, detail?: string }> }}
  */
 export function checkSwallowedExceptions(sourceCode, filename, { changedLines } = {}) {
   const violations = [];
   const lineAt = (idx) => sourceCode.slice(0, idx).split("\n").length;
+  const literal = computeLiteralMask(sourceCode);
+  const testFile = isTestFilePath(filename);
   const markerExempts = (text, startIdx, endIdx) => {
     if (!MP003_ALLOW_RE.test(text) || !(changedLines instanceof Set)) return false;
+    for (let line = lineAt(startIdx), last = lineAt(endIdx); line <= last; line++) {
+      if (changedLines.has(line)) return false;
+    }
+    return true;
+  };
+  // Test files were never inside the marker ratchet (it walks packages/, bin/,
+  // scripts/), so under a scope an untouched catch there is base-accepted
+  // silence: exempt it without demanding a marker. A catch the candidate
+  // touched still flags, marker or not.
+  const scopeExempts = (startIdx, endIdx) => {
+    if (!testFile || !(changedLines instanceof Set)) return false;
     for (let line = lineAt(startIdx), last = lineAt(endIdx); line <= last; line++) {
       if (changedLines.has(line)) return false;
     }
@@ -413,8 +515,9 @@ export function checkSwallowedExceptions(sourceCode, filename, { changedLines } 
   const catchStartRegex = /catch\s*(?:\(\s*([A-Za-z_$][\w$]*)\s*\)|\((?:[^)]*)\))?\s*\{/g;
   let match;
   while ((match = catchStartRegex.exec(sourceCode)) !== null) {
+    if (literal[match.index] === "1") continue; // catch-shaped text in a comment or string never executes
     const { body, endIdx: catchEnd } = extractBalancedBlock(sourceCode, match.index + match[0].length);
-    if ((isEffectivelyEmpty(body) || isErrorReferenceOnly(body, match[1])) && !markerExempts(body, match.index, catchEnd)) {
+    if ((isEffectivelyEmpty(body) || isErrorReferenceOnly(body, match[1])) && !markerExempts(body, match.index, catchEnd) && !scopeExempts(match.index, catchEnd)) {
       const upToMatch = sourceCode.slice(0, match.index);
       const line = upToMatch.split("\n").length;
       violations.push({
@@ -430,6 +533,7 @@ export function checkSwallowedExceptions(sourceCode, filename, { changedLines } 
   const promiseCatchRegex = /\.catch\s*\(/g;
   let pcMatch;
   while ((pcMatch = promiseCatchRegex.exec(sourceCode)) !== null) {
+    if (literal[pcMatch.index] === "1") continue; // .catch-shaped text in a comment or string never executes
     const afterParen = pcMatch.index + pcMatch[0].length;
     let idx = afterParen;
     let foundBrace = -1;
@@ -450,7 +554,7 @@ export function checkSwallowedExceptions(sourceCode, filename, { changedLines } 
       // Handler head: `(x) =>`, `x =>`, or `function (x)` / `function name(x)`.
       const arrowParam = /(?:(?:\(\s*([A-Za-z_$][\w$]*)\s*\)|\b([A-Za-z_$][\w$]*))\s*=>|function\s*(?:[A-Za-z_$][\w$]*\s*)?\(\s*([A-Za-z_$][\w$]*)\s*\))\s*\{?\s*$/.exec(sourceCode.slice(afterParen, foundBrace + 1));
       const arrowParamName = arrowParam ? (arrowParam[1] ?? arrowParam[2] ?? arrowParam[3]) : null;
-      if ((isEffectivelyEmpty(body) || isErrorReferenceOnly(body, arrowParamName)) && !markerExempts(body, pcMatch.index, endIdx)) {
+      if ((isEffectivelyEmpty(body) || isErrorReferenceOnly(body, arrowParamName)) && !markerExempts(body, pcMatch.index, endIdx) && !scopeExempts(pcMatch.index, endIdx)) {
         const upToMatch = sourceCode.slice(0, pcMatch.index);
         const line = upToMatch.split("\n").length;
         violations.push({
@@ -478,7 +582,7 @@ export function checkSwallowedExceptions(sourceCode, filename, { changedLines } 
         const expr = arrowMatch[1].trim();
         const exprParam = /(?:\(\s*([A-Za-z_$][\w$]*)\s*\)|\b([A-Za-z_$][\w$]*))\s*=>/.exec(argStr);
         const exprParamName = exprParam ? (exprParam[1] ?? exprParam[2]) : null;
-        if ((isEffectivelyEmpty(expr) || isErrorReferenceOnly(expr, exprParamName)) && !markerExempts(expr, pcMatch.index, j)) {
+        if ((isEffectivelyEmpty(expr) || isErrorReferenceOnly(expr, exprParamName)) && !markerExempts(expr, pcMatch.index, j) && !scopeExempts(pcMatch.index, j)) {
           const upToMatch = sourceCode.slice(0, pcMatch.index);
           const line = upToMatch.split("\n").length;
           violations.push({
@@ -497,6 +601,7 @@ export function checkSwallowedExceptions(sourceCode, filename, { changedLines } 
     /process\s*\.\s*(?:on|once|addListener|prependListener)\s*\(\s*['"](?:uncaughtException|unhandledRejection)['"]\s*,\s*(?:async\s*)?(?:(?:(?:(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*=>|function\s*(?:[a-zA-Z0-9_$]+\s*)?\([^)]*\))\s*(\{)?)|([a-zA-Z0-9_$.]+))/g;
 
   while ((match = uncaughtHeaderRegex.exec(sourceCode)) !== null) {
+    if (literal[match.index] === "1") continue; // handler-shaped text in a comment or string never executes
     const hasBrace = match[1] === "{";
     let handlerBody = "";
     let uncaughtEnd = match.index + match[0].length;
@@ -528,7 +633,7 @@ export function checkSwallowedExceptions(sourceCode, filename, { changedLines } 
     const hasExitCall = /\bprocess\s*\.\s*exit\s*\(/.test(strippedBody);
     const hasThrow = /\bthrow\b/.test(strippedBody);
 
-    if (isEffectivelyEmpty(handlerBody) || (!hasExitCall && !hasThrow)) {
+    if ((isEffectivelyEmpty(handlerBody) || (!hasExitCall && !hasThrow)) && !scopeExempts(match.index, uncaughtEnd)) {
       const upToMatch = sourceCode.slice(0, match.index);
       const line = upToMatch.split("\n").length;
       violations.push({
@@ -556,11 +661,19 @@ export function checkSwallowedExceptions(sourceCode, filename, { changedLines } 
  * - `describe['skip']`, `it['skip']`, `test['skip']`
  * - `xit`, `xtest`, `xdescribe`
  *
+ * Weakening-shaped text inside comments and string/template literals never
+ * executes, so it is ignored: a fixture that quotes `it.skip(...)` to prove the
+ * gate catches it is not itself a weakening. Under a changed-line scope only
+ * lines the candidate touched count, so a pre-existing `t.skip(...)` on an
+ * untouched line cannot lock a PR out; without a scope every live match counts.
+ *
  * @param {string} sourceCode
  * @param {string} [filename]
+ * @param {{ changedLines?: Set<number> }} [scope] - 1-based lines of sourceCode the
+ *   candidate changed, from a trusted source.
  * @returns {{ ok: boolean, count: number, details: string[] }}
  */
-export function checkTestWeakenings(sourceCode, filename) {
+export function checkTestWeakenings(sourceCode, filename, { changedLines } = {}) {
   const patterns = [
     /\b(?:it|test|describe|context|suite)\s*\.\s*(?:skip|only|todo)\b/g,
     /\bx(?:it|test|describe)\b/g,
@@ -569,12 +682,15 @@ export function checkTestWeakenings(sourceCode, filename) {
     /\bt\s*\.\s*skip\s*\(/g,
   ];
 
+  const literal = computeLiteralMask(sourceCode);
   const details = [];
   for (const re of patterns) {
     let m;
     while ((m = re.exec(sourceCode)) !== null) {
+      if (literal[m.index] === "1") continue; // weakening-shaped text in a comment or string never executes
       const upTo = sourceCode.slice(0, m.index);
       const line = upTo.split("\n").length;
+      if (changedLines instanceof Set && !changedLines.has(line)) continue; // the candidate did not touch this line
       details.push(
         filename
           ? `${filename}:${line} matched weakening pattern ${m[0]}`
