@@ -237,14 +237,17 @@ const sumUsage = (a, b) => {
 
 /** Fetch only, and fails closed: returns { ok: true, data } or { ok: false, reason }, never a partial answer.
  * Unpinned, a hard failure (LLM_HTTP_ERROR on 401/402/429/5xx, or LLM_TIMEOUT) fails over to the next registry entry that has a
- * key: one bounded pass, same per-attempt timeout. A pass that exhausts two or more candidates ends in ALL_PROVIDERS_FAILED,
- * while a lone candidate keeps its own specific reason. An explicit MIRQL_<ROLE>_PROVIDER pin is a deliberate choice of exactly
- * one provider, so a pin never fails over; any softer failure still fails closed at once. */
+ * key: one bounded pass under one shared deadline, so a call never spends more than timeoutMs however many providers it tries.
+ * A pass that exhausts two or more candidates ends in ALL_PROVIDERS_FAILED, while a lone candidate keeps its own specific reason.
+ * An explicit MIRQL_<ROLE>_PROVIDER pin is a deliberate choice of exactly one provider, so a pin never fails over; any softer
+ * failure still fails closed at once. */
 async function callCourtModel({ role, system = "", user, env = process.env, fetchImpl = globalThis.fetch, maxTokens = 65536, timeoutMs = COURT_MODEL_TIMEOUT_MS } = {}) {
   const name = String(role).toUpperCase();
   const wanted = env[`MIRQL_${name}_PROVIDER`];
   const candidates = COURT_PROVIDERS.filter((p) => env[p.key] && (!wanted || p.id === wanted));
   if (candidates.length === 0 || typeof fetchImpl !== "function") return { ok: false, reason: "NO_API_KEY" };
+  // One deadline shared by every attempt keeps a pass inside one timeoutMs, so three court calls still fit the 40-minute tick budget.
+  const deadline = Date.now() + timeoutMs;
   let spent = null;
   for (const provider of candidates) {
     const model = env[`MIRQL_${name}_MODEL`] || provider.model;
@@ -254,7 +257,7 @@ async function callCourtModel({ role, system = "", user, env = process.env, fetc
     let data = null;
     const seen = () => (data ? `finish=${data?.choices?.[0]?.finish_reason ?? data?.stop_reason ?? data?.candidates?.[0]?.finishReason} content_chars=${String(req.text(data) ?? "").length} reasoning_chars=${data?.choices?.[0]?.message?.reasoning_content?.length ?? 0} completion_tokens=${data?.usage?.completion_tokens}` : "no reply");
     try {
-      const resp = await fetchImpl(provider.url(env, model), { method: "POST", headers: req.headers, body: JSON.stringify(req.body), signal: AbortSignal.timeout(timeoutMs) });
+      const resp = await fetchImpl(provider.url(env, model), { method: "POST", headers: req.headers, body: JSON.stringify(req.body), signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
       const status = resp?.status;
       if (!resp?.ok) {
         const res = fail("LLM_HTTP_ERROR", `status=${status}`);

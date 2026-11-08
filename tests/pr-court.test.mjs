@@ -440,6 +440,20 @@ describe("court critic", () => {
     assert.deepEqual(parse.res, { ok: false, reason: "LLM_PARSE_ERROR" });
     assert.equal(junk.calls.length, 1);
   });
+
+  it("the fail-over pass shares one timeout budget instead of minting one per provider", async () => {
+    const realTimeout = AbortSignal.timeout;
+    const delays = [];
+    AbortSignal.timeout = (ms) => { delays.push(ms); return realTimeout(Math.max(1, ms)); };
+    try {
+      const fetchImpl = async () => { await new Promise((r) => setTimeout(r, 5)); return { ok: false, status: 503 }; };
+      const { res } = await captureErrors(() => callCourtModel({ role: "critic", user: "x", timeoutMs: 40, env: { ZAI_API_KEY: "z", OPENAI_API_KEY: "o" }, fetchImpl }));
+      assert.equal(res.reason, "ALL_PROVIDERS_FAILED");
+      assert.equal(delays.length, 2);
+      assert.ok(delays[0] <= 40, "the first attempt gets at most the whole budget");
+      assert.ok(delays[1] < 40, "the second attempt gets only what is left of the shared deadline");
+    } finally { AbortSignal.timeout = realTimeout; }
+  });
 });
 
 describe("court advocate", () => {
