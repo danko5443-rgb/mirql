@@ -26,7 +26,7 @@ function mockFetch(...replies) {
 }
 
 /** A real working copy with fake GitHub calls. `gh` and `git push` are recorded and never leave the machine. */
-async function build({ issue = ISSUE, replies = [BUILD], refs = [], env = {}, failPr = false, failPush = false, files = {}, untracked = {} } = {}) {
+async function build({ issue = ISSUE, replies = [BUILD], refs = [], env = {}, failPr = false, failPush = false, failLock = false, ghOut = "https://github.com/o/r/pull/42", files = {}, untracked = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "mirql-builder-"));
   try {
     const git = (...args) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: GIT_ENV, stdio: ["ignore", "pipe", "pipe"] });
@@ -47,9 +47,10 @@ async function build({ issue = ISSUE, replies = [BUILD], refs = [], env = {}, fa
     const io = {
       run(cmd, args, options = {}) {
         if (cmd === "gh") {
-          seen.gh.push({ args, token: options.env?.GH_TOKEN });
+          seen.gh.push({ args, token: options.env?.GH_TOKEN, input: options.input });
           if (failPr && args[1] === "create") throw new Error("Resource not accessible by personal access token");
-          return "";
+          if (failLock && args[1]?.includes("/lock")) throw new Error("Lock denied");
+          return ghOut;
         }
         if (args.includes("push")) {
           if (failPush) throw new Error("denied for court-token");
@@ -81,6 +82,37 @@ describe("issue builder", () => {
     assert.ok(create.args.includes("mirql/issue-7"));
     assert.match(create.args[create.args.indexOf("--body") + 1], /^Closes #7\n/);
     assert.equal(r.posts.length, 0);
+  });
+
+  it("locks the new PR's conversation as its last act, so public users cannot bury Court receipts in spam", async () => {
+    const r = await build();
+    const lock = r.gh.find((c) => c.args[1] === "repos/o/r/issues/42/lock");
+    assert.deepEqual(lock.args, ["api", "repos/o/r/issues/42/lock", "--method", "PUT", "--input", "-"]);
+    assert.equal(lock.token, "court-token");
+    assert.equal(lock.input, JSON.stringify({ lock_reason: "resolved" }));
+    assert.equal(r.gh.indexOf(lock), r.gh.length - 1);
+  });
+
+  it("keeps the opened PR and exits green when the lock is refused, and warns in the log", async () => {
+    const lines = [];
+    const write = console.log;
+    console.log = (line) => lines.push(String(line));
+    try {
+      const r = await build({ failLock: true });
+      assert.equal(r.code, 0);
+      assert.equal(r.posts.length, 0);
+      assert.ok(r.gh.some((c) => c.args[1] === "repos/o/r/issues/42/lock"));
+    } finally {
+      console.log = write;
+    }
+    assert.ok(lines.some((line) => line.includes("not locked")));
+  });
+
+  it("opens the PR without a lock when the create output carries no PR number", async () => {
+    const r = await build({ ghOut: "" });
+    assert.equal(r.code, 0);
+    assert.equal(r.pushes.length, 1);
+    assert.ok(r.gh.every((c) => c.args[1] !== "repos/o/r/issues/42/lock"));
   });
 
   it("sends the issue fenced, with files the issue names, and reads more on request", async () => {
