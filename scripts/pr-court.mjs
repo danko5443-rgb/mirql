@@ -240,6 +240,8 @@ function decideCourtStep(state, { externalFindings = [], externalReviewed = fals
   if (locked) return "recuse";
   const unanswered = externalFindings.filter((f) => !state.answered.includes(f.id));
   if (state.openFindings.length + unanswered.length > 0) return state.advocateRounds >= MAX_ROUNDS ? "escalate" : "advocate";
+  // Fast path: a clean Critic with no pinned-bot finding at this head closes the review, so the Advocate and Judge rounds are skipped.
+  if (state.criticApproved && externalFindings.length === 0) return "merge";
   return "judge";
 }
 
@@ -435,7 +437,13 @@ const COURT_STEPS = {
     post({ round: judgeRound, role: "judge", verdict: res.verdict, count: res.unresolved.length, payload: { findings: res.unresolved, rulings: res.rulings }, text: res.rationale });
     return res.verdict === "MERGE" || res.verdict === "REMAND" ? null : 0;
   },
-  async merge({ ctx, state, env, io, repo, prNumber, comments }) {
+  async merge({ ctx, state, env, io, repo, prNumber, comments, post, judgeRound }) {
+    // Fast path: the Critic closed the review with nothing open, so the tool writes the MERGE receipt itself.
+    if (state.judgeVerdict !== "MERGE") {
+      const notary = notaryRun(io, repo, ctx.headSha);
+      if (notary?.head !== "success" || notary?.base !== "success") return 0;
+      post({ round: judgeRound, role: "judge", verdict: "MERGE", payload: { fast_path: true }, text: "Fast path: the Critic reported zero open findings at this head, so the Court merges without Advocate or Judge rounds; the notary verdicts still gate the landing." });
+    }
     const landing = await landCourtMerge({ repo, prNumber, headSha: ctx.headSha, mergedAt: state.judgeAt, env, io });
     log(`landing: ${landing}`);
     postLandingNotice(io, repo, prNumber, comments, { code: landing, headSha: ctx.headSha });

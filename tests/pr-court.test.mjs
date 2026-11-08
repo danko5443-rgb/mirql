@@ -910,8 +910,8 @@ describe("court state machine", () => {
     assert.equal(decideCourtStep(state(commented, rebut, receipt({ role: "judge", verdict: "ESCALATE" }))), "stop");
   });
 
-  it("a clean Critic goes straight to the Judge", () => {
-    assert.equal(decideCourtStep(state(receipt({ role: "critic", verdict: "APPROVE" }))), "judge");
+  it("a clean Critic merges on the fast path", () => {
+    assert.equal(decideCourtStep(state(receipt({ role: "critic", verdict: "APPROVE" }))), "merge");
   });
 
   it("a REMAND reopens its unresolved findings", () => {
@@ -1382,7 +1382,7 @@ describe("court tick end to end", () => {
   it("counts the tokens each role spends and writes them to the run summary", async () => {
     await withDir(async (dir) => {
       const box = sandbox(dir);
-      box.jobs.head = null; // the judge waits for suite evidence, so exactly one model call runs
+      box.jobs.head = null; // the landing waits for suite evidence, so exactly one model call runs
       const approve = { verdict: "APPROVE", summary: "clean", findings: [] };
       const fetchImpl = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(approve) } }], usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 } }) });
       const summary = join(dir, "step-summary.md");
@@ -1397,7 +1397,7 @@ describe("court tick end to end", () => {
     });
   });
 
-  it("the judge waits for suite evidence, and a red head posts nothing so a green re-run comes back", async () => {
+  it("the court waits for suite evidence, and a red head posts nothing so a green re-run comes back", async () => {
     await withDir(async (dir) => {
       const box = sandbox(dir);
       box.jobs.head = null;
