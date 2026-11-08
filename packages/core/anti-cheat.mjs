@@ -656,19 +656,16 @@ export function checkSwallowedExceptions(sourceCode, filename, { changedLines } 
 
 /**
  * Scans source code for test weakenings (MP-002):
- * - `.skip`: `it.skip`, `test.skip`, `describe.skip`
- * - `.only`: `it.only`, `test.only`, `describe.only`
- * - `.todo`: `it.todo`, `test.todo`
- * - `{skip:true}` / `{skip: 1}`
- * - `t.skip()`
- * - `describe['skip']`, `it['skip']`, `test['skip']`
- * - `xit`, `xtest`, `xdescribe`
+ * - skip / only / todo method calls on runner objects (it, test, describe, suite)
+ * - x-prefixed runner variants (e.g. disabled test blocks)
+ * - bracket property access forms for skip / only / todo
+ * - skip option objects ({ skip: ... }) and test-context skip invocations
  *
- * Weakening-shaped text inside comments and string/template literals never
- * executes, so it is ignored: a fixture that quotes `it.skip(...)` to prove the
- * gate catches it is not itself a weakening. Under a changed-line scope only
- * lines the candidate touched count, so a pre-existing `t.skip(...)` on an
- * untouched line cannot lock a PR out; without a scope every live match counts.
+ * Weakening patterns inside comments and string/template literals never
+ * execute, so they are ignored (e.g. test fixtures asserting that a gate
+ * catches an intentional skip). Under a changed-line scope only lines the
+ * candidate touched count, so an untouched pre-existing skip on an untouched
+ * line cannot lock a PR out; without a scope every live match counts.
  *
  * @param {string} sourceCode
  * @param {string} [filename]
