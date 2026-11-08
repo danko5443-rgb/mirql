@@ -98,15 +98,16 @@ describe("courthouse lock: policy", () => {
     assert.equal(res.verdict, "reject");
   });
 
-  it("court logins never clear humanOnly, while an external reviewer still does", () => {
-    const doc = { pr: { number: 1, author: "agent/builder", kind: "feature" }, diff_stat: { files_changed: ["CONSTITUTION.md"] } };
-    for (const login of ["mirql-judge[bot]", "mirql-critic[bot]"]) {
+  it("court logins and external reviewers never clear humanOnly; only owner sign-off does", () => {
+    const doc = { pr: { number: 1, author: "agent/builder", kind: "feature" }, diff_stat: { files_changed: ["CONSTITUTION.md"] }, phi: { delta_phi: 0 }, proof: { causal_cycle_completed: true } };
+    for (const login of ["mirql-judge[bot]", "mirql-critic[bot]", "coderabbitai[bot]"]) {
       const res = evaluatePullRequest(doc, { rootDir: ROOT, humanOnlyReviewer: login });
       assert.equal(res.rule, "MP-001", login);
       assert.equal(res.verdict, "reject", login);
     }
-    const external = evaluatePullRequest(doc, { rootDir: ROOT, humanOnlyReviewer: "coderabbitai[bot]" });
-    assert.notEqual(external.rule, "MP-001");
+    const signed = evaluatePullRequest(doc, { rootDir: ROOT, ownerSignoff: "ahmed-3m" });
+    assert.equal(signed.rule, "MP-001");
+    assert.equal(signed.verdict, "needs_human");
   });
 
   it("a humanApprove PR holds at MP-005 without a reviewer", () => {
@@ -909,8 +910,8 @@ describe("court state machine", () => {
     assert.equal(decideCourtStep(state(commented, rebut, receipt({ role: "judge", verdict: "ESCALATE" }))), "stop");
   });
 
-  it("a clean Critic goes straight to the Judge", () => {
-    assert.equal(decideCourtStep(state(receipt({ role: "critic", verdict: "APPROVE" }))), "judge");
+  it("a clean Critic merges on the fast path", () => {
+    assert.equal(decideCourtStep(state(receipt({ role: "critic", verdict: "APPROVE" }))), "merge");
   });
 
   it("a REMAND reopens its unresolved findings", () => {
@@ -1381,7 +1382,7 @@ describe("court tick end to end", () => {
   it("counts the tokens each role spends and writes them to the run summary", async () => {
     await withDir(async (dir) => {
       const box = sandbox(dir);
-      box.jobs.head = null; // the judge waits for suite evidence, so exactly one model call runs
+      box.jobs.head = null; // the landing waits for suite evidence, so exactly one model call runs
       const approve = { verdict: "APPROVE", summary: "clean", findings: [] };
       const fetchImpl = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(approve) } }], usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 } }) });
       const summary = join(dir, "step-summary.md");
@@ -1396,7 +1397,7 @@ describe("court tick end to end", () => {
     });
   });
 
-  it("the judge waits for suite evidence, and a red head posts nothing so a green re-run comes back", async () => {
+  it("the court waits for suite evidence, and a red head posts nothing so a green re-run comes back", async () => {
     await withDir(async (dir) => {
       const box = sandbox(dir);
       box.jobs.head = null;
