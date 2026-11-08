@@ -112,7 +112,7 @@ describe("issue builder", () => {
     const r = await build({ ghOut: "" });
     assert.equal(r.code, 0);
     assert.equal(r.pushes.length, 1);
-    assert.ok(r.gh.every((c) => c.args[1] !== "repos/o/r/issues/42/lock"));
+    assert.ok(r.gh.every((c) => !String(c.args[1] ?? "").endsWith("/lock")));
   });
 
   it("sends the issue fenced, with files the issue names, and reads more on request", async () => {
