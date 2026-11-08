@@ -384,6 +384,76 @@ describe("court critic", () => {
     assert.equal(res.reason, "NO_API_KEY");
     assert.equal(calls.length, 0);
   });
+
+  it("fails over to the next keyed provider on a hard error and sums the reported usage", async () => {
+    const good = { raw: { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ verdict: "APPROVE", summary: "s", findings: [] }) } }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }) } };
+    const mock = mockFetch({ raw: { ok: false, status: 429 } }, good);
+    const { res, logged } = await captureErrors(() => callCourtModel({ role: "critic", user: "x", env: { ZAI_API_KEY: "z", ANTHROPIC_API_KEY: "", OPENAI_API_KEY: "o" }, fetchImpl: mock.fetchImpl }));
+    assert.deepEqual(res, { ok: true, data: { verdict: "APPROVE", summary: "s", findings: [] }, usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } });
+    assert.deepEqual(mock.calls.map((c) => c.url), ["https://open.bigmodel.cn/api/paas/v4/chat/completions", "https://api.openai.com/v1/chat/completions"], "the keyless anthropic entry is skipped");
+    assert.match(logged, /CRITIC zai\/glm-5\.3 LLM_HTTP_ERROR: status=429/);
+  });
+
+  it("carries a timed-out attempt's reported usage into the next provider's reply", async () => {
+    const abort = new Error("aborted");
+    abort.name = "TimeoutError";
+    const stalled = {
+      raw: {
+        ok: true,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        body: (async function* () {
+          yield new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: {} }], usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 } })}\n\n`);
+          throw abort;
+        })(),
+      },
+    };
+    const good = { raw: { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ verdict: "APPROVE", summary: "s", findings: [] }) } }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }) } };
+    const { res, logged } = await captureErrors(() => callCourtModel({ role: "critic", user: "x", env: { ZAI_API_KEY: "z", OPENAI_API_KEY: "o" }, fetchImpl: mockFetch(stalled, good).fetchImpl }));
+    assert.equal(res.ok, true);
+    assert.equal(res.data.verdict, "APPROVE");
+    assert.deepEqual(res.usage, { prompt_tokens: 17, completion_tokens: 8, total_tokens: 25 });
+    assert.match(logged, /CRITIC zai\/glm-5\.3 LLM_TIMEOUT: TimeoutError finish=undefined content_chars=0 reasoning_chars=0 completion_tokens=3/);
+  });
+
+  it("fails closed with ALL_PROVIDERS_FAILED once every keyed provider hard-failed", async () => {
+    const { res, logged } = await captureErrors(() => callCourtModel({ role: "critic", user: "x", env: { ZAI_API_KEY: "z", OPENAI_API_KEY: "o" }, fetchImpl: mockFetch({ raw: { ok: false, status: 429 } }, { raw: { ok: false, status: 503 } }).fetchImpl }));
+    assert.deepEqual(res, { ok: false, reason: "ALL_PROVIDERS_FAILED" });
+    assert.match(logged, /zai\/glm-5\.3 LLM_HTTP_ERROR: status=429/);
+    assert.match(logged, /openai\/gpt-4o-mini LLM_HTTP_ERROR: status=503/);
+  });
+
+  it("an explicit provider pin is one provider: no fail-over on a hard failure", async () => {
+    const mock = mockFetch({ raw: { ok: false, status: 500 } });
+    const { res } = await captureErrors(() => callCourtModel({ role: "critic", user: "x", env: { ZAI_API_KEY: "z", OPENAI_API_KEY: "o", MIRQL_CRITIC_PROVIDER: "zai" }, fetchImpl: mock.fetchImpl }));
+    assert.deepEqual(res, { ok: false, reason: "LLM_HTTP_ERROR" });
+    assert.equal(mock.calls.length, 1);
+    assert.deepEqual(await callCourtModel({ role: "critic", user: "x", env: { ZAI_API_KEY: "z", MIRQL_CRITIC_PROVIDER: "openai" }, fetchImpl: mockFetch().fetchImpl }), { ok: false, reason: "NO_API_KEY" });
+  });
+
+  it("softer failures fail closed at once, without spending the next provider", async () => {
+    const bad = mockFetch({ raw: { ok: false, status: 400 } });
+    const http = await captureErrors(() => callCourtModel({ role: "critic", user: "x", env: { ZAI_API_KEY: "z", OPENAI_API_KEY: "o" }, fetchImpl: bad.fetchImpl }));
+    assert.deepEqual(http.res, { ok: false, reason: "LLM_HTTP_ERROR" });
+    assert.equal(bad.calls.length, 1);
+    const junk = mockFetch("not json");
+    const parse = await captureErrors(() => callCourtModel({ role: "critic", user: "x", env: { ZAI_API_KEY: "z", OPENAI_API_KEY: "o" }, fetchImpl: junk.fetchImpl }));
+    assert.deepEqual(parse.res, { ok: false, reason: "LLM_PARSE_ERROR" });
+    assert.equal(junk.calls.length, 1);
+  });
+
+  it("the fail-over pass shares one timeout budget instead of minting one per provider", async () => {
+    const realTimeout = AbortSignal.timeout;
+    const delays = [];
+    AbortSignal.timeout = (ms) => { delays.push(ms); return realTimeout(Math.max(1, ms)); };
+    try {
+      const fetchImpl = async () => { await new Promise((r) => setTimeout(r, 5)); return { ok: false, status: 503 }; };
+      const { res } = await captureErrors(() => callCourtModel({ role: "critic", user: "x", timeoutMs: 40, env: { ZAI_API_KEY: "z", OPENAI_API_KEY: "o" }, fetchImpl }));
+      assert.equal(res.reason, "ALL_PROVIDERS_FAILED");
+      assert.equal(delays.length, 2);
+      assert.ok(delays[0] <= 40, "the first attempt gets at most the whole budget");
+      assert.ok(delays[1] < 40, "the second attempt gets only what is left of the shared deadline");
+    } finally { AbortSignal.timeout = realTimeout; }
+  });
 });
 
 describe("court advocate", () => {
