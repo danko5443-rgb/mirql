@@ -117,15 +117,16 @@ describe("owner sign-off: evaluator cap", () => {
   });
 
   it("clears MP-001 to needs_human, never auto_merge", () => {
-    const res = evaluatePullRequest(doc(), { rootDir: ROOT, humanOnlyReviewer: "ahmed-3m" });
+    const res = evaluatePullRequest(doc(), { rootDir: ROOT, ownerSignoff: "ahmed-3m" });
     assert.equal(res.verdict, "needs_human");
     assert.equal(res.human_only_reviewer, "ahmed-3m");
+    assert.equal(res.owner_signoff, "ahmed-3m");
   });
 
   it("does not stop the other rules from rejecting", () => {
     const res = evaluatePullRequest(
       doc({ evidence: { forbidden_paths_touched: [], tests_deleted: ["tests/feature.test.mjs"] } }),
-      { rootDir: ROOT, humanOnlyReviewer: "ahmed-3m" },
+      { rootDir: ROOT, ownerSignoff: "ahmed-3m" },
     );
     assert.equal(res.verdict, "reject");
     assert.equal(res.violation, "TEST_DELETED");
@@ -134,7 +135,7 @@ describe("owner sign-off: evaluator cap", () => {
   it("does not clear a change to reviewer config or agent instructions", () => {
     const res = evaluatePullRequest(
       doc({ diff_stat: { files_changed: ["AGENTS.md"] } }),
-      { rootDir: ROOT, humanOnlyReviewer: "ahmed-3m" },
+      { rootDir: ROOT, ownerSignoff: "ahmed-3m" },
     );
     assert.equal(res.verdict, "reject");
     assert.equal(res.violation, "TOUCH_HUMAN_ONLY");

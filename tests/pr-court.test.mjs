@@ -98,15 +98,16 @@ describe("courthouse lock: policy", () => {
     assert.equal(res.verdict, "reject");
   });
 
-  it("court logins never clear humanOnly, while an external reviewer still does", () => {
-    const doc = { pr: { number: 1, author: "agent/builder", kind: "feature" }, diff_stat: { files_changed: ["CONSTITUTION.md"] } };
-    for (const login of ["mirql-judge[bot]", "mirql-critic[bot]"]) {
+  it("court logins and external reviewers never clear humanOnly; only owner sign-off does", () => {
+    const doc = { pr: { number: 1, author: "agent/builder", kind: "feature" }, diff_stat: { files_changed: ["CONSTITUTION.md"] }, phi: { delta_phi: 0 }, proof: { causal_cycle_completed: true } };
+    for (const login of ["mirql-judge[bot]", "mirql-critic[bot]", "coderabbitai[bot]"]) {
       const res = evaluatePullRequest(doc, { rootDir: ROOT, humanOnlyReviewer: login });
       assert.equal(res.rule, "MP-001", login);
       assert.equal(res.verdict, "reject", login);
     }
-    const external = evaluatePullRequest(doc, { rootDir: ROOT, humanOnlyReviewer: "coderabbitai[bot]" });
-    assert.notEqual(external.rule, "MP-001");
+    const signed = evaluatePullRequest(doc, { rootDir: ROOT, ownerSignoff: "ahmed-3m" });
+    assert.equal(signed.rule, "MP-001");
+    assert.equal(signed.verdict, "needs_human");
   });
 
   it("a humanApprove PR holds at MP-005 without a reviewer", () => {

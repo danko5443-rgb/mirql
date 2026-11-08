@@ -305,13 +305,14 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
   // config, so its approval cannot clear MP-001; a human must merge it.
   const touchesReviewerConfig = filesChanged.some(isReviewerConfigPath);
   const humanOnlyReviewer = touchesReviewerConfig ? null : validReviewerLogin(options.humanOnlyReviewer);
-  // Only the repo owner's sign-off can let Phi growth continue (Law 13); an AI
-  // approval arrives as humanOnlyReviewer alone and never has this effect.
+  // Only the repo owner's sign-off can clear MP-001 (humanOnly) or let Phi
+  // growth continue (Law 13); an AI approval arrives as humanOnlyReviewer alone
+  // and never has this effect on the Courthouse Lock.
   const ownerSignoff = touchesReviewerConfig ? null : validReviewerLogin(options.ownerSignoff);
   if (forbidden.length > 0) {
     checks.human_only = false;
   }
-  if (forbidden.length > 0 && (!humanOnlyReviewer || COURT_REVIEWERS.includes(humanOnlyReviewer))) {
+  if (forbidden.length > 0 && (!ownerSignoff || COURT_REVIEWERS.includes(ownerSignoff))) {
     return fail(
       "MP-001",
       "TOUCH_HUMAN_ONLY",
@@ -544,8 +545,9 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     checks.phi = true;
   }
 
-  const reviewerRecord = humanOnlyReviewer && (forbidden.length > 0 || touchesHumanApprove)
-    ? { human_only_reviewer: humanOnlyReviewer }
+  const effectiveReviewer = humanOnlyReviewer ?? ownerSignoff;
+  const reviewerRecord = effectiveReviewer && (forbidden.length > 0 || touchesHumanApprove)
+    ? { human_only_reviewer: effectiveReviewer }
     : {};
   const surfaceHold = () => fail(
     "MP-005",
@@ -557,7 +559,7 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
     { checks, uncited_commands: uncitedCommands, human_approve_paths: approvePaths, delta_phi: deltaPhi, ...reviewerRecord },
   );
   // A reviewer only clears the hold: the proof rules below still run.
-  if (!checks.surface && !humanOnlyReviewer) return surfaceHold();
+  if (!checks.surface && !effectiveReviewer) return surfaceHold();
 
   // --- MP-000 ------------------------------------------------------------------
   // Fail closed: a doc needs causal_cycle_completed === true or a proven suite
@@ -610,8 +612,13 @@ export function evaluatePullRequest(prDoc = {}, options = {}) {
       "MP-001",
       "TOUCH_HUMAN_ONLY",
       "needs_human",
-      `humanOnly path(s) [${forbidden.join(", ")}] approved by ${humanOnlyReviewer}; all other rules passed; merge is manual, never auto_merge.`,
-      { checks, forbidden_paths: forbidden, human_only_reviewer: humanOnlyReviewer },
+      `humanOnly path(s) [${forbidden.join(", ")}] signed off by owner (${ownerSignoff}); all other rules passed; merge is manual, never auto_merge.`,
+      {
+        checks,
+        forbidden_paths: forbidden,
+        owner_signoff: ownerSignoff,
+        human_only_reviewer: humanOnlyReviewer ?? ownerSignoff,
+      },
     );
   }
   if (!checks.surface) return surfaceHold();
