@@ -1,11 +1,14 @@
 # Path Access Matrix for mirql
 # humanOnly (the Courthouse Lock): the laws, the gate wiring and the Judge's own instructions. Any PR modifying these
-#   is rejected (MP-001), unless the owner signed off or an external aiReviewers bot approved the exact head commit;
-#   then every other rule still runs and the best verdict is needs_human (never auto_merge). A PR Court receipt
+#   is rejected (MP-001), and only the repository owner's sign-off clears it — an external aiReviewers bot approval
+#   leaves it reject (TOUCH_HUMAN_ONLY). With an owner sign-off every other rule still runs and the best verdict is
+#   needs_human (never auto_merge). A PR Court receipt
 #   (mirql-judge[bot], mirql-critic[bot]) never clears this list.
 # humanApprove: Core files that require a reviewer before merging (MP-005). With a reviewer every other rule still
 #   runs, Law 13 included, and the best verdict is needs_human.
-# aiReviewers: GitHub logins whose Approve review on the PR head commit clears MP-001 in CI. Only the BASE
+# aiReviewers: GitHub logins whose Approve review on the PR head commit satisfies the reviewer requirement for
+#   humanApprove paths (MP-005) in CI and supplies external findings to the PR Court; it does not clear MP-001
+#   (humanOnly) — only the owner's sign-off does. Only the BASE
 #   branch's copy of this list is read, so a PR cannot add its own reviewer. The two mirql-* entries are PR Court
 #   receipts (docs/pr-court.md), not accounts. Never cleared by AI approval:
 #   reviewer config and agent instruction files (.coderabbit.yaml, AGENTS.md, CLAUDE.md, roles/judge.md, ...; see
