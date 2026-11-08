@@ -28,6 +28,8 @@ const TRUSTED_AUTHORS = ["OWNER", "MEMBER", "COLLABORATOR"];
 const NOTARY_JOBS = { head: "Candidate Tests (advisory)", base: "Base Suite (evidence)", gate: "Mergeproof Conscience Gate" };
 // A PR touching roles/judge.md can never clear the gate, so this rule lives with the check it describes.
 const JUDGE_PHI_WARRANT_RULE = "## Phi warrant\n\nFor this run the Phi precondition above reads `delta_phi <= phiAllowance`. The repo owner signed a Phi warrant, and the tool verified it and checked that this growth fits what is left of it (Law 13). Growth inside it is authorized and is not a constitutional hazard by itself.";
+// After a base refresh the docket can be empty and the transcript still shows round-1 rulings; without this rule the Judge echoes them and every retry fails validation (issue #156).
+const JUDGE_FINDINGS_RULE = "## Findings docket\n\nRule on exactly the finding ids in the fenced `findings` array, and on no others: that array is this round's complete docket. It can be EMPTY after a base refresh, because every earlier finding already carries a ruling; then return `rulings: []`. Do not re-confirm historical rulings shown in the transcript: the transcript is context, never the docket.";
 const allowanceOf = (value) => (Number.isSafeInteger(value) && value > 0 ? value : 0);
 const clip = (value, max) => String(value ?? "").slice(0, max);
 const log = (message) => console.log(`pr-court: ${message}`);
@@ -223,7 +225,7 @@ async function runJudgeArbitration({ repoDir, diffText = "", files = [], intent 
   if (locked.length > 0) return refuse(`COURTHOUSE_LOCK: ${locked.slice(0, 10).join(", ")}`);
   if (evidence.suitePassBase !== true || evidence.suitePassHead !== true) return refuse("SUITE_NOT_GREEN", "WAIT");
   if (!Number.isSafeInteger(evidence.deltaPhi) || evidence.deltaPhi > allowanceOf(evidence.phiAllowance)) return refuse(`DELTA_PHI: ${evidence.deltaPhi} (Phi allowance: ${allowanceOf(evidence.phiAllowance)}; warrant: ${evidence.phiWarrant ?? "unmeasured"})`);
-  const system = evidence.deltaPhi > 0 ? `${rolePrompt}\n\n${JUDGE_PHI_WARRANT_RULE}` : rolePrompt;
+  const system = [rolePrompt, evidence.deltaPhi > 0 ? JUDGE_PHI_WARRANT_RULE : null, JUDGE_FINDINGS_RULE].filter(Boolean).join("\n\n");
   const res = await callCourtModel({ role: "judge", system, user: fenceData({ head_sha: headSha, round, evidence, findings, transcript, ...intent(), diff: diffText, ...readContext(repoDir, files, diffText) }), env, fetchImpl });
   if (!res.ok) return res;
   const ruling = validateJudge(res.data, findings);
