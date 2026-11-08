@@ -1,9 +1,12 @@
 // MP-003 ratchet: the repo-wide swallowed-exception count only goes down.
 //
-// Phase 6.4's repo-wide sweep is not finished, so the CI gate cannot run this
-// scan on PRs yet (ci-evidence.mjs supplies no sourceCode). Until then this
-// test is the fence: adding an unmarked empty catch anywhere in production
-// code fails here, and every fixed violation lowers the ceiling for good.
+// Two fences protect this invariant, deliberately different: the per-PR
+// diff-gate scan (ci-evidence.mjs ships the HEAD content of changed .mjs
+// files, and the evaluator exempts a `mp-003-allow` marker on catches
+// unchanged from base) and THIS repo-wide exact-pin, which counts marked
+// sites too — a silence budget that only real removal lowers. Adding an
+// unmarked empty catch anywhere in production code fails here, and every
+// genuinely handled violation lowers the ceiling for good.
 // Lower the number when you fix violations; never raise it.
 import { test } from "node:test";
 import assert from "node:assert/strict";
